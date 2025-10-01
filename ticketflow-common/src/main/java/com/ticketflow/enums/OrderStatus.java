@@ -1,0 +1,59 @@
+package com.ticketflow.enums;
+
+/**
+ * 订单状态枚举。定义订单从创建到完成的完整生命周期状态。
+ * 取值: NO_PAY(未支付) → CANCEL(已取消) / PAY(已支付) → REFUND(已退单)
+ */
+public enum OrderStatus {
+    /**
+     * 订单状态
+     * */
+    NO_PAY(1,"未支付"),
+    CANCEL(2,"已取消"),
+    PAY(3,"已支付"),
+    REFUND(4,"已退单"),
+    ;
+
+    private Integer code;
+
+    private String msg;
+
+    OrderStatus(Integer code, String msg) {
+        this.code = code;
+        this.msg = msg;
+    }
+
+    public Integer getCode() {
+        return code;
+    }
+
+    public void setCode(Integer code) {
+        this.code = code;
+    }
+
+    public String getMsg() {
+        return this.msg == null ? "" : this.msg;
+    }
+
+    public void setMsg(String msg) {
+        this.msg = msg;
+    }
+
+    public static String getMsg(Integer code) {
+        for (OrderStatus re : OrderStatus.values()) {
+            if (re.code.intValue() == code.intValue()) {
+                return re.msg;
+            }
+        }
+        return "";
+    }
+
+    public static OrderStatus getRc(Integer code) {
+        for (OrderStatus re : OrderStatus.values()) {
+            if (re.code.intValue() == code.intValue()) {
+                return re;
+            }
+        }
+        return null;
+    }
+}
