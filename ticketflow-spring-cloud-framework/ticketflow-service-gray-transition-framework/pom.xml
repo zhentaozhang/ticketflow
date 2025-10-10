@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.ticketflow</groupId>
+        <artifactId>ticketflow-spring-cloud-framework</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <artifactId>ticketflow-service-gray-transition-framework</artifactId>
+    <name>ticketflow-service-gray-transition-framework</name>
+    <description>灰度服务组件框架</description>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>ticketflow-service-gray-transition-base-framework</module>
+        <module>ticketflow-service-gray-transition-gateway-framework</module>
+        <module>ticketflow-service-gray-transition-webmvc-framework</module>
+    </modules>
+</project>
