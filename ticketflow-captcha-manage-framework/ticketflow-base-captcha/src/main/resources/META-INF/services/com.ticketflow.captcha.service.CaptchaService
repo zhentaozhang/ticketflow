@@ -1,0 +1,3 @@
+com.ticketflow.captcha.service.impl.BlockPuzzleCaptchaServiceImpl
+com.ticketflow.captcha.service.impl.ClickWordCaptchaServiceImpl
+com.ticketflow.captcha.service.impl.DefaultCaptchaServiceImpl
