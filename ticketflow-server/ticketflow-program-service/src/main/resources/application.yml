@@ -1,0 +1,194 @@
+#服务端口
+server:
+  port: 6086
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+  # Tomcat线程池配置优化 - 针对高吞吐场景
+  tomcat:
+    threads:
+      max: 200                    # 800→200 减少线程上下文切换
+      min-spare: 50               # 100→50
+    max-connections: 2000         # 12000→2000 单机不需要太多
+    accept-count: 100             # 500→100 快速拒绝避免排队超时
+    connection-timeout: 20000     # 连接超时时间(缩短至20秒)
+    max-http-header-size: 8192    # HTTP头最大大小
+    # 额外的高并发优化配置
+    max-swallow-size: -1          # 禁用请求体大小限制
+    max-http-form-post-size: -1   # 禁用POST表单大小限制
+# 应用名称
+spring:
+  profiles:
+    active: local
+  application:
+    name: ${prefix.distinction.name:ticketflow}-program-service
+  main:
+    allow-bean-definition-overriding: true
+    allow-circular-references: true
+  # 高并发优化配置
+  task:
+    execution:
+      pool:
+        core-size: 50               # 异步任务核心线程数
+        max-size: 200               # 异步任务最大线程数
+        queue-capacity: 1000        # 异步任务队列容量
+        keep-alive: 60s             # 线程空闲时间
+    scheduling:
+      pool:
+        size: 20                    # 定时任务线程池大小
+  mvc:
+    pathmatch:
+      matching-strategy: ant_path_matcher
+    servlet:
+      load-on-startup: 1
+    jackson:
+      time-zone: GMT+8
+      date-format: yyyy-MM-dd HH:mm:ss
+      generator:
+        WRITE_NUMBERS_AS_STRINGS: true
+  datasource:
+    driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
+    url: jdbc:shardingsphere:classpath:shardingsphere-program-${spring.profiles.active}.yaml
+  data:  
+    redis:
+      database: 0
+      host: 127.0.0.1
+      port: 6379
+      timeout: 5000                     # 连接超时时间(5秒)
+      jedis:
+        pool:
+          max-active: 500               # 最大活跃连接数
+          max-idle: 100                 # 最大空闲连接数
+          min-idle: 20                  # 最小空闲连接数
+          max-wait: 3000                # 最大等待时间(3秒)
+      stream:
+        streamName: invalid_program
+        consumerType: broadcast
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 127.0.0.1:8848
+        ip: 127.0.0.1
+      eager: true
+  kafka:
+    bootstrap-servers: 127.0.0.1:9092
+    producer:
+      retries: 3
+      batch-size: 32768
+      linger-ms: 5
+      compression-type: snappy
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    topic: create_order
+
+bloom-filter:
+  name: program-detail-bloom-filter
+  expectedInsertions: 1000
+  falseProbability: 0.01
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  global-config:
+    db-config:
+      logic-delete-field: status
+      logic-delete-value: 0
+      logic-not-delete-value: 1
+#  configuration:
+#    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+#    local-cache-scope: statement
+feign:
+  sentinel:
+    enabled: false
+  hystrix:
+    enabled: true
+  httpclient:
+    enabled: false
+  okhttp:
+    enabled: true
+  compression:
+    request:
+      enabled: true
+      mime-types: text/xml,application/xml,application/json
+      min-request-size: 512
+    response:
+      enabled: true
+management:
+  metrics:
+    tags:
+      application: program-service
+  endpoint:
+    health:
+      show-details: always
+  endpoints:
+    web:
+      exposure:
+        include: '*'
+  health:
+    elasticsearch:
+      enabled: false
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+jasypt:
+  encryptor:
+    password: ${JASYPT_ENCRYPTOR_PASSWORD}
+    algorithm: PBEWithMD5AndDES
+elasticsearch:
+  ip: 127.0.0.1:9200
+  userName: ${ES_USERNAME}
+  passWord: ${ES_PASSWORD}
+delay:
+  queue:
+    corePoolSize: 8                     # 核心线程数(提升并发处理能力)
+    maximumPoolSize: 16                 # 最大线程数
+    isolationRegionCount: 8             # 隔离区域数量(提升并发)
+  # 执行延迟订单取消开关  
+  order:
+    cancel: true
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+  group-configs:
+    - group: 'default'
+      paths-to-match: '/**'
+      #生成文档所需的扫包路径，一般为启动类目录
+      packages-to-scan: com.ticketflow.controller
+#knife4j配置
+knife4j:
+  #是否启用增强设置
+  enable: true
+  #开启生产环境屏蔽
+  production: ${KNIFE4J_PRODUCTION:-false}
+  #是否启用登录认证
+  basic:
+    enable: false
+  setting:
+    language: zh_cn
+    enable-version: true
+    enable-swagger-models: true
+    
+#seata:
+#  enabled: true                                 # 启动事务中间件
+#  application-id: program-service
+#  data-source-proxy-mode: AT                    # 事务模式，默认AT
+#  enable-auto-data-source-proxy: true           # 开启数据源自动代理
+#  transport:
+#    enable-client-batch-send-request: true      # 客户端事务消息请求是否批量合并发送，默认true，false单条发送
+#    enable-rm-client-batch-send-request: true   # RM(资源管理器)客户端会将多个分支事务的请求批量发送给 TC（Transaction Coordinator，事务协调器），提高事务处理效率
+#  tx-service-group: program-service # 事务组名称(可自定义)
+#  service:
+#    disable-global-transaction: false
+#    enable-degrade: false
+#    # 事务组映射到组列表处理
+#    vgroup-mapping:
+#      # 事务组名称作为映射k
+#      program-service: program-service-map
+#    grouplist:
+#      # 映射值作为组k，交给seata服务处理
+#      program-service-map: 127.0.0.1:8091

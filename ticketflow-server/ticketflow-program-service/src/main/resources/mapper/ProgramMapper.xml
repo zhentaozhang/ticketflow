@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one or more
+  ~ contributor license agreements.  See the NOTICE file distributed with
+  ~ this work for additional information regarding copyright ownership.
+  ~ The ASF licenses this file to You under the Apache License, Version 2.0
+  ~ (the "License"); you may not use this file except in compliance with
+  ~ the License.  You may obtain a copy of the License at
+  ~
+  ~     http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing, software
+  ~ distributed under the License is distributed on an "AS IS" BASIS,
+  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  ~ See the License for the specific language governing permissions and
+  ~ limitations under the License.
+  -->
+
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ticketflow.mapper.ProgramMapper">
+
+    <!--
+        主页每个分类取前 7 条节目（DB 兜底用）。
+        ES 挂了或没数据才走这里。
+
+        逻辑：
+        1. 循环 parentProgramCategoryIds（比如["演唱会","体育","展会"]）
+        2. 每个分类查 7 条，用 UNION ALL 拼成一个大结果
+
+        比如传了 3 个分类，最终 SQL 相当于：
+        (SELECT ... FROM d_program WHERE area_id=1 AND parent_category_id=演唱会 LIMIT 7)
+        UNION ALL
+        (SELECT ... FROM d_program WHERE area_id=1 AND parent_category_id=体育 LIMIT 7)
+        UNION ALL
+        (SELECT ... FROM d_program WHERE area_id=1 AND parent_category_id=展会 LIMIT 7)
+
+        areaId 逻辑：
+        - 有 areaId → 查该地区的节目
+        - 无 areaId → 查 prime=1（全国推荐）的节目
+    -->
+    <select id="selectHomeList" parameterType="com.ticketflow.dto.ProgramListDto" resultType="com.ticketflow.entity.Program">
+        <if test='programListDto.parentProgramCategoryIds != null and programListDto.parentProgramCategoryIds.size>0'>
+            <foreach collection='programListDto.parentProgramCategoryIds' item='parentProgramCategoryId' index='index'
+                     separator=' union all '>
+                select * from (
+                select
+                dp.id,dp.area_id,dp.program_category_id,dp.parent_program_category_id,dp.title,dp.actor,
+                dp.place,dp.item_picture
+                from
+                d_program dp
+                where
+                dp.program_status = 1
+                <if test='programListDto.areaId == null'>
+                    and dp.prime = 1
+                </if>
+                <if test='programListDto.areaId != null'>
+                    and dp.area_id = #{programListDto.areaId,jdbcType=BIGINT}
+                </if>
+                and
+                dp.parent_program_category_id = #{parentProgramCategoryId,jdbcType=BIGINT} limit 7
+                ) as tmp
+            </foreach>
+        </if>
+    </select>
+
+    <!--
+        分页查询节目列表（含演出时间）。
+
+        连表：d_program LEFT JOIN d_program_show_time
+        因为列表页要同时显示节目标题 + 演出时间。
+
+        动态条件（有就拼接，没有就不加，用 &lt;if&gt; 控制）：
+        - areaId != null → 按地区过滤
+        - areaId == null → 取 prime=1（全国推荐）
+        - programCategoryId != null → 按子分类过滤
+        - parentProgramCategoryId != null → 按父分类过滤
+        - startDateTime/endDateTime → 按日期范围过滤
+
+        排序（type 值由前端传）：
+        - type=2 → ORDER BY high_heat DESC（按热度）
+        - type=3 → ORDER BY show_time ASC（按开场时间，即将开始的在前）
+        - type=4 → ORDER BY issue_time ASC（按上架时间）
+
+        注意：
+        - status=1 是逻辑删除过滤（status=0 表示已删）
+        - program_status=1 是上下架过滤（program_status=0 表示已下架）
+        - MyBatis Plus 的分页插件会自动在外面套 COUNT 查询算总数
+    -->
+    <select id="selectPage" parameterType="com.ticketflow.dto.ProgramPageListDto"
+            resultType="com.ticketflow.entity.ProgramJoinShowTime">
+        select
+        dp.id,dp.area_id,dp.program_category_id,dp.parent_program_category_id,dp.title,dp.actor,
+        dp.place,dp.item_picture,ds.show_time,ds.show_week_time,ds.show_day_time
+        from
+        d_program dp left join d_program_show_time ds
+        on dp.id = ds.program_id
+        where
+        dp.status = 1 and ds.status = 1 and dp.program_status = 1
+        <if test='programPageListDto.areaId == null'>
+            and dp.prime = 1
+        </if>
+        <if test='programPageListDto.areaId != null'>
+            and dp.area_id = #{programPageListDto.areaId,jdbcType=BIGINT}
+        </if>
+        <if test='programPageListDto.programCategoryId != null'>
+            and dp.program_category_id = #{programPageListDto.programCategoryId,jdbcType=BIGINT}
+        </if>
+        <if test='programPageListDto.parentProgramCategoryId != null'>
+            and dp.parent_program_category_id = #{programPageListDto.parentProgramCategoryId,jdbcType=BIGINT}
+        </if>
+        <if test='programPageListDto.startDateTime != null'>
+            and ds.show_day_time &gt;= #{programPageListDto.startDateTime}
+        </if>
+        <if test='programPageListDto.endDateTime != null'>
+            and ds.show_day_time &lt;= #{programPageListDto.endDateTime}
+        </if>
+        <if test="programPageListDto.type == 2">
+            order by dp.high_heat desc
+        </if>
+        <if test="programPageListDto.type == 3">
+            order by ds.show_time asc
+        </if>
+        <if test="programPageListDto.type == 4">
+            order by dp.issue_time asc
+        </if>
+    </select>
+</mapper>
