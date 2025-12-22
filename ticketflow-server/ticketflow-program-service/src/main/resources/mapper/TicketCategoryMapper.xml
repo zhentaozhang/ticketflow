@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one or more
+  ~ contributor license agreements.  See the NOTICE file distributed with
+  ~ this work for additional information regarding copyright ownership.
+  ~ The ASF licenses this file to You under the Apache License, Version 2.0
+  ~ (the "License"); you may not use this file except in compliance with
+  ~ the License.  You may obtain a copy of the License at
+  ~
+  ~     http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing, software
+  ~ distributed under the License is distributed on an "AS IS" BASIS,
+  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  ~ See the License for the specific language governing permissions and
+  ~ limitations under the License.
+  -->
+
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ticketflow.mapper.TicketCategoryMapper">
+
+    <!--
+        统计多个节目的票档价格区间（最低价 ~ 最高价）。
+
+        用在节目列表页，每个节目卡片上显示价格范围，比如"￥280 - ￥1280"。
+
+        SQL：
+        SELECT program_id, MIN(price), MAX(price)
+        FROM d_ticket_category
+        WHERE program_id IN (?, ?, ?)
+        GROUP BY program_id
+    -->
+    <select id="selectAggregateList" resultType="com.ticketflow.entity.TicketCategoryAggregate">
+        select
+            program_id,min(price) as min_price,max(price) as max_price
+        from d_ticket_category
+        where program_id in
+        <foreach collection='programIdList' item='programId' index='index' open='(' close=')' separator=','>
+            #{programId,jdbcType=BIGINT}
+        </foreach>
+        group by program_id
+    </select>
+
+    <!--
+        扣减单个票档的剩余数量（下单核心操作，高并发下执行最频繁的 SQL）。
+
+        SQL：
+        UPDATE d_ticket_category
+        SET remain_number = remain_number - #{amount}
+        WHERE id = #{id}
+          AND program_id = #{programId}
+          AND remain_number >= #{amount}   ← 关键！
+
+        WHERE remain_number >= #{amount} 的含义（乐观锁）：
+        如果库存不够（remain_number 不够减），这条 SQL 的受影响行数 = 0，
+        调用方不用加锁，判断返回值就能知道库存不足。
+        这比"先 SELECT 查库存，够就 UPDATE"快得多，而且不会出现"查的时候够、改的时候不够"的问题。
+
+        <![CDATA[...]]> 是因为 XML 不能直接写 >= 符号，用 CDATA 包起来告诉解析器这是纯文本。
+    -->
+    <update id="reduceRemainNumber">
+        update
+            d_ticket_category
+        set remain_number = remain_number - #{amount,jdbcType=BIGINT}
+        where id = #{id,jdbcType=BIGINT}
+        and program_id = #{programId,jdbcType=BIGINT}
+        and <![CDATA[remain_number >= #{amount,jdbcType=BIGINT}]]>
+    </update>
+
+    <!--
+        归还票档的剩余数量（取消订单时调用）。
+
+        SQL：
+        UPDATE d_ticket_category
+        SET remain_number = remain_number + #{amount}
+        WHERE id = #{id}
+          AND program_id = #{programId}
+          AND remain_number + #{amount} <= total_number   ← 关键！
+
+        WHERE remain_number + #{amount} <= total_number 的含义（防止超还）：
+        归还后的库存不能超过总库存（total_number）。
+        如果因为重复取消导致这条 SQL 影响行数 = 0，说明有问题，调用方会抛异常。
+    -->
+    <update id="increaseRemainNumber">
+        update
+            d_ticket_category
+        set remain_number = remain_number + #{amount,jdbcType=BIGINT}
+        where id = #{id,jdbcType=BIGINT}
+          and program_id = #{programId,jdbcType=BIGINT}
+          and <![CDATA[remain_number + #{amount,jdbcType=BIGINT} <= total_number]]>
+    </update>
+
+    <!--
+        批量扣减多个票档的库存（V1-V3 版本订单使用，V4 已不再调用）。
+
+        直接用 UPDATE 更新，不改 seat 表的 sellStatus（没有 LOCK 中间态）。
+        循环每个票档执行一次 UPDATE。
+    -->
+    <update id="batchUpdateRemainNumber">
+        <foreach collection="ticketCategoryCountDtoList" item="ticketCategoryCountDto" index="index">
+            update
+                d_ticket_category
+            set remain_number = remain_number - #{ticketCategoryCountDto.count,jdbcType=BIGINT}
+            where id = #{ticketCategoryCountDto.ticketCategoryId,jdbcType=BIGINT}
+            and program_id = #{programId,jdbcType=BIGINT}
+        </foreach>
+    </update>
+</mapper>
