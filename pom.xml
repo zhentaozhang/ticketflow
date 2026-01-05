@@ -41,6 +41,7 @@
 		<module>ticketflow-id-generator-framework</module>
 		<module>ticketflow-captcha-manage-framework</module>
 		<module>ticketflow-server</module>
+		<module>ticketflow-server-client</module>
 	</modules>
 
 	<properties>

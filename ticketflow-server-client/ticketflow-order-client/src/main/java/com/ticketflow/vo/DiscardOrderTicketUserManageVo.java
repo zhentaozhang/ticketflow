@@ -1,0 +1,45 @@
+package com.ticketflow.vo;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+import lombok.Data;
+
+import java.math.BigDecimal;
+import java.util.Date;
+
+/**
+ * 购票人订单信息 vo
+ */
+@Data
+@Schema(title="DiscardOrderTicketUserManageVo", description ="废弃购票人订单信息")
+public class DiscardOrderTicketUserManageVo {
+
+    /**
+     * 主键id
+     */
+    @Schema(name ="id", type ="Long", description ="购票人订单id")
+    private Long id;
+    
+    @Schema(name ="orderId", type ="Long", description ="订单id")
+    private Long orderId;
+    
+    @Schema(name ="programId", type ="Long", description ="节目表id")
+    private Long programId;
+
+    @Schema(name ="userId", type ="Long", description ="用户id")
+    private Long userId;
+    
+    @Schema(name ="ticketUserId", type ="Long", description ="购票人id")
+    private Long ticketUserId;
+    
+    @Schema(name ="seatId", type ="Long", description ="座位id")
+    private Long seatId;
+    
+    @Schema(name ="seatInfo", type ="String", description ="座位信息")
+    private String seatInfo;
+    
+    @Schema(name ="orderPrice", type ="BigDecimal", description ="订单价格")
+    private BigDecimal orderPrice;
+    
+    @Schema(name ="createOrderTime", type ="Date", description ="生成订单时间")
+    private Date createOrderTime;
+}
