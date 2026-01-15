@@ -1,0 +1,124 @@
+#服务端口
+server:
+  port: 6088
+  # Tomcat线程池配置优化(订单服务高负载)
+  tomcat:
+    threads:
+      max: 500                    # 最大工作线程数(订单服务负载更高)
+      min-spare: 80               # 最小空闲线程数
+    max-connections: 10000        # 最大连接数
+    accept-count: 300             # 等待队列长度
+    connection-timeout: 30000     # 连接超时时间(30秒)
+# 应用名称
+spring:
+  profiles:
+    active: local
+  application:
+    name: ${prefix.distinction.name:ticketflow}-migrate-service
+  main:
+    allow-bean-definition-overriding: true
+    allow-circular-references: true
+  mvc:
+    pathmatch:
+      matching-strategy: ant_path_matcher
+    servlet:
+      load-on-startup: 1
+    jackson:
+      time-zone: GMT+8
+      date-format: yyyy-MM-dd HH:mm:ss
+      generator:
+        WRITE_NUMBERS_AS_STRINGS: true
+  datasource:
+    driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
+    url: jdbc:shardingsphere:classpath:shardingsphere-migrate-${spring.profiles.active}.yaml
+  data:
+    redis:
+      database: 0
+      host: 127.0.0.1
+      port: 6379
+      timeout: 5000                     # 连接超时时间(5秒)
+      jedis:
+        pool:
+          max-active: 600               # 最大活跃连接数(订单服务负载高)
+          max-idle: 120                 # 最大空闲连接数
+          min-idle: 30                  # 最小空闲连接数
+          max-wait: 3000                # 最大等待时间(3秒)
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 127.0.0.1:8848
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  global-config:
+    db-config:
+      logic-delete-field: status
+      logic-delete-value: 0
+      logic-not-delete-value: 1
+  configuration:
+#    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    local-cache-scope: statement
+
+# 分片配置（用于虚拟分片基因位提取）
+sharding:
+  original:
+    database-count: 2      # 原始分库数量
+    table-count: 4         # 原始分表数量
+feign:
+  sentinel:
+    enabled: false
+  hystrix:
+    enabled: true
+  httpclient:
+    enabled: false
+  okhttp:
+    enabled: true
+  compression:
+    request:
+      enabled: true
+      mime-types: text/xml,application/xml,application/json
+      min-request-size: 512
+    response:
+      enabled: true
+management:
+  metrics:
+    tags:
+      application: migrate-service
+  endpoint:
+    health:
+      show-details: always
+  endpoints:
+    web:
+      exposure:
+        include: '*'
+  health:
+    elasticsearch:
+      enabled: false
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+  group-configs:
+    - group: 'default'
+      paths-to-match: '/**'
+      #生成文档所需的扫包路径，一般为启动类目录
+      packages-to-scan: com.ticketflow.controller
+#knife4j配置
+knife4j:
+  #是否启用增强设置
+  enable: true
+  #开启生产环境屏蔽
+  production: ${KNIFE4J_PRODUCTION:-false}
+  #是否启用登录认证
+  basic:
+    enable: false
+  setting:
+    language: zh_cn
+    enable-version: true
+    enable-swagger-models: true
