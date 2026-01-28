@@ -1,0 +1,195 @@
+@use './reset.scss';
+
+:root {
+  /* 2026 Core Color Palette (Light Default) */
+  --tf-primary:       #FF371D;     /* 主色：购票/关键CTA */
+  --tf-primary-hover: #E02B13;     /* 主色 hover */
+  --tf-primary-light: #FFF0EE;     /* 主色浅色背景 */
+  --tf-accent:        #4F46E5;     /* 辅色：科技调蓝紫 */
+  --tf-success:       #10B981;     /* 成功：支付完成/有票 */
+  --tf-warning:       #F59E0B;     /* 警告：库存紧张/预售 */
+  --tf-danger:        #EF4444;     /* 错误/强提醒 */
+  
+  --tf-text-primary:  #0F172A;     /* 主要文本 (Slate 900) */
+  --tf-text-secondary:#64748B;     /* 次要文本 (Slate 500) */
+  --tf-text-muted:    #94A3B8;     /* 暗淡文本 (Slate 400) */
+  
+  --tf-bg:            #F8FAFC;     /* 页面大背景 (Slate 50) */
+  --tf-surface:       #FFFFFF;     /* 卡片/表面背景 */
+  --tf-border:        #E2E8F0;     /* 边框/分隔线 (Slate 200) */
+  
+  /* 向下兼容历史变量 */
+  --brand-color: var(--tf-primary);
+  --brand-color-rgb: 255, 55, 29;
+
+  /* 字体栈 */
+  --tf-font-body:    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --tf-font-mono:    "JetBrains Mono", "Menlo", monospace;
+
+  /* 边框圆角 */
+  --tf-radius-sm: 6px;
+  --tf-radius-md: 10px;
+  --tf-radius-lg: 16px;
+  --tf-radius-full: 9999px;
+
+  /* 软阴影系统 */
+  --tf-shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.05);
+  --tf-shadow-md: 0 4px 12px rgba(15, 23, 42, 0.07);
+  --tf-shadow-lg: 0 12px 24px -4px rgba(15, 23, 42, 0.12);
+
+  /* 布局控制 */
+  --tf-max-width: 1200px;
+  --tf-header-height: 64px;
+}
+
+/* 2026 Cyber-Aurora 暗黑夜间主题 (Dark Mode) Tokens */
+html[data-theme="dark"] {
+  --tf-primary:       #FF371D;
+  --tf-primary-hover: #FF553E;
+  --tf-primary-light: rgba(255, 55, 29, 0.18);
+  --tf-accent:        #6366F1;
+  --tf-success:       #10B981;
+  --tf-warning:       #F59E0B;
+  --tf-danger:        #EF4444;
+
+  --tf-text-primary:  #F8FAFC;     /* Slate 50 高对比文本 */
+  --tf-text-secondary:#94A3B8;     /* Slate 400 柔和文本 */
+  --tf-text-muted:    #64748B;     /* Slate 500 暗淡文本 */
+
+  --tf-bg:            #0B0F19;     /* 深空极夜黑背景 */
+  --tf-surface:       #151D2A;     /* 卡片面板 (Slate 900 沉浸) */
+  --tf-border:        #243044;     /* 暗黑精细边框 */
+
+  --tf-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --tf-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --tf-shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
+
+  /* Element Plus 暗黑组件全局覆盖 */
+  --el-bg-color: #151D2A !important;
+  --el-bg-color-overlay: #1A2436 !important;
+  --el-text-color-primary: #F8FAFC !important;
+  --el-text-color-regular: #CBD5E1 !important;
+  --el-text-color-secondary: #94A3B8 !important;
+  --el-border-color: #243044 !important;
+  --el-border-color-light: #243044 !important;
+  --el-border-color-lighter: #1E293B !important;
+  --el-fill-color-blank: #151D2A !important;
+  --el-fill-color-light: #1A2436 !important;
+  --el-fill-color-lighter: #1A2436 !important;
+  --el-mask-color: rgba(0, 0, 0, 0.7) !important;
+
+  .city-dropdown,
+  .tf-header,
+  .diffrentType,
+  .category,
+  .box-detail,
+  .box-item,
+  .service-card,
+  .recommend-box,
+  .order-card,
+  .pay-card {
+    background: #151D2A !important;
+    border-color: #243044 !important;
+  }
+
+  .city-hot-chip,
+  .city-grid-item,
+  .active-chip,
+  .session-chip,
+  .ticket-chip,
+  .rule-card {
+    background: #1A2436 !important;
+    border-color: #2D3D58 !important;
+    color: #F8FAFC !important;
+  }
+
+  .city-dropdown__header {
+    background: #101724 !important;
+    border-color: #243044 !important;
+  }
+
+  .tf-search-box {
+    background: #1A2436 !important;
+    border-color: #243044 !important;
+
+    &--focused {
+      background: #151D2A !important;
+    }
+  }
+
+  .tf-header__city-btn,
+  .tf-header__avatar {
+    background: #1A2436 !important;
+    border-color: #243044 !important;
+    color: #F8FAFC !important;
+
+    &:hover {
+      background: #243044 !important;
+    }
+  }
+
+  .show-card--small {
+    background: #151D2A !important;
+    border-color: #243044 !important;
+  }
+}
+
+body {
+  height: 100%;
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-family: var(--tf-font-body);
+  color: var(--tf-text-primary);
+  background-color: var(--tf-bg);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+html,
+#app {
+  height: 100%;
+}
+
+*,
+*:before,
+*:after {
+  box-sizing: border-box;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+
+  &:hover {
+    color: var(--tf-primary);
+  }
+}
+
+/* Element Plus 全局 2026 规范覆盖 */
+.el-button--primary {
+  --el-button-bg-color: var(--tf-primary) !important;
+  --el-button-border-color: var(--tf-primary) !important;
+  --el-button-hover-bg-color: var(--tf-primary-hover) !important;
+  --el-button-hover-border-color: var(--tf-primary-hover) !important;
+  --el-button-active-bg-color: var(--tf-primary-hover) !important;
+  --el-button-active-border-color: var(--tf-primary-hover) !important;
+}
+
+.el-button--primary.is-plain {
+  --el-button-text-color: var(--tf-primary) !important;
+  --el-button-bg-color: var(--tf-primary-light) !important;
+  --el-button-border-color: var(--tf-primary) !important;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--tf-primary) inset !important;
+}
+
+.el-pagination.is-background .el-pager li.is-active {
+  background-color: var(--tf-primary) !important;
+}
+
+.el-dialog {
+  border-radius: var(--tf-radius-lg) !important;
+  overflow: hidden;
+}
