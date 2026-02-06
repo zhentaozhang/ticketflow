@@ -1,0 +1,12 @@
+{
+
+  "index": {
+    "programListTitle": "节目列表",
+    "seatListTitle": "座位列表",
+    "orderListTitle": "订单列表",
+    "discardOrderListTitle": "废弃订单列表",
+    "messageRecordListTitle": "MQ消息记录列表",
+    "operation": "操作",
+    "namespace": "命令空间"
+  }
+}
