@@ -6,6 +6,17 @@ logs/
 
 ### Maven ###
 **/dependency-reduced-pom.xml
+**/.flattened-pom.xml
+
+### Local deployment ###
+docker/
+
+### Local sharding config ###
+**/shardingsphere-*-local.yaml
+
+### Generated vue3 files ###
+vue3/auto-imports.d.ts
+vue3/components.d.ts
 
 ### IDE ###
 .idea
@@ -23,6 +34,7 @@ logs/
 
 ### Docs ###
 docs/
+ticketflow-study-plan.md
 
 ### Generated benchmark outputs ###
 benchmark/results/

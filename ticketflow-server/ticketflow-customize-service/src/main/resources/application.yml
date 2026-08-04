@@ -113,7 +113,7 @@ knife4j:
   #是否启用增强设置
   enable: true
   #开启生产环境屏蔽
-  production: ${KNIFE4J_PRODUCTION:-false}
+  production: ${KNIFE4J_PRODUCTION:false}
   #是否启用登录认证
   basic:
     enable: false

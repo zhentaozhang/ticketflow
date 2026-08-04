@@ -9,8 +9,9 @@
     <a href="#系统架构">系统架构</a> •
     <a href="#技术栈">技术栈</a> •
     <a href="#数据库架构">数据库架构</a> •
-    <a href="#项目结构">项目结构</a> •
-    <a href="#快速开始">快速开始</a>
+    <a href="#快速开始">快速开始</a> •
+    <a href="#api-文档">API 文档</a> •
+    <a href="#项目结构">项目结构</a>
   </p>
 
   <p>
@@ -190,7 +191,6 @@ flowchart TB
 
     %% ==================== 可观测性 ====================
     subgraph Observability[可观测性]
-        SK[SkyWalking APM]:::monitor
         PG[Prometheus + Grafana]:::monitor
         BA[Spring Boot Admin]:::monitor
     end
@@ -219,8 +219,7 @@ flowchart TB
     
     PS & OS & PAS & US & BS & CS --> |持久化| DB
     
-    PS & OS -.- SK
-    GW & PS & OS -.- PG
+    GW & PS & OS & PAS & US & BS & CS -.- PG
     PS & OS -.- BA
 ```
 
@@ -256,7 +255,6 @@ flowchart TB
 | **搜索引擎** | Elasticsearch | 8.11.0 |
 | **认证授权** | Sa-Token + JWT | 1.43.0 |
 | **支付** | 支付宝 SDK | 4.38.197.ALL |
-| **APM** | Apache SkyWalking | 9.4.0 |
 | **监控** | Spring Boot Admin / Prometheus / Grafana | — |
 | **API 文档** | Knife4j + SpringDoc OpenAPI 3 | 4.3.0 |
 
@@ -406,9 +404,13 @@ flowchart LR
 
 ### 环境要求
 
-- Java 17+ / Maven 3.8+
-- Node.js 20+ / pnpm 9+
-- Docker & Docker Compose
+| 工具 | 版本要求 |
+|------|----------|
+| Java | 17+（推荐 Corretto） |
+| Maven | 3.8+ |
+| Node.js | 20+ |
+| npm / pnpm | npm 9+ / pnpm 9+ |
+| Docker & Docker Compose | 最新稳定版 |
 
 ### 启动基础设施
 
@@ -416,11 +418,27 @@ flowchart LR
 docker compose -f docker/docker-compose.yml up -d
 ```
 
+启动后包含以下 9 个容器：
+
+| 服务 | 镜像 | 端口 | 账号/密码 |
+|------|------|------|----------|
+| **MySQL** | mysql:8.0 | 3306 | `root` / `root` |
+| **Redis 7** | redis:7 | 6379 | 无密码 |
+| **Kafka** (KRaft) | bitnami/kafka:3.6 | 9092 | 无认证 |
+| **Nacos** | nacos/nacos-server:v2.4.0 | 8848 (9848) | 无认证（单机模式） |
+| **Elasticsearch** | docker.elastic.co/elasticsearch/elasticsearch:8.11.0 | 9200 (9300) | 无认证 |
+| **Sentinel** | bladex/sentinel-dashboard:1.8.8 | 8082 | `sentinel` / `sentinel` |
+| **Prometheus** | prom/prometheus:v2.53.0 | 9090 | 无认证 |
+| **Grafana** | grafana/grafana:11.0.0 | 3000 | `admin` / `admin` |
+| **Seata** | seataio/seata-server:1.8.0 | 8091 | 无认证 |
+
+> Docker 数据卷持久化：`docker_mysql-data`, `docker_redis-data`, `docker_kafka-data`, `docker_nacos-data`, `docker_es-data`, `docker_prometheus-data`, `docker_grafana-data`, `docker_seata-data`
+
 ### 构建后端
 
 ```bash
-# 全量构建
-mvn clean install -DskipTests
+# 全量构建（-T 4 启用 4 线程并行编译）
+mvn clean install -DskipTests -T 4
 
 # 按需构建单个服务
 mvn clean install -pl ticketflow-server/ticketflow-gateway-service -am -DskipTests
@@ -428,27 +446,96 @@ mvn clean install -pl ticketflow-server/ticketflow-gateway-service -am -DskipTes
 
 ### 启动后端服务
 
-按依赖顺序启动（推荐 IDEA 逐模块运行）：
+> 启动前需确保 `docker/mysql/client.cnf` 和 `docker/prometheus/prometheus.yml` 是**文件**而非目录（若已执行 `docker compose up` 则已就绪）。
 
-1. Nacos（Docker 已启动）
-2. Gateway → Base-Data → User → Program → Order → Pay → Customize → Admin
+```bash
+# 在一键启动脚本中设置必要的环境变量
+export JASYPT_ENCRYPTOR_PASSWORD=ticketflow
+export KNIFE4J_PRODUCTION=false
+```
+
+按以下顺序启动（每启动一个等待几秒使其注册到 Nacos）：
+
+```bash
+SERVICES=("gateway" "base-data" "user" "program" "order" "pay" "customize" "migrate" "admin")
+
+for s in "${SERVICES[@]}"; do
+  JAR="ticketflow-server/ticketflow-$s-service/target/ticketflow-$s-service-0.0.1-SNAPSHOT.jar"
+  java -Xms256m -Xmx512m -jar "$JAR" &
+  sleep 4
+done
+```
+
+各服务注册到 Nacos 后，可在 `http://localhost:8848/nacos` 查看状态。所有服务实例就绪后，Gateway 健康检查应返回 200：
+
+```bash
+curl -s http://localhost:6085/actuator/health
+# → {"status":"UP"}
+```
 
 ### 启动前端
 
 ```bash
-# 用户端
-cd vue3 && pnpm install && pnpm dev
+# 用户端 (Vue 3)
+cd vue3
+npm install --legacy-peer-deps
+npm run dev
+# → http://localhost:5173
 
-# 管理端
-cd ticketflow-front-manage && pnpm install && pnpm dev:ele
+# 管理端 (Vben Admin)
+cd ticketflow-front-manage
+pnpm install
+pnpm dev:ele
+# → http://localhost:5555
 ```
 
-| 访问入口 | 地址 |
-|----------|------|
-| 用户端 | `http://localhost:5173` |
-| 管理端 | `http://localhost:5555` |
-| API 网关 | `http://localhost:6085` |
-| Nacos 控制台 | `http://localhost:8848` |
+### 访问入口一览
+
+| 入口 | 地址 | 说明 |
+|------|------|------|
+| 用户端 | `http://localhost:5173` | Vue 3 购票前端 |
+| 管理端 | `http://localhost:5555` | Vben Admin 运营后台 |
+| API 网关 | `http://localhost:6085` | 所有后端 API 统一入口 |
+| Knife4j API 文档 | `http://localhost:6085/doc.html` | 在线调试 |
+| Nacos 控制台 | `http://localhost:8848/nacos` | 服务注册与发现 |
+| Sentinel | `http://localhost:8082` | 限流熔断控制台 |
+| Prometheus | `http://localhost:9090` | 指标采集 |
+| Grafana | `http://localhost:3000` | 监控看板 |
+| Spring Boot Admin | `http://localhost:10082` | 服务健康监控（admin/admin） |
+
+---
+
+## API 文档
+
+系统采用 **Knife4j** 聚合各微服务的 OpenAPI 3.0 文档。
+
+### 在线调试
+
+浏览器打开 **http://localhost:6085/doc.html** 即可查看和调试所有服务的 API。
+
+### 导入 Apifox
+
+Apifox 支持通过 URL 直接导入 OpenAPI 格式的接口文档。各服务的导入地址如下：
+
+| 服务 | 导入 URL |
+|------|---------|
+| 节目服务 | `http://127.0.0.1:6085/ticketflow/program/v3/api-docs/default` |
+| 用户服务 | `http://127.0.0.1:6085/ticketflow/user/v3/api-docs/default` |
+| 订单服务 | `http://127.0.0.1:6085/ticketflow/order/v3/api-docs/default` |
+| 基础数据 | `http://127.0.0.1:6085/ticketflow/basedata/v3/api-docs/default` |
+| 支付服务 | `http://127.0.0.1:6085/ticketflow/pay/v3/api-docs/default` |
+| 定制服务 | `http://127.0.0.1:6085/ticketflow/customize/v3/api-docs/default` |
+| 管理端 | `http://127.0.0.1:6085/ticketflow/admin/v3/api-docs/default` |
+| 迁移服务 | `http://127.0.0.1:6085/ticketflow/migrate/v3/api-docs/default` |
+
+操作步骤：
+
+1. 在 Apifox 中创建/打开项目
+2. 点击 **导入** → **OpenAPI/Swagger 格式**
+3. 选择 **URL 导入**，粘贴上述任一地址
+4. 按需调整导入选项（目标分支、接口冲突策略等），确认导入
+
+> 每个服务的 OpenAPI 地址返回标准 JSON 格式，可直接用于 Apifox、Postman、Insomnia 等工具。
 
 ---
 
@@ -494,4 +581,6 @@ ticketflow/
 | 超时取消 | 延迟队列 | 基于 Redisson 实现，避免轮询数据库 |
 | 分布式事务 | 最终一致性 + 补偿 | 避免 Seata 带来的性能开销，延迟队列兜底 |
 | ID 生成 | 雪花算法 + 基因法 | 全局唯一 + 单调递增 + 天然支持分片路由 |
-| 可观测性 | SkyWalking + ELK | 全链路追踪 + 结构化日志分析 |
+| 可观测性 | Prometheus + Grafana + Spring Boot Admin | 指标采集、可视化监控、服务健康检查 |
+
+
