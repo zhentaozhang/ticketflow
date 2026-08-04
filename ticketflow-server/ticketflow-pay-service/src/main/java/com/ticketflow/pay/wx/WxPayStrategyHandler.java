@@ -26,6 +26,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.math.BigDecimal;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static com.ticketflow.constant.Constant.WX_NONCE_HEADER;
 import static com.ticketflow.constant.Constant.WX_RAW_BODY_KEY;
@@ -47,6 +48,19 @@ import static com.ticketflow.constant.Constant.WX_TIMESTAMP_HEADER;
 public class WxPayStrategyHandler implements PayStrategyHandler {
 
     private static final BigDecimal HUNDRED = new BigDecimal(100);
+
+    /**
+     * 微信回调时间戳允许的最大偏差（秒）。微信官方要求商户校验时间戳防止重放。
+     */
+    private static final long WX_NOTIFY_MAX_TIME_DIFF_SECONDS = 5 * 60L;
+
+    /**
+     * 已处理回调 nonce 缓存（nonce → 首次到达时间），时间戳窗口内同一 nonce 只处理一次。
+     * 内存实现：多实例部署时各实例独立去重，配合时间戳校验与幂等状态机已满足微信回调要求。
+     */
+    private static final Map<String, Long> WX_NOTIFY_NONCE_CACHE = new ConcurrentHashMap<>();
+
+    private static final long WX_NOTIFY_NONCE_EXPIRE_MILLIS = (WX_NOTIFY_MAX_TIME_DIFF_SECONDS + 60) * 1000L;
 
     private final NativePayService nativePayService;
 
@@ -82,11 +96,23 @@ public class WxPayStrategyHandler implements PayStrategyHandler {
     @Override
     public boolean signVerify(Map<String, String> params) {
         try {
+            // 时间戳新鲜度校验：微信回调要求与当前时间偏差不超过 5 分钟，防止重放
+            long timestamp = Long.parseLong(params.get(WX_TIMESTAMP_HEADER));
+            if (Math.abs(System.currentTimeMillis() / 1000 - timestamp) > WX_NOTIFY_MAX_TIME_DIFF_SECONDS) {
+                log.error("wx pay notify timestamp expired, timestamp : {}", timestamp);
+                return false;
+            }
+            // nonce 去重：时间戳窗口内同一 nonce 只处理一次，防止重放
+            String nonce = params.get(WX_NONCE_HEADER);
+            if (nonce == null || !isNonceFresh(nonce)) {
+                log.error("wx pay notify nonce reused or missing, nonce : {}", nonce);
+                return false;
+            }
             RequestParam requestParam = new RequestParam.Builder()
                     .serialNumber(params.get(WX_SERIAL_HEADER))
-                    .nonce(params.get(WX_NONCE_HEADER))
+                    .nonce(nonce)
                     .signature(params.get(WX_SIGNATURE_HEADER))
-                    .timestamp(params.get(WX_TIMESTAMP_HEADER))
+                    .timestamp(String.valueOf(timestamp))
                     .body(params.get(WX_RAW_BODY_KEY))
                     .build();
             // 验签 + AES-GCM 解密，得到明文交易信息
@@ -104,10 +130,36 @@ public class WxPayStrategyHandler implements PayStrategyHandler {
         }
     }
 
+    /**
+     * nonce 是否首次出现。首次到达返回 true 并记录，时间戳窗口内重复到达返回 false。
+     * 缓存满 1000 条时顺带清理过期条目，防止无限增长。
+     */
+    private boolean isNonceFresh(String nonce) {
+        long now = System.currentTimeMillis();
+        if (WX_NOTIFY_NONCE_CACHE.putIfAbsent(nonce, now) != null) {
+            return false;
+        }
+        if (WX_NOTIFY_NONCE_CACHE.size() > 1000) {
+            WX_NOTIFY_NONCE_CACHE.entrySet().removeIf(entry -> now - entry.getValue() > WX_NOTIFY_NONCE_EXPIRE_MILLIS);
+        }
+        return true;
+    }
+
     @Override
     public boolean dataVerify(Map<String, String> params, PayBill payBill) {
         // 微信回调金额单位为分，换算回元与本地账单比对
-        BigDecimal notifyPayAmount = new BigDecimal(params.get("total_fee")).divide(HUNDRED);
+        String totalFee = params.get("total_fee");
+        if (totalFee == null) {
+            log.error("回调缺少金额 total_fee");
+            return false;
+        }
+        BigDecimal notifyPayAmount;
+        try {
+            notifyPayAmount = new BigDecimal(totalFee).divide(HUNDRED);
+        } catch (NumberFormatException e) {
+            log.error("回调金额格式错误 total_fee : {}", totalFee);
+            return false;
+        }
         if (notifyPayAmount.compareTo(payBill.getPayAmount()) != 0) {
             log.error("回调金额和账单支付金额不一致 回调金额 : {}, 账单支付金额 : {}", notifyPayAmount, payBill.getPayAmount());
             return false;
@@ -155,6 +207,8 @@ public class WxPayStrategyHandler implements PayStrategyHandler {
         // 微信退款单号要求唯一，使用订单号+时间戳
         request.setOutRefundNo(outTradeNo + "-" + System.currentTimeMillis());
         request.setReason(reason);
+        // 暂不设置退款结果通知地址：当前退款结果由订单状态/人工对账兜底；
+        // 若未来订阅 refund notify，需在 NotificationParser 侧按 resource_type 区分交易/退款通知
         com.wechat.pay.java.service.refund.model.AmountReq amount =
                 new com.wechat.pay.java.service.refund.model.AmountReq();
         amount.setTotal(price.multiply(HUNDRED).longValue());
