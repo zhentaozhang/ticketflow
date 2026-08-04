@@ -124,6 +124,11 @@
             <version>${alipay-sdk-java-version}</version>
         </dependency>
         <dependency>
+            <groupId>com.github.wechatpay-apiv3</groupId>
+            <artifactId>wechatpay-java</artifactId>
+            <version>${wechatpay-java-version}</version>
+        </dependency>
+        <dependency>
             <groupId>com.ticketflow</groupId>
             <artifactId>ticketflow-service-gray-transition-webmvc-framework</artifactId>
             <version>${revision}</version>
