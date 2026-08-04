@@ -313,7 +313,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             RefundDto refundDto = new RefundDto();
             refundDto.setOrderNumber(String.valueOf(order.getOrderNumber()));
             refundDto.setAmount(order.getOrderPrice());
-            refundDto.setChannel("alipay");
+            refundDto.setChannel(Optional.ofNullable(PayChannel.getRc(orderPayCheckDto.getPayChannelType()))
+                    .map(PayChannel::getValue).orElseThrow(() -> new TicketFlowFrameException(BaseCode.PAY_CHANNEL_NOT_EXIST)));
             refundDto.setReason("延迟订单关闭");
             ApiResponse<String> response = payClient.refund(refundDto);
             if (response.getCode().equals(BaseCode.SUCCESS.getCode())) {
