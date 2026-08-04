@@ -17,7 +17,13 @@ public class OrderProperties {
      * */
     @Value("${orderPayNotifyUrl:http://localhost:6085/ticketflow/order/order/alipay/notify}")
     private String orderPayNotifyUrl;
-    
+
+    /**
+     * 微信支付成功后通知接口地址
+     * */
+    @Value("${wxPayNotifyUrl:http://localhost:6085/ticketflow/order/order/wx/notify}")
+    private String wxPayNotifyUrl;
+
     /**
      * 支付成功后跳转页面
      * */
