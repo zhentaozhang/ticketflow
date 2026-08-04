@@ -21,5 +21,8 @@ logs/
 .playwright-mcp/
 .opencode/
 
+### Docs ###
+docs/
+
 ### Generated benchmark outputs ###
 benchmark/results/
