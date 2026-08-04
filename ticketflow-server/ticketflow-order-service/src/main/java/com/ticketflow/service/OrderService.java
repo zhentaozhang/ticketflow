@@ -280,7 +280,11 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         payDto.setChannel(orderPayDto.getChannel());
         payDto.setPlatform(orderPayDto.getPlatform());
         payDto.setPrice(orderPayDto.getPrice());
-        payDto.setNotifyUrl(orderProperties.getOrderPayNotifyUrl());
+        if (PayChannel.WX.getValue().equals(orderPayDto.getChannel())) {
+            payDto.setNotifyUrl(orderProperties.getWxPayNotifyUrl());
+        } else {
+            payDto.setNotifyUrl(orderProperties.getOrderPayNotifyUrl());
+        }
         payDto.setReturnUrl(orderProperties.getOrderPayReturnUrl());
         return payDto;
     }
