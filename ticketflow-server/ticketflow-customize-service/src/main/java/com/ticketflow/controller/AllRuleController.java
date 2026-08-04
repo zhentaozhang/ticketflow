@@ -23,16 +23,16 @@ public class AllRuleController {
 
     @Autowired
     private AllRuleService allRuleService;
-    
-    
-    @Operation(summary  = "添加所有规则")
+
+
+    @Operation(summary = "添加所有规则")
     @RequestMapping(value = "/add", method = RequestMethod.POST)
     public ApiResponse<Void> add(@Valid @RequestBody AllRuleDto allRuleDto) {
         allRuleService.add(allRuleDto);
         return ApiResponse.ok();
     }
-    
-    @Operation(summary  = "查询所有规则")
+
+    @Operation(summary = "查询所有规则")
     @RequestMapping(value = "/get", method = RequestMethod.POST)
     public ApiResponse<AllDepthRuleVo> get() {
         return ApiResponse.ok(allRuleService.get());

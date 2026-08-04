@@ -19,10 +19,10 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/test")
 @Tag(name = "test-data", description = "测试")
 public class TestController {
-    
+
     @Autowired
     private ChannelDataService channelDataService;
-    
+
     @Operation(summary = "测试")
     @PostMapping(value = "/test")
     public ApiResponse<Boolean> test(@Valid @RequestBody ChannelDataAddDto channelDataAddDto) {

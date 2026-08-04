@@ -23,41 +23,41 @@ import java.util.List;
 @RequestMapping("/area")
 @Tag(name = "area", description = "区域")
 public class AreaController {
-    
+
     @Autowired
     private AreaService areaService;
-    
-    @Operation(summary  = "查询市区以及直辖市数据")
+
+    @Operation(summary = "查询市区以及直辖市数据")
     @PostMapping(value = "/selectCityData")
     public ApiResponse<List<AreaVo>> selectCityData() {
         return ApiResponse.ok(areaService.selectCityData());
     }
-    
-    @Operation(summary  = "查询数据根据id集合")
+
+    @Operation(summary = "查询数据根据id集合")
     @PostMapping(value = "/selectByIdList")
     public ApiResponse<List<AreaVo>> selectByIdList(@Valid @RequestBody AreaSelectDto areaSelectDto) {
         return ApiResponse.ok(areaService.selectByIdList(areaSelectDto));
     }
-    
-    @Operation(summary  = "查询数据根据id")
+
+    @Operation(summary = "查询数据根据id")
     @PostMapping(value = "/getById")
-    public ApiResponse<AreaVo> getById(@Valid @RequestBody AreaGetDto areaGetDto){
+    public ApiResponse<AreaVo> getById(@Valid @RequestBody AreaGetDto areaGetDto) {
         return ApiResponse.ok(areaService.getById(areaGetDto));
     }
-    
-    @Operation(summary  = "当前城市")
+
+    @Operation(summary = "当前城市")
     @PostMapping(value = "/current")
-    public ApiResponse<AreaVo> current(){
+    public ApiResponse<AreaVo> current() {
         return ApiResponse.ok(areaService.current());
     }
-    
-    @Operation(summary  = "用户后台系统显示的城市列表")
+
+    @Operation(summary = "用户后台系统显示的城市列表")
     @PostMapping(value = "/manage/list")
-    public ApiResponse<List<AreaVo>> manageList(){
+    public ApiResponse<List<AreaVo>> manageList() {
         return ApiResponse.ok(areaService.manageList());
     }
-    
-    @Operation(summary  = "热门城市")
+
+    @Operation(summary = "热门城市")
     @PostMapping(value = "/hot")
     public ApiResponse<List<AreaVo>> hot() {
         return ApiResponse.ok(areaService.hot());

@@ -25,51 +25,51 @@ import java.util.Optional;
 
 /**
  * 渠道数据服务——管理客户端渠道（App/Web/小程序等）的注册与查询。
- *
+ * <p>
  * 渠道注册时自动调用 customize-service 记录 API 数据，
  * 查询时优先走 Redis 缓存
  */
 @Service
 @Slf4j
 public class ChannelDataService {
-    
+
     @Autowired
     private ChannelDataMapper channelDataMapper;
-    
+
     @Autowired
     private UidGenerator uidGenerator;
-    
+
     @Autowired
     private RedisCache redisCache;
-    
+
     @Autowired
     private ApiDataClient apiDataClient;
-    
-    public GetChannelDataVo getByCode(GetChannelDataByCodeDto dto){
+
+    public GetChannelDataVo getByCode(GetChannelDataByCodeDto dto) {
         GetChannelDataVo getChannelDataVo = new GetChannelDataVo();
         LambdaQueryWrapper<ChannelTableData> wrapper = Wrappers.lambdaQuery(ChannelTableData.class)
                 .eq(ChannelTableData::getStatus, Status.RUN.getCode())
-                .eq(ChannelTableData::getCode,dto.getCode());
+                .eq(ChannelTableData::getCode, dto.getCode());
         Optional.ofNullable(channelDataMapper.selectOne(wrapper)).ifPresent(channelData -> {
-            BeanUtils.copyProperties(channelData,getChannelDataVo);
+            BeanUtils.copyProperties(channelData, getChannelDataVo);
         });
         return getChannelDataVo;
     }
-    
+
     @Transactional(rollbackFor = Exception.class)
     public void add(ChannelDataAddDto channelDataAddDto) {
         ChannelTableData channelData = new ChannelTableData();
-        BeanUtils.copyProperties(channelDataAddDto,channelData);
+        BeanUtils.copyProperties(channelDataAddDto, channelData);
         channelData.setId(uidGenerator.getUid());
         channelData.setCreateTime(DateUtils.now());
         channelDataMapper.insert(channelData);
         addRedisChannelData(channelData);
     }
-    
-    private void addRedisChannelData(ChannelTableData channelData){
+
+    private void addRedisChannelData(ChannelTableData channelData) {
         GetChannelDataVo getChannelDataVo = new GetChannelDataVo();
-        BeanUtils.copyProperties(channelData,getChannelDataVo);
-        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.CHANNEL_DATA,getChannelDataVo.getCode()),getChannelDataVo);
+        BeanUtils.copyProperties(channelData, getChannelDataVo);
+        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.CHANNEL_DATA, getChannelDataVo.getCode()), getChannelDataVo);
     }
 
     @Transactional(rollbackFor = Exception.class)
