@@ -15,6 +15,7 @@ import com.ticketflow.entity.PayBill;
 import com.ticketflow.entity.RefundBill;
 import com.ticketflow.enums.BaseCode;
 import com.ticketflow.enums.PayBillStatus;
+import com.ticketflow.enums.PayChannel;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.mapper.PayBillMapper;
 import com.ticketflow.mapper.RefundBillMapper;
@@ -39,6 +40,8 @@ import java.util.Objects;
 
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_FAILURE_RESULT;
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_SUCCESS_RESULT;
+import static com.ticketflow.constant.Constant.WX_NOTIFY_FAILURE_RESULT;
+import static com.ticketflow.constant.Constant.WX_NOTIFY_SUCCESS_RESULT;
 import static com.ticketflow.core.DistributedLockConstants.COMMON_PAY;
 import static com.ticketflow.core.DistributedLockConstants.TRADE_CHECK;
 
@@ -112,12 +115,16 @@ public class PayService {
         NotifyVo notifyVo = new NotifyVo();
         log.info("回调通知参数 ===> {}", JSON.toJSONString(notifyDto));
         Map<String, String> params = notifyDto.getParams();
-        
+        // 微信回调应答为 SUCCESS/FAIL（大小写敏感），支付宝为 success/failure
+        boolean isWxChannel = PayChannel.WX.getValue().equals(notifyDto.getChannel());
+        String successResult = isWxChannel ? WX_NOTIFY_SUCCESS_RESULT : ALIPAY_NOTIFY_SUCCESS_RESULT;
+        String failureResult = isWxChannel ? WX_NOTIFY_FAILURE_RESULT : ALIPAY_NOTIFY_FAILURE_RESULT;
+
         // 第一步：签名验证（支付宝异步通知自带 sign 字段，验证报文真实性）
         PayStrategyHandler payStrategyHandler = payStrategyContext.get(notifyDto.getChannel());
         boolean signVerifyResult = payStrategyHandler.signVerify(params);
         if (!signVerifyResult) {
-            notifyVo.setPayResult(ALIPAY_NOTIFY_FAILURE_RESULT);
+            notifyVo.setPayResult(failureResult);
             return notifyVo;
         }
         // 第二步：查询本地账单
@@ -126,32 +133,32 @@ public class PayService {
         PayBill payBill = payBillMapper.selectOne(payBillLambdaQueryWrapper);
         if (Objects.isNull(payBill)) {
             log.error("账单为空 notifyDto : {}",JSON.toJSONString(notifyDto));
-            notifyVo.setPayResult(ALIPAY_NOTIFY_FAILURE_RESULT);
+            notifyVo.setPayResult(failureResult);
             return notifyVo;
         }
         // 第三步：状态机——已支付/已取消/已退款的账单直接返回成功（避免重复处理导致状态回退）
         if (Objects.equals(payBill.getPayBillStatus(), PayBillStatus.PAY.getCode())) {
             log.info("账单已支付 notifyDto : {}",JSON.toJSONString(notifyDto));
             notifyVo.setOutTradeNo(payBill.getOutOrderNo());
-            notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+            notifyVo.setPayResult(successResult);
             return notifyVo;
         }
         if (Objects.equals(payBill.getPayBillStatus(), PayBillStatus.CANCEL.getCode())) {
             log.info("账单已取消 notifyDto : {}",JSON.toJSONString(notifyDto));
             notifyVo.setOutTradeNo(payBill.getOutOrderNo());
-            notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+            notifyVo.setPayResult(successResult);
             return notifyVo;
         }
         if (Objects.equals(payBill.getPayBillStatus(), PayBillStatus.REFUND.getCode())) {
             log.info("账单已退单 notifyDto : {}",JSON.toJSONString(notifyDto));
             notifyVo.setOutTradeNo(payBill.getOutOrderNo());
-            notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+            notifyVo.setPayResult(successResult);
             return notifyVo;
         }
-        // 第四步：数据验证（比较支付宝通知的金额与本地账单金额是否一致）
+        // 第四步：数据验证（比较支付通知的金额与本地账单金额是否一致）
         boolean dataVerify = payStrategyHandler.dataVerify(notifyDto.getParams(), payBill);
         if (!dataVerify) {
-            notifyVo.setPayResult(ALIPAY_NOTIFY_FAILURE_RESULT);
+            notifyVo.setPayResult(failureResult);
             return notifyVo;
         }
         // 第五步：状态流转 NO_PAY → PAY
@@ -161,7 +168,7 @@ public class PayService {
                 Wrappers.lambdaUpdate(PayBill.class).eq(PayBill::getOutOrderNo, params.get("out_trade_no"));
         payBillMapper.update(updatePayBill,payBillLambdaUpdateWrapper);
         notifyVo.setOutTradeNo(payBill.getOutOrderNo());
-        notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setPayResult(successResult);
         return notifyVo;
     }
     
