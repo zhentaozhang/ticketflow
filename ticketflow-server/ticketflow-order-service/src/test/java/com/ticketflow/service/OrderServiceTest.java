@@ -43,10 +43,13 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_SUCCESS_RESULT;
+import static com.ticketflow.constant.Constant.WX_NOTIFY_FAILURE_RESULT;
+import static com.ticketflow.constant.Constant.WX_NOTIFY_SUCCESS_RESULT;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -929,6 +932,60 @@ class OrderServiceTest {
 
             assertEquals(ALIPAY_NOTIFY_SUCCESS_RESULT, result);
             verify(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+        }
+    }
+
+    // ==================== P2: wxNotify ====================
+
+    @Nested
+    class WxNotify {
+
+        @Test
+        void whenPaySuccess_UpdatesOrderRelatedData() throws Exception {
+            RLock mockLock = mock(RLock.class);
+            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
+
+            Order order = createOrder(OrderStatus.NO_PAY.getCode());
+            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
+
+            NotifyVo notifyVo = new NotifyVo();
+            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+            notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+
+            doNothing().when(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+
+            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
+            mockRequest.addHeader("Wechatpay-Signature", "sig");
+            mockRequest.addHeader("Wechatpay-Serial", "serial");
+            mockRequest.addHeader("Wechatpay-Nonce", "nonce");
+            mockRequest.addHeader("Wechatpay-Timestamp", "1234567890");
+            mockRequest.setContent("{\"resource\":{\"ciphertext\":\"xxx\"}}".getBytes(StandardCharsets.UTF_8));
+
+            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
+
+            assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
+            verify(payClient).notify(any(NotifyDto.class));
+            verify(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+        }
+
+        @Test
+        void whenNotifyFails_ReturnsFailure() throws Exception {
+            NotifyVo notifyVo = new NotifyVo();
+            notifyVo.setPayResult(WX_NOTIFY_FAILURE_RESULT);
+            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+
+            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
+            mockRequest.addHeader("Wechatpay-Signature", "sig");
+            mockRequest.addHeader("Wechatpay-Serial", "serial");
+            mockRequest.addHeader("Wechatpay-Nonce", "nonce");
+            mockRequest.addHeader("Wechatpay-Timestamp", "1234567890");
+            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
+
+            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
+
+            assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+            verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
         }
     }
 
