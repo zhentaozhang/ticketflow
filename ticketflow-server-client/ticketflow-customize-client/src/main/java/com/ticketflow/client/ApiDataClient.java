@@ -21,40 +21,40 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * 实现延迟消息的幂等处理
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"customize-service",fallback = ApiDataClientFallback.class)
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "customize-service", fallback = ApiDataClientFallback.class)
 //                ↑ Nacos 服务名  ↑ order-service 消息幂等记录用
 public interface ApiDataClient {
-    
+
     /**
      * 记录API调用数据（gateway 监控用）
      */
     @PostMapping(value = "/apiData/add")
     ApiResponse<Boolean> add(AddApiDataDto dto);
-    
+
     /**
      * 插入消息发送记录（可靠消息——先记录后发送）
      */
     @PostMapping(value = "/message/producer/record/insert")
     ApiResponse<MessageProducerRecordVo> insertMessageProducerRecord(InsertMessageProducerRecordDto insertMessageProducerRecordDto);
-    
+
     /**
      * 更新消息发送状态（已发送/失败）
      */
     @PostMapping(value = "/message/producer/record/update")
     ApiResponse<Boolean> updateMessageProducerRecord(UpdateMessageProducerRecordDto updateMessageProducerRecordDto);
-    
+
     /**
      * 查询消息消费记录（幂等判断）
      */
     @PostMapping(value = "/message/consumer/record/getByMessageId")
     ApiResponse<MessageConsumerRecordVo> getMessageConsumerByMessageId(MessageIdDto messageIdDto);
-    
+
     /**
      * 插入消息消费记录
      */
     @PostMapping(value = "/message/consumer/record/insert")
     ApiResponse<MessageConsumerRecordVo> insertMessageConsumerRecord(InsertMessageConsumerRecordDto insertMessageConsumerRecordDto);
-    
+
     /**
      * 更新消息消费状态
      */

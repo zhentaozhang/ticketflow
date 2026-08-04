@@ -48,7 +48,7 @@ public enum CaptchaBaseMapEnum {
     /**
      * 根据codeValue获取描述
      */
-    public static String getCodeDescByCodeBalue(String codeValue) {
+    public static String getCodeDescByCodeValue(String codeValue) {
         CaptchaBaseMapEnum enumItem = parseFromCodeValue(codeValue);
         return enumItem == null ? "" : enumItem.getCodeDesc();
     }
