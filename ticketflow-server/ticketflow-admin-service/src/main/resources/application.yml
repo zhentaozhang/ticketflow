@@ -17,10 +17,13 @@ spring:
         server-addr: 127.0.0.1:8848
   security:
     user:
-      name: ${ADMIN_USER_NAME:-admin}
-      password: ${ADMIN_USER_PASSWORD:-admin}    
+      name: ${ADMIN_USER_NAME:admin}
+      password: ${ADMIN_USER_PASSWORD:admin}    
+#钉钉机器人告警配置（可选）：
+#  token 为钉钉机器人完整 webhook URL，如 https://oapi.dingtalk.com/robot/send?access_token=xxx
+#  留空（默认）则不发送告警
 #dingtalk:
-#  token: a
+#  token:
   main:
     allow-bean-definition-overriding: true
 management:
@@ -52,14 +55,12 @@ springdoc:
   group-configs:
     - group: 'default'
       paths-to-match: '/**'
-      #生成文档所需的扫包路径，一般为启动类目录
-      packages-to-scan: com.ticketflow.controller
 #knife4j配置
 knife4j:
   #是否启用增强设置
   enable: true
   #开启生产环境屏蔽
-  production: ${KNIFE4J_PRODUCTION:-false}
+  production: ${KNIFE4J_PRODUCTION:false}
   #是否启用登录认证
   basic:
     enable: false
