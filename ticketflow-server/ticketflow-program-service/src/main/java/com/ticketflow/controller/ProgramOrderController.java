@@ -66,7 +66,7 @@ public class ProgramOrderController {
                 .createOrder(programOrderCreateDto));
     }
     
-    @Operation(summary  = "购票V4")
+    @Operation(summary  = "购票V41")
     @PostMapping(value = "/create/v41")
     public ApiResponse<String> createV41(@Valid @RequestBody ProgramOrderCreateDto programOrderCreateDto) {
         return ApiResponse.ok(programOrderContext.get(ProgramOrderVersion.V41_VERSION.getVersion())

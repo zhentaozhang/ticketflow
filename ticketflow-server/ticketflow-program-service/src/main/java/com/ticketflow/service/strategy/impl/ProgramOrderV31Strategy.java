@@ -13,11 +13,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import static com.ticketflow.core.DistributedLockConstants.PROGRAM_ORDER_CREATE_V3;
+
 /**
- * 节目订单 V3 实现（BaseProgramOrder 委托版本）。
- * 核心逻辑提取到 BaseProgramOrder.create()，V3 策略仅做委托调用。
- * 锁逻辑由 BaseProgramOrder 统一管理（Lua 脚本 + 分布式锁），
- * V31 调用 createNew() 走同步 DB 回滚路径。
+ * 节目订单 V31 实现（V3 的独立注册变体）。
+ * 与 V3 相同的编排：复合校验 → BaseProgramOrder 本地锁（按 ticketCategoryId）→ createNew() 同步建单。
+ * 并发安全统一由带校验的 Lua + 本地锁保证，与 V3 行为一致。
  */
 @Slf4j
 @Component
@@ -34,7 +35,7 @@ public class ProgramOrderV31Strategy implements ProgramOrderStrategy {
     
     /**
      * 创建订单（V31 同步委托版本）
-     * 直接调用 ProgramOrderService.createNew() 同步写 DB，锁由上游调用方管理
+     * 委托 BaseProgramOrder.localLockCreateOrder 管理本地锁，回调 createNew() 同步写 DB
      *
      * @param programOrderCreateDto 订单创建参数
      * @return 订单编号
@@ -45,7 +46,8 @@ public class ProgramOrderV31Strategy implements ProgramOrderStrategy {
     @Override
     public String createOrder(ProgramOrderCreateDto programOrderCreateDto) {
         compositeContainer.execute(CompositeCheckType.PROGRAM_ORDER_CREATE_CHECK.getValue(),programOrderCreateDto);
-        return programOrderService.createNew(programOrderCreateDto,ProgramOrderVersion.V31_VERSION.getValue());
+        return baseProgramOrder.localLockCreateOrder(PROGRAM_ORDER_CREATE_V3,programOrderCreateDto,
+                () -> programOrderService.createNew(programOrderCreateDto,ProgramOrderVersion.V31_VERSION.getValue()));
     }
     
     /**

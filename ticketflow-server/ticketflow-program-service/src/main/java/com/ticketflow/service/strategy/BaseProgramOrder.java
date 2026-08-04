@@ -4,6 +4,8 @@ import cn.hutool.core.collection.CollectionUtil;
 import cn.hutool.core.util.StrUtil;
 import com.ticketflow.dto.ProgramOrderCreateDto;
 import com.ticketflow.dto.SeatDto;
+import com.ticketflow.enums.BaseCode;
+import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.locallock.LocalLockCache;
 import com.ticketflow.lock.LockTask;
 import lombok.extern.slf4j.Slf4j;
@@ -12,29 +14,33 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 /**
- * 节目下单基础逻辑（双重锁模板）。
- * 本地锁（ReentrantLock per ticketCategoryId）→ 回调执行分布式锁逻辑，
- * 形成反向释放顺序防止死锁，被 V2/V3/V4 策略实现类调用
+ * 节目下单基础逻辑（本地锁模板）。
+ * 按 ticketCategoryId 加本地锁（ReentrantLock per ticketCategoryId），
+ * 回调中是否叠加分布式锁由策略实现决定；并发安全的最终底线是带校验的 Lua。
+ * 被 V2/V3/V31/V4/V41 策略实现类调用
  */
 @Slf4j
 @Component
 public class BaseProgramOrder {
-    
+
+    private static final long LOCK_WAIT_TIME = 3L;
+
     @Autowired
     private LocalLockCache localLockCache;
     
     /**
-     * 双層锁：本地锁（按 ticketCategoryId 加 ReentrantLock）→ 分布式锁（Redisson，在策略实现类中）
+     * 本地锁（按 ticketCategoryId 加 ReentrantLock），回调中由策略决定是否叠加分布式锁。
      * 本地锁先于分布式锁获取，后于分布式锁释放，形成相反的释放顺序，
      * 避免分布式锁释放后其他线程立即重入，本地锁还未释放导致的并发问题。
      *
      * @param lockKeyPrefix          锁 key 前缀（区分不同策略版本）
      * @param programOrderCreateDto  订单创建请求参数（含座位/票档信息）
-     * @param lockTask               分布式锁回调（策略实现类中的实际下单逻辑）
+     * @param lockTask               下单回调（策略实现类中的实际下单逻辑）
      * @return 订单编号
      */
     public String localLockCreateOrder(String lockKeyPrefix, ProgramOrderCreateDto programOrderCreateDto, 
@@ -57,17 +63,27 @@ public class BaseProgramOrder {
             ReentrantLock localLock = localLockCache.getLock(lockKey,false);
             localLockList.add(localLock);
         }
-        // 第三步：逐个加锁，任一本地锁失败则立即 break（剩余锁不获取，交由上层策略类处理）
+        // 第三步：逐个加锁（限时等待），任一本地锁超时/中断则停止获取并快速失败，不执行下单
+        boolean localLockFail = false;
         for (ReentrantLock reentrantLock : localLockList) {
             try {
-                reentrantLock.lock();
-            }catch (Exception e) {
+                if (reentrantLock.tryLock(LOCK_WAIT_TIME, TimeUnit.SECONDS)) {
+                    localLockSuccessList.add(reentrantLock);
+                } else {
+                    localLockFail = true;
+                    break;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                localLockFail = true;
                 break;
             }
-            localLockSuccessList.add(reentrantLock);
         }
         try {
-            // 第四步：执行回调——分布式锁逻辑由调用方在 lockTask 中实现（独立于本地锁管控）
+            if (localLockFail) {
+                throw new TicketFlowFrameException(BaseCode.SERVICE_LOCK_FAIL);
+            }
+            // 第四步：执行回调——是否叠加分布式锁由策略实现类在 lockTask 中决定
             return lockTask.execute();
         }finally {
             // 第五步：反向释放（后加的先释放），防止锁依赖顺序不一致导致死锁
