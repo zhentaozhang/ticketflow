@@ -40,6 +40,16 @@ public class Constant {
 
     public static final String WX_NOTIFY_FAILURE_RESULT = "FAIL";
 
+    public static final String WX_RAW_BODY_KEY = "rawBody";
+
+    public static final String WX_SIGNATURE_HEADER = "Wechatpay-Signature";
+
+    public static final String WX_SERIAL_HEADER = "Wechatpay-Serial";
+
+    public static final String WX_NONCE_HEADER = "Wechatpay-Nonce";
+
+    public static final String WX_TIMESTAMP_HEADER = "Wechatpay-Timestamp";
+
     public static final String PREFIX_DISTINCTION_NAME = "prefix.distinction.name";
 
     public static final String DEFAULT_PREFIX_DISTINCTION_NAME = "ticketflow";

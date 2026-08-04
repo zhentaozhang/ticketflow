@@ -27,27 +27,24 @@ import lombok.extern.slf4j.Slf4j;
 import java.math.BigDecimal;
 import java.util.Map;
 
+import static com.ticketflow.constant.Constant.WX_NONCE_HEADER;
+import static com.ticketflow.constant.Constant.WX_RAW_BODY_KEY;
+import static com.ticketflow.constant.Constant.WX_SERIAL_HEADER;
+import static com.ticketflow.constant.Constant.WX_SIGNATURE_HEADER;
+import static com.ticketflow.constant.Constant.WX_TIMESTAMP_HEADER;
+
 /**
  * 微信支付策略实现——对接微信支付 APIv3 Native 扫码支付。
  *
  * 回调验签与支付宝不同：微信签名在请求头（Wechatpay-*），业务数据在 AES-GCM
- * 密文里。order-service 入口把原始 body 和 4 个请求头放进 params（特殊 key），
- * signVerify 内完成验签+解密，并把 out_trade_no/trade_state/total_fee/appid/mchid
- * 回写进 params，供 PayService.notify 后续步骤与 dataVerify 使用。
+ * 密文里。order-service 入口把原始 body 和 4 个请求头放进 params（特殊 key，
+ * 定义在 Constant，跨服务共用），signVerify 内完成验签+解密，并把
+ * out_trade_no/trade_state/total_fee/appid/mchid 回写进 params，
+ * 供 PayService.notify 后续步骤与 dataVerify 使用。
  */
 @Slf4j
 @AllArgsConstructor
 public class WxPayStrategyHandler implements PayStrategyHandler {
-
-    public static final String WX_RAW_BODY_KEY = "rawBody";
-
-    public static final String WX_SIGNATURE_HEADER = "Wechatpay-Signature";
-
-    public static final String WX_SERIAL_HEADER = "Wechatpay-Serial";
-
-    public static final String WX_NONCE_HEADER = "Wechatpay-Nonce";
-
-    public static final String WX_TIMESTAMP_HEADER = "Wechatpay-Timestamp";
 
     private static final BigDecimal HUNDRED = new BigDecimal(100);
 
