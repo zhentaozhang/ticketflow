@@ -36,6 +36,10 @@ public class Constant {
 
     public static final String ALIPAY_NOTIFY_FAILURE_RESULT = "failure";
 
+    public static final String WX_NOTIFY_SUCCESS_RESULT = "SUCCESS";
+
+    public static final String WX_NOTIFY_FAILURE_RESULT = "FAIL";
+
     public static final String PREFIX_DISTINCTION_NAME = "prefix.distinction.name";
 
     public static final String DEFAULT_PREFIX_DISTINCTION_NAME = "ticketflow";
