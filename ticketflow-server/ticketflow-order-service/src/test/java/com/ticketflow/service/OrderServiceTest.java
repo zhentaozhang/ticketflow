@@ -987,6 +987,113 @@ class OrderServiceTest {
             assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
             verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
         }
+
+        @Test
+        void whenNotifyServiceError_ReturnsFailure() throws Exception {
+            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.error("验签失败"));
+
+            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
+            mockRequest.addHeader("Wechatpay-Signature", "sig");
+            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
+
+            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
+
+            assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+            verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
+        }
+
+        @Test
+        void whenOrderNotFound_ThrowsException() throws Exception {
+            RLock mockLock = mock(RLock.class);
+            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
+            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
+
+            NotifyVo notifyVo = new NotifyVo();
+            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+            notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+
+            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
+            mockRequest.addHeader("Wechatpay-Signature", "sig");
+            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
+
+            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
+                    () -> orderService.wxNotify(new CustomizeRequestWrapper(mockRequest)));
+            assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), ex.getCode());
+        }
+
+        @Test
+        void whenOrderNumberInvalid_ReturnsFailure() throws Exception {
+            NotifyVo notifyVo = new NotifyVo();
+            notifyVo.setOutTradeNo("not-a-number");
+            notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+
+            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
+            mockRequest.addHeader("Wechatpay-Signature", "sig");
+            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
+
+            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
+
+            assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+            verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
+        }
+
+        @Test
+        void whenOrderCancelledAndRefundSuccess_ReturnsSuccess() throws Exception {
+            RLock mockLock = mock(RLock.class);
+            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
+
+            Order order = createOrder(OrderStatus.CANCEL.getCode());
+            order.setOrderPrice(new BigDecimal("200"));
+            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
+            when(orderMapper.update(any(Order.class), any(LambdaUpdateWrapper.class))).thenReturn(1);
+            when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refunded"));
+
+            NotifyVo notifyVo = new NotifyVo();
+            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+            notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+
+            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
+            mockRequest.addHeader("Wechatpay-Signature", "sig");
+            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
+
+            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
+
+            assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
+            verify(payClient).refund(any(RefundDto.class));
+            verify(orderMapper).update(any(Order.class), any(LambdaUpdateWrapper.class));
+            verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
+        }
+
+        @Test
+        void whenOrderCancelledAndRefundFails_ReturnsFailure() throws Exception {
+            RLock mockLock = mock(RLock.class);
+            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
+
+            Order order = createOrder(OrderStatus.CANCEL.getCode());
+            order.setOrderPrice(new BigDecimal("200"));
+            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
+            when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.error("退款失败"));
+
+            NotifyVo notifyVo = new NotifyVo();
+            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+            notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+
+            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
+            mockRequest.addHeader("Wechatpay-Signature", "sig");
+            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
+
+            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
+
+            // 退款失败返回 FAIL，微信重试回调，防止退款永久丢失
+            assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+            verify(payClient).refund(any(RefundDto.class));
+            verify(orderMapper, never()).update(any(Order.class), any(LambdaUpdateWrapper.class));
+            verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
+        }
     }
 
     // ==================== P2: accountOrderCount ====================

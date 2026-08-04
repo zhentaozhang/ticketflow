@@ -15,6 +15,7 @@ import com.wechat.pay.java.core.notification.NotificationConfig;
 import com.wechat.pay.java.core.notification.NotificationParser;
 import com.wechat.pay.java.service.payments.nativepay.NativePayService;
 import com.wechat.pay.java.service.refund.RefundService;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 
@@ -57,8 +58,10 @@ public class PayAutoConfig {
     /**
      * 微信支付配置。RSAAutoCertificateConfig 自动下载并每 60 分钟轮换平台证书，
      * 同时实现 Config（请求签名）与 NotificationConfig（回调验签）两个接口。
+     * 构造即联网，无真实商户参数时启动失败，故用 wxpay.enabled 门控（默认关闭）。
      */
     @Bean
+    @ConditionalOnProperty(prefix = "wxpay", name = "enabled", havingValue = "true")
     public Config wxPayConfig(WxPayProperties wxPayProperties) throws Exception {
         return new RSAAutoCertificateConfig.Builder()
                 .merchantId(wxPayProperties.getMchId())
@@ -69,21 +72,25 @@ public class PayAutoConfig {
     }
 
     @Bean
+    @ConditionalOnProperty(prefix = "wxpay", name = "enabled", havingValue = "true")
     public NativePayService nativePayService(Config wxPayConfig) {
         return new NativePayService.Builder().config(wxPayConfig).build();
     }
 
     @Bean
+    @ConditionalOnProperty(prefix = "wxpay", name = "enabled", havingValue = "true")
     public RefundService refundService(Config wxPayConfig) {
         return new RefundService.Builder().config(wxPayConfig).build();
     }
 
     @Bean
+    @ConditionalOnProperty(prefix = "wxpay", name = "enabled", havingValue = "true")
     public NotificationParser notificationParser(Config wxPayConfig) {
         return new NotificationParser((NotificationConfig) wxPayConfig);
     }
 
     @Bean
+    @ConditionalOnProperty(prefix = "wxpay", name = "enabled", havingValue = "true")
     public WxPayStrategyHandler wxCall(NativePayService nativePayService, NotificationParser notificationParser,
                                        RefundService refundService, WxPayProperties wxPayProperties) {
         return new WxPayStrategyHandler(nativePayService, notificationParser, refundService, wxPayProperties);

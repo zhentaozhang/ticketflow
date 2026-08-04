@@ -114,6 +114,7 @@ alipay:
   alipayPublicKey: ${ALIPAY_PUBLIC_KEY}
   contentKey: ${ALIPAY_CONTENT_KEY}
 wxpay:
+  enabled: ${WXPAY_ENABLED:false}
   appId: ${WXPAY_APP_ID}
   mchId: ${WXPAY_MCH_ID}
   merchantSerialNo: ${WXPAY_MERCHANT_SERIAL_NO}

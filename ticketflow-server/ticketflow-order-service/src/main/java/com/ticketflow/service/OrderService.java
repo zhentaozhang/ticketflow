@@ -366,9 +366,9 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     
     /**
      * 支付宝异步通知处理。
-     * 手动 ReentrantLock（而非 @ServiceLock）因为 payClient.notify() 内部也有锁，避免注解嵌套。
+     * 手动 ReentrantLock（而非 @ServiceLock）：先加锁（订单号已知），
+     * 锁内调 payClient.notify() 验签 + 幂等，再执行退款 / updateOrderRelatedData。
      * 如果订单已取消 → 自动退款（延迟订单关闭场景）。
-     * 先调用 payClient.notify() 验签 + 幂等，再执行 updateOrderRelatedData。
      *
      * ALIPAY_NOTIFY_SUCCESS_RESULT = "success"（支付宝要求的明文返回）
      */
@@ -450,10 +450,10 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
 
         Map<String, String> params = new HashMap<>(16);
         params.put(WX_RAW_BODY_KEY, rawBody);
-        params.put(WX_SIGNATURE_HEADER, request.getHeader("Wechatpay-Signature"));
-        params.put(WX_SERIAL_HEADER, request.getHeader("Wechatpay-Serial"));
-        params.put(WX_NONCE_HEADER, request.getHeader("Wechatpay-Nonce"));
-        params.put(WX_TIMESTAMP_HEADER, request.getHeader("Wechatpay-Timestamp"));
+        params.put(WX_SIGNATURE_HEADER, request.getHeader(WX_SIGNATURE_HEADER));
+        params.put(WX_SERIAL_HEADER, request.getHeader(WX_SERIAL_HEADER));
+        params.put(WX_NONCE_HEADER, request.getHeader(WX_NONCE_HEADER));
+        params.put(WX_TIMESTAMP_HEADER, request.getHeader(WX_TIMESTAMP_HEADER));
 
         NotifyDto notifyDto = new NotifyDto();
         notifyDto.setChannel(PayChannel.WX.getValue());
@@ -469,12 +469,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         }
         String outTradeNo = notifyVo.getOutTradeNo();
 
+        long orderNumber;
+        try {
+            orderNumber = Long.parseLong(outTradeNo);
+        } catch (NumberFormatException e) {
+            log.error("微信回调订单号格式错误 outTradeNo : {}", outTradeNo, e);
+            return WX_NOTIFY_FAILURE_RESULT;
+        }
+
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, UPDATE_ORDER_STATUS_LOCK,
                 new String[]{outTradeNo});
         lock.lock();
         try {
             Order order = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class)
-                    .eq(Order::getOrderNumber, Long.parseLong(outTradeNo)));
+                    .eq(Order::getOrderNumber, orderNumber));
             if (Objects.isNull(order)) {
                 throw new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST);
             }
@@ -491,14 +499,16 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                     updateOrder.setEditTime(DateUtils.now());
                     updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
                     orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class)
-                            .eq(Order::getOrderNumber, outTradeNo));
+                            .eq(Order::getOrderNumber, orderNumber));
                 } else {
+                    // 退款失败返回 FAIL，微信会重试回调；返回 SUCCESS 会导致退款永久丢失
                     log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
+                    return WX_NOTIFY_FAILURE_RESULT;
                 }
                 return WX_NOTIFY_SUCCESS_RESULT;
             }
             try {
-                orderService.updateOrderRelatedData(Long.parseLong(outTradeNo), OrderStatus.PAY);
+                orderService.updateOrderRelatedData(orderNumber, OrderStatus.PAY);
             } catch (Exception e) {
                 log.warn("updateOrderRelatedData warn message", e);
             }
