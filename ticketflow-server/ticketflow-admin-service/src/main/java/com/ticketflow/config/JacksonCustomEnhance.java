@@ -5,7 +5,6 @@ import com.fasterxml.jackson.annotation.JsonInclude.Include;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser.Feature;
 import com.fasterxml.jackson.core.json.JsonReadFeature;
-import com.fasterxml.jackson.core.json.JsonWriteFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.SerializerProvider;
@@ -37,17 +36,18 @@ import java.util.TimeZone;
 public class JacksonCustomEnhance implements Jackson2ObjectMapperBuilderCustomizer, Ordered {
 
     /**
-     * 默认日期时间格式 
-     * */
+     * 默认日期时间格式
+     *
+     */
     private final String dateTimeFormat = "yyyy-MM-dd HH:mm:ss";
-    
+
     @Override
     public void customize(Jackson2ObjectMapperBuilder builder) {
         builder.serializationInclusion(Include.ALWAYS);
         builder.featuresToEnable(Feature.ALLOW_SINGLE_QUOTES);
         builder.featuresToEnable(Feature.ALLOW_UNQUOTED_FIELD_NAMES);
-        
-        
+
+
         SimpleModule[] simpleModules = new SimpleModule[9];
         simpleModules[0] = new SimpleModule().setSerializerModifier(new JsonCustomSerializer());
         simpleModules[1] = new SimpleModule().addSerializer(Date.class, new JsonSerializer<Date>() {
@@ -73,14 +73,13 @@ public class JacksonCustomEnhance implements Jackson2ObjectMapperBuilderCustomiz
         DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern(timeFormat);
         simpleModules[7] = new SimpleModule().addSerializer(LocalTime.class, new LocalTimeSerializer(timeFormatter));
         simpleModules[8] = new SimpleModule().addDeserializer(LocalTime.class, new LocalTimeDeserializer(timeFormatter));
-        
+
         builder.modules(simpleModules);
         builder.modules(new JavaTimeModule());
-        
+
         builder.timeZone(TimeZone.getDefault());
         builder.featuresToDisable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
         builder.featuresToEnable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature());
-        builder.featuresToEnable(JsonWriteFeature.WRITE_NUMBERS_AS_STRINGS.mappedFeature());
     }
 
     @Override
