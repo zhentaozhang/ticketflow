@@ -28,7 +28,7 @@ public class GatewayProperty {
             "/**/order/cancel,/**/order/create,/**/order/pay,/**/order/select/list,/**/order/get,/**/order/cancel}")
     private String[] checkTokenPaths;
     
-    @Value("${skip.check.parmeter.paths:/**/alipay/notify}")
+    @Value("${skip.check.parmeter.paths:/**/alipay/notify,/**/wx/notify}")
     private String[] checkSkipParmeterPaths;
     
     @Value("${allow.normal.access:true}")
