@@ -100,6 +100,13 @@ import java.util.stream.Collectors;
 
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_SUCCESS_RESULT;
 import static com.ticketflow.constant.Constant.GLIDE_LINE;
+import static com.ticketflow.constant.Constant.WX_NONCE_HEADER;
+import static com.ticketflow.constant.Constant.WX_NOTIFY_FAILURE_RESULT;
+import static com.ticketflow.constant.Constant.WX_NOTIFY_SUCCESS_RESULT;
+import static com.ticketflow.constant.Constant.WX_RAW_BODY_KEY;
+import static com.ticketflow.constant.Constant.WX_SERIAL_HEADER;
+import static com.ticketflow.constant.Constant.WX_SIGNATURE_HEADER;
+import static com.ticketflow.constant.Constant.WX_TIMESTAMP_HEADER;
 import static com.ticketflow.core.DistributedLockConstants.UPDATE_ORDER_STATUS_LOCK;
 import static com.ticketflow.core.RepeatExecuteLimitConstants.CANCEL_PROGRAM_ORDER;
 import static com.ticketflow.core.RepeatExecuteLimitConstants.CREATE_PROGRAM_ORDER_MQ;
@@ -424,6 +431,80 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             lock.unlock();
         }
 
+    }
+
+    /**
+     * 微信支付异步通知处理。
+     * 微信回调的 out_trade_no 在 AES-GCM 密文中，无法先取单号再加锁，
+     * 因此先调 payClient.notify()（验签+解密+幂等+账单状态流转），拿到单号后再加锁处理订单侧逻辑。
+     * 验签失败/业务失败返回 FAIL 让微信重试（幂等保护不会重复入账）。
+     */
+    public String wxNotify(HttpServletRequest request) {
+
+        String rawBody = "";
+        if (request instanceof final CustomizeRequestWrapper customizeRequestWrapper) {
+            rawBody = customizeRequestWrapper.getRequestBody();
+        }
+        log.info("收到微信支付回调通知 rawBody : {}", rawBody);
+
+        Map<String, String> params = new HashMap<>(16);
+        params.put(WX_RAW_BODY_KEY, rawBody);
+        params.put(WX_SIGNATURE_HEADER, request.getHeader("Wechatpay-Signature"));
+        params.put(WX_SERIAL_HEADER, request.getHeader("Wechatpay-Serial"));
+        params.put(WX_NONCE_HEADER, request.getHeader("Wechatpay-Nonce"));
+        params.put(WX_TIMESTAMP_HEADER, request.getHeader("Wechatpay-Timestamp"));
+
+        NotifyDto notifyDto = new NotifyDto();
+        notifyDto.setChannel(PayChannel.WX.getValue());
+        notifyDto.setParams(params);
+        ApiResponse<NotifyVo> notifyResponse = payClient.notify(notifyDto);
+        if (!Objects.equals(notifyResponse.getCode(), BaseCode.SUCCESS.getCode())) {
+            log.error("pay服务微信回调处理失败 dto : {} response : {}", JSON.toJSONString(notifyDto), JSON.toJSONString(notifyResponse));
+            return WX_NOTIFY_FAILURE_RESULT;
+        }
+        NotifyVo notifyVo = notifyResponse.getData();
+        if (!WX_NOTIFY_SUCCESS_RESULT.equals(notifyVo.getPayResult())) {
+            return WX_NOTIFY_FAILURE_RESULT;
+        }
+        String outTradeNo = notifyVo.getOutTradeNo();
+
+        RLock lock = serviceLockTool.getLock(LockType.Reentrant, UPDATE_ORDER_STATUS_LOCK,
+                new String[]{outTradeNo});
+        lock.lock();
+        try {
+            Order order = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class)
+                    .eq(Order::getOrderNumber, Long.parseLong(outTradeNo)));
+            if (Objects.isNull(order)) {
+                throw new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST);
+            }
+            // 订单已取消：自动退款（延迟订单关闭场景）
+            if (Objects.equals(order.getOrderStatus(), OrderStatus.CANCEL.getCode())) {
+                RefundDto refundDto = new RefundDto();
+                refundDto.setOrderNumber(outTradeNo);
+                refundDto.setAmount(order.getOrderPrice());
+                refundDto.setChannel(PayChannel.WX.getValue());
+                refundDto.setReason("延迟订单关闭");
+                ApiResponse<String> response = payClient.refund(refundDto);
+                if (response.getCode().equals(BaseCode.SUCCESS.getCode())) {
+                    Order updateOrder = new Order();
+                    updateOrder.setEditTime(DateUtils.now());
+                    updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
+                    orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class)
+                            .eq(Order::getOrderNumber, outTradeNo));
+                } else {
+                    log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
+                }
+                return WX_NOTIFY_SUCCESS_RESULT;
+            }
+            try {
+                orderService.updateOrderRelatedData(Long.parseLong(outTradeNo), OrderStatus.PAY);
+            } catch (Exception e) {
+                log.warn("updateOrderRelatedData warn message", e);
+            }
+            return WX_NOTIFY_SUCCESS_RESULT;
+        } finally {
+            lock.unlock();
+        }
     }
     
     /**

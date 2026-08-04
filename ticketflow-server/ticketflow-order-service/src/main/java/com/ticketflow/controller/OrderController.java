@@ -79,6 +79,12 @@ public class OrderController {
     public String alipayNotify(HttpServletRequest request) {
         return orderService.alipayNotify(request);
     }
+
+    @Operation(summary  = "微信支付后回调通知")
+    @PostMapping(value = "/wx/notify")
+    public String wxNotify(HttpServletRequest request) {
+        return orderService.wxNotify(request);
+    }
     
     @Operation(summary  = "查看订单列表")
     @PostMapping(value = "/select/list")
