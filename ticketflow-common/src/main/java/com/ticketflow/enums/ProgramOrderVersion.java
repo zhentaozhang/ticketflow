@@ -8,26 +8,27 @@ package com.ticketflow.enums;
 public enum ProgramOrderVersion {
     /**
      * 版本
-     * */
-    V1_VERSION("v1","v1版本",1),
-    
-    V2_VERSION("v2","v2版本",2),
-    
-    V21_VERSION("v2","v21版本",21),
-   
-    V3_VERSION("v3","v3版本",3),
-    
-    V31_VERSION("v3","v31版本",31),
-    
-    V4_VERSION("v4","v4版本",4),
-    
-    V41_VERSION("v4","v41版本",41),
+     *
+     */
+    V1_VERSION("v1", "v1版本", 1),
+
+    V2_VERSION("v2", "v2版本", 2),
+
+    V21_VERSION("v21", "v21版本", 21),
+
+    V3_VERSION("v3", "v3版本", 3),
+
+    V31_VERSION("v31", "v31版本", 31),
+
+    V4_VERSION("v4", "v4版本", 4),
+
+    V41_VERSION("v41", "v41版本", 41),
     ;
 
     private final String version;
 
     private final String msg;
-    
+
     private final Integer value;
 
     ProgramOrderVersion(String version, String msg, Integer value) {
@@ -39,16 +40,16 @@ public enum ProgramOrderVersion {
     public String getVersion() {
         return version;
     }
-    
+
 
     public String getMsg() {
         return this.msg == null ? "" : this.msg;
     }
-    
-    public Integer getValue(){
+
+    public Integer getValue() {
         return value;
     }
-    
+
 
     public static String getMsg(String version) {
         for (ProgramOrderVersion re : ProgramOrderVersion.values()) {

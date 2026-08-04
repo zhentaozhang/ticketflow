@@ -444,8 +444,17 @@ class ProgramOrderServiceTest {
             remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 100L);
             when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
                     .thenReturn(remainMap);
+            when(uidGenerator.getUid()).thenReturn(888L, 12345L);
 
-            when(uidGenerator.getOrderNumber(USER_ID)).thenReturn(2024001L);
+            List<PurchaseSeat> purchaseSeats = Arrays.asList(
+                    createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID),
+                    createPurchaseSeat(51L, 2001L, TICKET_CATEGORY_ID));
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.SUCCESS.getCode());
+            luaResult.setPurchaseSeatList(purchaseSeats);
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
+
             when(programService.simpleGetProgramAndShowMultipleCache(PROGRAM_ID))
                     .thenReturn(createProgramVo());
             when(orderClient.create(any(OrderCreateDto.class)))
@@ -454,7 +463,6 @@ class ProgramOrderServiceTest {
             String result = programOrderService.create(dto, ProgramOrderVersion.V1_VERSION.getValue());
 
             assertEquals("2024001", result);
-            verify(programCacheResolutionOperate).programCacheOperate(anyList(), any());
             verify(delayOrderCancelSend).sendMessage(any(DelayOrderCancelDto.class));
         }
 
@@ -475,6 +483,12 @@ class ProgramOrderServiceTest {
             remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 1L);
             when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
                     .thenReturn(remainMap);
+            when(uidGenerator.getUid()).thenReturn(888L);
+
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.TICKET_REMAIN_NUMBER_NOT_SUFFICIENT.getCode());
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
 
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programOrderService.create(dto, ProgramOrderVersion.V1_VERSION.getValue()));
@@ -484,7 +498,6 @@ class ProgramOrderServiceTest {
         @Test
         void whenPriceMismatch_ThrowsException() {
             ProgramOrderCreateDto dto = createDtoWithSeats(1);
-            dto.getSeatDtoList().get(0).setPrice(new BigDecimal("200"));
 
             when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
                     .thenReturn(createShowTime());
@@ -498,6 +511,12 @@ class ProgramOrderServiceTest {
             remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 100L);
             when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
                     .thenReturn(remainMap);
+            when(uidGenerator.getUid()).thenReturn(888L);
+
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.PRICE_ERROR.getCode());
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
 
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programOrderService.create(dto, ProgramOrderVersion.V1_VERSION.getValue()));
@@ -520,8 +539,14 @@ class ProgramOrderServiceTest {
             remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 100L);
             when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
                     .thenReturn(remainMap);
+            when(uidGenerator.getUid()).thenReturn(888L, 12345L);
 
-            when(uidGenerator.getOrderNumber(USER_ID)).thenReturn(2024001L);
+            List<PurchaseSeat> purchaseSeats = List.of(createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID));
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.SUCCESS.getCode());
+            luaResult.setPurchaseSeatList(purchaseSeats);
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
             when(programService.simpleGetProgramAndShowMultipleCache(PROGRAM_ID))
                     .thenReturn(createProgramVo());
             when(orderClient.create(any(OrderCreateDto.class)))
@@ -530,9 +555,8 @@ class ProgramOrderServiceTest {
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programOrderService.create(dto, ProgramOrderVersion.V1_VERSION.getValue()));
 
-            // Should trigger rollback (updateProgramCacheDataResolution with CANCEL)
-            verify(programCacheResolutionOperate, times(2))
-                    .programCacheOperate(anyList(), any());
+            // Lua 扣减成功后 RPC 失败，仅触发一次补偿回滚（无校验 Lua 回补 CANCEL）
+            verify(programCacheResolutionOperate).programCacheOperate(anyList(), any());
         }
     }
 

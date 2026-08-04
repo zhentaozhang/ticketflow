@@ -13,13 +13,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import static com.ticketflow.core.DistributedLockConstants.PROGRAM_ORDER_CREATE_V4;
+
 /**
- * 节目订单 V4 实现（Kafka 异步版本）。
- * 调用 createNewAsync() 将订单创建请求发送到 Kafka 异步处理。
- * 客户端轮询订单状态完成最终一致。
- *
- * V41 是 V4 的变体，与 V4 共享异步消息通道但使用不同的消费端逻辑。
- * 适用于高并发场景下削峰填谷。
+ * 节目订单 V41 实现（V4 的独立注册变体）。
+ * 与 V4 相同的编排：复合校验 → BaseProgramOrder 本地锁（按 ticketCategoryId）→
+ * createNewAsync() 发 Kafka 异步建单，适用于高并发场景下削峰填谷。
  */
 @Slf4j
 @Component
@@ -36,7 +35,8 @@ public class ProgramOrderV41Strategy implements ProgramOrderStrategy {
     
     /**
      * 创建订单（V41 异步变体版本）
-     * 直接调用 createNewAsync() 走 Kafka 异步消费，适用于高并发削峰场景
+     * 委托 BaseProgramOrder.localLockCreateOrder 管理本地锁，
+     * 回调 createNewAsync() 走 Kafka 异步消费，适用于高并发削峰场景
      *
      * @param programOrderCreateDto 订单创建参数
      * @return 订单编号
@@ -47,7 +47,8 @@ public class ProgramOrderV41Strategy implements ProgramOrderStrategy {
     @Override
     public String createOrder(ProgramOrderCreateDto programOrderCreateDto) {
         compositeContainer.execute(CompositeCheckType.PROGRAM_ORDER_CREATE_CHECK.getValue(),programOrderCreateDto);
-        return programOrderService.createNewAsync(programOrderCreateDto,ProgramOrderVersion.V41_VERSION.getValue());
+        return baseProgramOrder.localLockCreateOrder(PROGRAM_ORDER_CREATE_V4,programOrderCreateDto,
+                () -> programOrderService.createNewAsync(programOrderCreateDto,ProgramOrderVersion.V41_VERSION.getValue()));
     }
     
     /**

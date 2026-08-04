@@ -23,6 +23,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
@@ -38,10 +39,13 @@ import static com.ticketflow.core.DistributedLockConstants.PROGRAM_ORDER_CREATE_
  * 同时持有所有相关锁后，调用 create() 同步创建订单。
  *
  * 锁释放顺序与获取顺序相反（逆序释放），避免死锁。
+ * 所有锁获取均带 3 秒超时，超时快速失败，避免锁持有者异常时无限阻塞。
  **/
 @Slf4j
 @Component
 public class ProgramOrderV2Strategy implements ProgramOrderStrategy {
+
+    private static final long LOCK_WAIT_TIME = 3L;
     
     @Autowired
     private ProgramOrderService programOrderService;
@@ -91,29 +95,43 @@ public class ProgramOrderV2Strategy implements ProgramOrderStrategy {
             localLockList.add(localLock);
             serviceLockList.add(serviceLock);
         }
-        // 第二轮：获取所有本地锁，任一失败即 break（不继续往下获取）
+        // 第二轮：获取所有本地锁（限时等待），任一失败标记 localLockFail 并停止获取
+        boolean localLockFail = false;
         for (ReentrantLock reentrantLock : localLockList) {
             try {
-                reentrantLock.lock();
-            }catch (Exception e) {
+                if (reentrantLock.tryLock(LOCK_WAIT_TIME, TimeUnit.SECONDS)) {
+                    localLockSuccessList.add(reentrantLock);
+                } else {
+                    localLockFail = true;
+                    break;
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                localLockFail = true;
                 break;
             }
-            localLockSuccessList.add(reentrantLock);
         }
-        // 第三轮：获取所有分布式锁，任一失败标记 serviceLockFail 并 break
+        // 第三轮：本地锁全部获取成功后才获取分布式锁，任一失败标记 serviceLockFail 并 break
         boolean serviceLockFail = false;
-        for (RLock rLock : serviceLockList) {
-            try {
-                rLock.lock();
-            }catch (Exception e) {
-                serviceLockFail = true;
-                break;
+        if (!localLockFail) {
+            for (RLock rLock : serviceLockList) {
+                try {
+                    if (rLock.tryLock(LOCK_WAIT_TIME, TimeUnit.SECONDS)) {
+                        serviceLockSuccessList.add(rLock);
+                    } else {
+                        serviceLockFail = true;
+                        break;
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    serviceLockFail = true;
+                    break;
+                }
             }
-            serviceLockSuccessList.add(rLock);
         }
         try {
-            // 分布式锁未全部获取成功时提前抛出异常（不执行下单逻辑）
-            if (serviceLockFail) {
+            // 任一层锁未全部获取成功时提前抛出异常（不执行下单逻辑）
+            if (localLockFail || serviceLockFail) {
                 throw new TicketFlowFrameException(BaseCode.SERVICE_LOCK_FAIL);
             }
             return programOrderService.create(programOrderCreateDto,ProgramOrderVersion.V2_VERSION.getValue());
