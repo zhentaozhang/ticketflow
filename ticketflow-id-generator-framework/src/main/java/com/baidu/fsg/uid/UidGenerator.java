@@ -25,18 +25,12 @@ import com.baidu.fsg.uid.exception.UidGenerateException;
 public interface UidGenerator {
 
     /**
-     * Get a unique ID
+     * 获取一个唯一的ID
      *
      * @return UID
      * @throws UidGenerateException
      */
     long getUid() throws UidGenerateException;
-    
-    /**
-     * 获取id
-     * @return 结果
-     * */
-    long getId();
     
     /**
      * 【方案1】获取订单编号 - 固定预留6位基因位
