@@ -230,7 +230,13 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     public PageVo<ProgramListVo> search(ProgramSearchDto programSearchDto) {
         //将入参的参数进行具体的组装
         setQueryTime(programSearchDto);
-        return programEs.search(programSearchDto);
+        //使用elasticsearch查询
+        PageVo<ProgramListVo> pageVo = programEs.search(programSearchDto);
+        if (CollectionUtil.isNotEmpty(pageVo.getList())) {
+            return pageVo;
+        }
+        //ES 无数据或不可用时走 DB 兜底（DB 侧无搜索词条件，仅按分类/时间过滤）
+        return dbSelectPage(programSearchDto);
     }
 
     /**
@@ -388,7 +394,17 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      */
     public List<ProgramListVo> recommendList(ProgramRecommendListDto programRecommendListDto) {
         compositeContainer.execute(CompositeCheckType.PROGRAM_RECOMMEND_CHECK.getValue(), programRecommendListDto);
-        return programEs.recommendList(programRecommendListDto);
+        List<ProgramListVo> programListVoList = programEs.recommendList(programRecommendListDto);
+        if (CollectionUtil.isNotEmpty(programListVoList)) {
+            return programListVoList;
+        }
+        //ES 无数据或不可用时走 DB 兜底（按热度取 10 条，不保留随机排序与排除逻辑）
+        ProgramPageListDto programPageListDto = new ProgramPageListDto();
+        BeanUtil.copyProperties(programRecommendListDto, programPageListDto);
+        programPageListDto.setType(2);
+        programPageListDto.setPageNumber(1);
+        programPageListDto.setPageSize(10);
+        return dbSelectPage(programPageListDto).getList();
     }
 
     /**

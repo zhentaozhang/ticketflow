@@ -136,9 +136,10 @@ jasypt:
     password: ${JASYPT_ENCRYPTOR_PASSWORD}
     algorithm: PBEWithMD5AndDES
 elasticsearch:
+  esSwitch: true                     # ES 功能开关；无 ES 环境部署时改为 false，所有查询自动走 DB 兜底
   ip: 127.0.0.1:9200
-  userName: ${ES_USERNAME}
-  passWord: ${ES_PASSWORD}
+  userName: ${ES_USERNAME:default}   # 等于 default 时不启用认证
+  passWord: ${ES_PASSWORD:default}
 delay:
   queue:
     corePoolSize: 8                     # 核心线程数(提升并发处理能力)
