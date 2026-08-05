@@ -1,9 +1,3 @@
-/*
- *Copyright © 2018 anji-plus
- *安吉加加信息技术有限公司
- *http://www.anji-plus.com
- *All rights reserved.
- */
 package com.ticketflow.captcha.service.impl;
 
 import com.ticketflow.captcha.model.common.RepCodeEnum;
@@ -11,42 +5,34 @@ import com.ticketflow.captcha.model.common.ResponseModel;
 import com.ticketflow.captcha.model.vo.CaptchaVO;
 import com.ticketflow.captcha.service.CaptchaService;
 import com.ticketflow.captcha.util.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
+import org.springframework.stereotype.Component;
 
-import java.util.Properties;
-
+import java.util.Map;
 
 /**
- * 默认验证码实现。提供基础验证码服务，作为兜底实现。
+ * 默认验证码实现。根据请求中的验证码类型委托给对应的验证码服务，作为统一入口。
  **/
-public class DefaultCaptchaServiceImpl extends AbstractCaptchaService{
+@Component("captchaDefault")
+public class DefaultCaptchaServiceImpl extends AbstractCaptchaService {
+
+    @Autowired
+    private ApplicationContext applicationContext;
 
     @Override
     public String captchaType() {
         return "default";
     }
 
-    @Override
-    public void init(Properties config) {
-        for (String s : CaptchaServiceFactory.instances.keySet()) {
-            if(captchaType().equals(s)){
-                continue;
+    private CaptchaService getService(String captchaType) {
+        Map<String, CaptchaService> services = applicationContext.getBeansOfType(CaptchaService.class);
+        for (CaptchaService service : services.values()) {
+            if (service != this && captchaType.equals(service.captchaType())) {
+                return service;
             }
-            getService(s).init(config);
         }
-    }
-
-	@Override
-	public void destroy(Properties config) {
-		for (String s : CaptchaServiceFactory.instances.keySet()) {
-			if(captchaType().equals(s)){
-				continue;
-			}
-			getService(s).destroy(config);
-		}
-	}
-
-	private CaptchaService getService(String captchaType){
-        return CaptchaServiceFactory.instances.get(captchaType);
+        return null;
     }
 
     @Override
@@ -57,7 +43,11 @@ public class DefaultCaptchaServiceImpl extends AbstractCaptchaService{
         if (StringUtils.isEmpty(captchaVO.getCaptchaType())) {
             return RepCodeEnum.NULL_ERROR.parseError("类型");
         }
-        return getService(captchaVO.getCaptchaType()).get(captchaVO);
+        CaptchaService service = getService(captchaVO.getCaptchaType());
+        if (service == null) {
+            return RepCodeEnum.PARAM_FORMAT_ERROR.parseError("captchaType");
+        }
+        return service.get(captchaVO);
     }
 
     @Override
@@ -71,29 +61,10 @@ public class DefaultCaptchaServiceImpl extends AbstractCaptchaService{
         if (StringUtils.isEmpty(captchaVO.getToken())) {
             return RepCodeEnum.NULL_ERROR.parseError("token");
         }
-        return getService(captchaVO.getCaptchaType()).check(captchaVO);
+        CaptchaService service = getService(captchaVO.getCaptchaType());
+        if (service == null) {
+            return RepCodeEnum.PARAM_FORMAT_ERROR.parseError("captchaType");
+        }
+        return service.check(captchaVO);
     }
-
-    @Override
-    public ResponseModel verification(CaptchaVO captchaVO) {
-        if (captchaVO == null) {
-            return RepCodeEnum.NULL_ERROR.parseError("captchaVO");
-        }
-        if (StringUtils.isEmpty(captchaVO.getCaptchaVerification())) {
-            return RepCodeEnum.NULL_ERROR.parseError("二次校验参数");
-        }
-        try {
-            String codeKey = String.format(REDIS_SECOND_CAPTCHA_KEY, captchaVO.getCaptchaVerification());
-            if (!CaptchaServiceFactory.getCache(cacheType).exists(codeKey)) {
-                return ResponseModel.errorMsg(RepCodeEnum.API_CAPTCHA_INVALID);
-            }
-            //二次校验取值后，即刻失效
-            CaptchaServiceFactory.getCache(cacheType).delete(codeKey);
-        } catch (Exception e) {
-            logger.error("验证码坐标解析失败", e);
-            return ResponseModel.errorMsg(e.getMessage());
-        }
-        return ResponseModel.success();
-    }
-
 }
