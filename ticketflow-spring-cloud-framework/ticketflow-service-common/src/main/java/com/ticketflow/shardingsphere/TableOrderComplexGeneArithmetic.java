@@ -59,7 +59,7 @@ public class TableOrderComplexGeneArithmetic implements ComplexKeysShardingAlgor
         Map<String, Collection<Long>> columnNameAndShardingValuesMap = complexKeysShardingValue.getColumnNameAndShardingValuesMap();
         //如果没有条件查询，那么就查所有的分表
         if (CollectionUtil.isEmpty(columnNameAndShardingValuesMap)) {
-            return actualTableNames;
+            return allActualSplitTableNames;
         }
         //order_number条件的值
         Collection<Long> orderNumberValues = columnNameAndShardingValuesMap.get("order_number");
