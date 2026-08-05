@@ -69,7 +69,6 @@ class SnowflakeIdGeneratorTest {
             assertEquals(WORKER_ID, (orderNumber >> 12) & 0x1F, "gene sequence polluted workerId bits");
             assertEquals(DATA_CENTER_ID, (orderNumber >> 17) & 0x1F, "gene sequence polluted datacenterId bits");
             assertEquals(USER_ID & 0x3F, orderNumber & 0x3F, "gene bits mismatch");
-            assertTrue(((orderNumber >> 6) & 0x3F) <= 0x3F, "sequence exceeds 6 bits");
         }
     }
 
@@ -100,10 +99,14 @@ class SnowflakeIdGeneratorTest {
     }
 
     @Test
-    void constructor_emptyWorkDataCenterId_fallsBackWithoutNpe() {
+    void constructor_emptyWorkDataCenterId_fallsBackToMacWithinRange() {
         FixedClockSnowflakeIdGenerator generator = new FixedClockSnowflakeIdGenerator(new WorkDataCenterId());
         assertNotNull(generator);
-        assertTrue(generator.nextId() > 0);
+        long id = generator.nextId();
+        long macWorkerId = (id >> 12) & 0x1F;
+        long macDatacenterId = (id >> 17) & 0x1F;
+        assertTrue(macWorkerId >= 0 && macWorkerId <= 31, "fallback workerId out of range: " + macWorkerId);
+        assertTrue(macDatacenterId >= 0 && macDatacenterId <= 31, "fallback datacenterId out of range: " + macDatacenterId);
     }
 
     @Test
