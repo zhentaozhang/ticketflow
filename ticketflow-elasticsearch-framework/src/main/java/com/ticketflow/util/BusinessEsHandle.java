@@ -30,6 +30,7 @@ import org.elasticsearch.search.sort.SortBuilders;
 import org.elasticsearch.search.sort.SortOrder;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
@@ -256,7 +257,7 @@ public class BusinessEsHandle {
                 endpoint = "/" + indexName + "/_bulk";
             }
             log.info("batchAdd dsl : {}", bulkBody);
-            HttpEntity entity = new NStringEntity(bulkBody.toString(), ContentType.create(NDJSON_CONTENT_TYPE));
+            HttpEntity entity = new NStringEntity(bulkBody.toString(), ContentType.create(NDJSON_CONTENT_TYPE, StandardCharsets.UTF_8));
             Response response = execute("POST", endpoint, entity);
             if (response.getStatusLine().getStatusCode() != RestStatus.OK.getStatus()) {
                 log.error("batchAdd http error, indexName:{}, statusCode:{}", indexName, response.getStatusLine().getStatusCode());
