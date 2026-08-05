@@ -30,16 +30,6 @@ import java.util.concurrent.ConcurrentHashMap;
  **/
 public class ImageUtils {
     private static final Logger logger = LoggerFactory.getLogger(ImageUtils.class);
-    /***
-     * 旋转底图
-     */
-    private static final Map<String, String> ORIGINAL_ROTATE_CACHE_MAP = new ConcurrentHashMap<>();
-    
-    /**
-     * 旋转块
-     * */
-    private static final Map<String, String> ROTATE_BLOCK_CACHE_MAP = new ConcurrentHashMap<>();
-    
     /**
      * 滑块底图
      * */
@@ -59,15 +49,7 @@ public class ImageUtils {
     
     private static final Integer SIX = 6;
 
-    public static void cacheImage(String captchaOriginalPathJigsaw, String captchaOriginalPathClick, String captchaOriginalPathRotate) {
-        // 旋转拼图
-        if (StringUtils.isBlank(captchaOriginalPathRotate)) {
-            ORIGINAL_ROTATE_CACHE_MAP.putAll(getResourcesImagesFile("defaultImages/rotate/original"));
-            ROTATE_BLOCK_CACHE_MAP.putAll(getResourcesImagesFile("defaultImages/rotate/rotateBlock"));
-        } else {
-            ORIGINAL_ROTATE_CACHE_MAP.putAll(getImagesFile(captchaOriginalPathRotate + File.separator + "original"));
-            ROTATE_BLOCK_CACHE_MAP.putAll(getImagesFile(captchaOriginalPathRotate + File.separator + "rotateBlock"));
-        }
+    public static void cacheImage(String captchaOriginalPathJigsaw, String captchaOriginalPathClick) {
         //滑动拼图
         if (StringUtils.isBlank(captchaOriginalPathJigsaw)) {
             ORIGINAL_CACHE_MAP.putAll(getResourcesImagesFile("defaultImages/jigsaw/original"));
@@ -86,39 +68,7 @@ public class ImageUtils {
         FILE_NAME_MAP.put(CaptchaBaseMapEnum.ORIGINAL.getCodeValue(), ORIGINAL_CACHE_MAP.keySet().toArray(new String[0]));
         FILE_NAME_MAP.put(CaptchaBaseMapEnum.SLIDING_BLOCK.getCodeValue(), SLIDING_BLOCK_CACHE_MAP.keySet().toArray(new String[0]));
         FILE_NAME_MAP.put(CaptchaBaseMapEnum.PIC_CLICK.getCodeValue(), PIC_CLICK_CACHE_MAP.keySet().toArray(new String[0]));
-        FILE_NAME_MAP.put(CaptchaBaseMapEnum.ROTATE.getCodeValue(), ORIGINAL_ROTATE_CACHE_MAP.keySet().toArray(new String[0]));
-        FILE_NAME_MAP.put(CaptchaBaseMapEnum.ROTATE_BLOCK.getCodeValue(), ROTATE_BLOCK_CACHE_MAP.keySet().toArray(new String[0]));
         logger.info("初始化底图:{}", JsonUtil.toJsonString(FILE_NAME_MAP));
-    }
-
-    public static void cacheBootImage(Map<String, String> originalMap, Map<String, String> slidingBlockMap, Map<String, String> picClickMap) {
-        ORIGINAL_CACHE_MAP.putAll(originalMap);
-        SLIDING_BLOCK_CACHE_MAP.putAll(slidingBlockMap);
-        PIC_CLICK_CACHE_MAP.putAll(picClickMap);
-        FILE_NAME_MAP.put(CaptchaBaseMapEnum.ORIGINAL.getCodeValue(), ORIGINAL_CACHE_MAP.keySet().toArray(new String[0]));
-        FILE_NAME_MAP.put(CaptchaBaseMapEnum.SLIDING_BLOCK.getCodeValue(), SLIDING_BLOCK_CACHE_MAP.keySet().toArray(new String[0]));
-        FILE_NAME_MAP.put(CaptchaBaseMapEnum.PIC_CLICK.getCodeValue(), PIC_CLICK_CACHE_MAP.keySet().toArray(new String[0]));
-        logger.info("自定义resource底图:{}", JsonUtil.toJsonString(FILE_NAME_MAP));
-    }
-
-    public static BufferedImage getRotate() {
-        String[] strings = FILE_NAME_MAP.get(CaptchaBaseMapEnum.ROTATE.getCodeValue());
-        if (null == strings || strings.length == 0) {
-            return null;
-        }
-        Integer randomInt = RandomUtils.getRandomInt(0, strings.length);
-        String s = ORIGINAL_ROTATE_CACHE_MAP.get(strings[randomInt]);
-        return getBase64StrToImage(s);
-    }
-
-    public static String getRotateBlock() {
-        String[] strings = FILE_NAME_MAP.get(CaptchaBaseMapEnum.ROTATE_BLOCK.getCodeValue());
-        if (null == strings || strings.length == 0) {
-            return null;
-        }
-        Integer randomInt = RandomUtils.getRandomInt(0, strings.length);
-        String s = ROTATE_BLOCK_CACHE_MAP.get(strings[randomInt]);
-        return s;
     }
 
     public static BufferedImage getOriginal() {

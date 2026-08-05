@@ -21,5 +21,9 @@
             <artifactId>ticketflow-common</artifactId>
             <version>${revision}</version>
         </dependency>
+        <dependency>
+            <groupId>jakarta.annotation</groupId>
+            <artifactId>jakarta.annotation-api</artifactId>
+        </dependency>
     </dependencies>
 </project>
