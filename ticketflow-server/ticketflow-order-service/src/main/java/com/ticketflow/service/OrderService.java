@@ -98,6 +98,7 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_FAILURE_RESULT;
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_SUCCESS_RESULT;
 import static com.ticketflow.constant.Constant.GLIDE_LINE;
 import static com.ticketflow.constant.Constant.WX_NONCE_HEADER;
@@ -394,6 +395,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 throw new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST);
             }
             if (Objects.equals(order.getOrderStatus(), OrderStatus.CANCEL.getCode())) {
+                // 先对账再退款：支付宝回调可能早于本地账单状态流转，此时账单仍为 NO_PAY，
+                // 直接退款会被拒（PAY_BILL_IS_NOT_PAY_STATUS）。先调 payClient.notify
+                // 完成验签+账单状态流转，确认支付成功后才可发起退款
+                NotifyDto notifyDto = new NotifyDto();
+                notifyDto.setChannel(PayChannel.ALIPAY.getValue());
+                notifyDto.setParams(params);
+                ApiResponse<NotifyVo> notifyResponse = payClient.notify(notifyDto);
+                if (!Objects.equals(notifyResponse.getCode(), BaseCode.SUCCESS.getCode())
+                        || !ALIPAY_NOTIFY_SUCCESS_RESULT.equals(notifyResponse.getData().getPayResult())) {
+                    // 对账未确认支付（验签失败/金额不符/状态异常）：按失败应答让支付宝重试
+                    log.error("支付宝回调对账失败，暂不退款 dto : {} response : {}",
+                            JSON.toJSONString(notifyDto), JSON.toJSONString(notifyResponse));
+                    return ALIPAY_NOTIFY_FAILURE_RESULT;
+                }
                 RefundDto refundDto = new RefundDto();
                 refundDto.setOrderNumber(outTradeNo);
                 refundDto.setAmount(order.getOrderPrice());
@@ -405,10 +420,12 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                     updateOrder.setEditTime(DateUtils.now());
                     updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
                     orderMapper.update(updateOrder,Wrappers.lambdaUpdate(Order.class).eq(Order::getOrderNumber, outTradeNo));
+                    return ALIPAY_NOTIFY_SUCCESS_RESULT;
                 }else {
                     log.error("pay服务退款失败 dto : {} response : {}",JSON.toJSONString(refundDto),JSON.toJSONString(response));
+                    // 退款失败返回 failure，让支付宝按重试周期继续回调，重试期间再次发起退款
+                    return ALIPAY_NOTIFY_FAILURE_RESULT;
                 }
-                return ALIPAY_NOTIFY_SUCCESS_RESULT;
             }
 
 
