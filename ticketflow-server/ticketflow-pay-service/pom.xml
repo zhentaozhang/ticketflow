@@ -61,6 +61,11 @@
             <artifactId>ticketflow-service-lock-framework</artifactId>
             <version>${revision}</version>
         </dependency>
+        <dependency>
+            <groupId>com.ticketflow</groupId>
+            <artifactId>ticketflow-thread-pool-framework</artifactId>
+            <version>${revision}</version>
+        </dependency>
         <!-- nacos start -->
         <dependency>
             <groupId>com.alibaba.cloud</groupId>

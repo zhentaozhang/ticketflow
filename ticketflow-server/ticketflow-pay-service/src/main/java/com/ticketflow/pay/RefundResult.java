@@ -15,4 +15,9 @@ public class RefundResult {
     private final String body;
     
     private final String message;
+    
+    /**
+     * 退款状态：1 渠道已受理处理中，2 已退款成功
+     */
+    private final Integer refundStatus;
 }

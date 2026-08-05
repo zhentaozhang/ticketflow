@@ -20,7 +20,9 @@ import com.wechat.pay.java.service.payments.nativepay.model.PrepayResponse;
 import com.wechat.pay.java.service.payments.nativepay.model.QueryOrderByOutTradeNoRequest;
 import com.wechat.pay.java.service.refund.RefundService;
 import com.wechat.pay.java.service.refund.model.CreateRequest;
+import com.wechat.pay.java.service.refund.model.QueryByOutRefundNoRequest;
 import com.wechat.pay.java.service.refund.model.Refund;
+import com.wechat.pay.java.service.refund.model.Status;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -36,7 +38,7 @@ import static com.ticketflow.constant.Constant.WX_TIMESTAMP_HEADER;
 
 /**
  * 微信支付策略实现——对接微信支付 APIv3 Native 扫码支付。
- *
+ * <p>
  * 回调验签与支付宝不同：微信签名在请求头（Wechatpay-*），业务数据在 AES-GCM
  * 密文里。order-service 入口把原始 body 和 4 个请求头放进 params（特殊 key，
  * 定义在 Constant，跨服务共用），signVerify 内完成验签+解密，并把
@@ -201,25 +203,56 @@ public class WxPayStrategyHandler implements PayStrategyHandler {
     }
 
     @Override
-    public RefundResult refund(String outTradeNo, BigDecimal price, String reason) {
+    public RefundResult refund(String outTradeNo, BigDecimal price, BigDecimal originalAmount, String reason, String outRefundNo) {
         CreateRequest request = new CreateRequest();
         request.setOutTradeNo(outTradeNo);
-        // 微信退款单号要求唯一，使用订单号+时间戳
-        request.setOutRefundNo(outTradeNo + "-" + System.currentTimeMillis());
+        // 退款单号唯一且由调用方生成（幂等键），重复请求微信返回原结果
+        request.setOutRefundNo(outRefundNo);
         request.setReason(reason);
-        // 暂不设置退款结果通知地址：当前退款结果由订单状态/人工对账兜底；
+        // 暂不设置退款结果通知地址：当前退款结果由 RefundCheckTask 定时查询兜底；
         // 若未来订阅 refund notify，需在 NotificationParser 侧按 resource_type 区分交易/退款通知
         com.wechat.pay.java.service.refund.model.AmountReq amount =
                 new com.wechat.pay.java.service.refund.model.AmountReq();
-        amount.setTotal(price.multiply(HUNDRED).longValue());
+        // total=原订单支付金额（分），refund=本次退款金额（分），微信校验 refund 不得超过 total
+        amount.setTotal(originalAmount.multiply(HUNDRED).longValue());
         amount.setRefund(price.multiply(HUNDRED).longValue());
         amount.setCurrency("CNY");
         request.setAmount(amount);
         try {
             Refund response = refundService.create(request);
-            return new RefundResult(true, response.getStatus().name(), response.getStatus().name());
+            if (response.getStatus() == Status.SUCCESS) {
+                return new RefundResult(true, response.getStatus().name(), response.getStatus().name(), 2);
+            }
+            if (response.getStatus() == Status.PROCESSING) {
+                // 微信退款可能异步完成，先按处理中落库，由 RefundCheckTask 查询确认
+                return new RefundResult(true, response.getStatus().name(), response.getStatus().name(), 1);
+            }
+            // CLOSED / ABNORMAL：退款关闭或异常，按失败处理
+            log.error("wx refund not success, status : {}", response.getStatus());
+            return new RefundResult(false, response.getStatus().name(), response.getStatus().name(), null);
         } catch (Exception e) {
             log.error("wx refund error", e);
+            throw new TicketFlowFrameException(BaseCode.REFUND_ERROR);
+        }
+    }
+
+    @Override
+    public RefundResult queryRefund(String outTradeNo, String outRefundNo) {
+        try {
+            QueryByOutRefundNoRequest request = new QueryByOutRefundNoRequest();
+            request.setOutRefundNo(outRefundNo);
+            Refund refund = refundService.queryByOutRefundNo(request);
+            if (refund.getStatus() == Status.SUCCESS) {
+                return new RefundResult(true, refund.getStatus().name(), refund.getStatus().name(), 2);
+            }
+            if (refund.getStatus() == Status.PROCESSING) {
+                return new RefundResult(true, refund.getStatus().name(), refund.getStatus().name(), 1);
+            }
+            // CLOSED / ABNORMAL：退款关闭或异常
+            log.error("wx refund not success, status : {}", refund.getStatus());
+            return new RefundResult(false, refund.getStatus().name(), refund.getStatus().name(), null);
+        } catch (Exception e) {
+            log.error("wx refund query error, outRefundNo : {}", outRefundNo, e);
             throw new TicketFlowFrameException(BaseCode.REFUND_ERROR);
         }
     }
