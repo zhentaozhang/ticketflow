@@ -39,15 +39,6 @@ public interface UidGenerator {
     long getId();
     
     /**
-     * 获取订单编号
-     * @param userId 用户id
-     * @param tableCount 分表数量
-     * @param databaseCount 分库数量
-     * @return 结果
-     * */
-    long getOrderNumber(long userId,long tableCount,long databaseCount);
-    
-    /**
      * 【方案1】获取订单编号 - 固定预留6位基因位
      * 核心思想：预留足够多的基因位，支持未来扩容而无需修改生成逻辑
      * 6位基因支持最多64种分片组合（8库8表 或 4库16表）
@@ -56,16 +47,6 @@ public interface UidGenerator {
      * @return 结果
      * */
     long getOrderNumber(long userId);
-    
-    /**
-     * 获取订单编号 （兼容旧版本的方法仅包含表基因）
-     * @deprecated 建议使用 getOrderNumber(userId, tableCount, databaseCount)
-     * @param userId 用户id
-     * @param tableCount 分表数量
-     * @return 结果
-     * */
-    @Deprecated
-    long getOrderNumber(long userId,long tableCount);
 
     /**
      * Parse the UID into elements which are used to generate the UID. <br>
