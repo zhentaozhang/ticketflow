@@ -47,6 +47,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
+import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_FAILURE_RESULT;
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_SUCCESS_RESULT;
 import static com.ticketflow.constant.Constant.WX_NOTIFY_FAILURE_RESULT;
 import static com.ticketflow.constant.Constant.WX_NOTIFY_SUCCESS_RESULT;
@@ -897,6 +898,11 @@ class OrderServiceTest {
             Order order = createOrder(OrderStatus.CANCEL.getCode());
             order.setOrderPrice(new BigDecimal("200"));
             when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
+            // 先对账（回调可能早于本地账单状态流转），确认支付成功后才退款
+            NotifyVo notifyVo = new NotifyVo();
+            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+            notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
             when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refunded"));
 
             MockHttpServletRequest mockRequest = new MockHttpServletRequest();
@@ -905,7 +911,53 @@ class OrderServiceTest {
             String result = orderService.alipayNotify(new CustomizeRequestWrapper(mockRequest));
 
             assertEquals(ALIPAY_NOTIFY_SUCCESS_RESULT, result);
+            verify(payClient).notify(any(NotifyDto.class));
             verify(payClient).refund(any(RefundDto.class));
+            verify(mockLock).lock();
+            verify(mockLock).unlock();
+        }
+
+        @Test
+        void whenOrderCancelled_RefundFails_ReturnsFailure() throws Exception {
+            RLock mockLock = mock(RLock.class);
+            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
+
+            Order order = createOrder(OrderStatus.CANCEL.getCode());
+            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
+            NotifyVo notifyVo = new NotifyVo();
+            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+            notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+            when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.error("退款失败"));
+
+            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
+            mockRequest.setContent(("out_trade_no=" + ORDER_NUMBER).getBytes());
+
+            String result = orderService.alipayNotify(new CustomizeRequestWrapper(mockRequest));
+
+            assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
+            verify(mockLock).lock();
+            verify(mockLock).unlock();
+        }
+
+        @Test
+        void whenOrderCancelled_ReconcileFails_ReturnsFailureWithoutRefund() throws Exception {
+            RLock mockLock = mock(RLock.class);
+            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
+
+            Order order = createOrder(OrderStatus.CANCEL.getCode());
+            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
+            NotifyVo notifyVo = new NotifyVo();
+            notifyVo.setPayResult(ALIPAY_NOTIFY_FAILURE_RESULT);
+            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+
+            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
+            mockRequest.setContent(("out_trade_no=" + ORDER_NUMBER).getBytes());
+
+            String result = orderService.alipayNotify(new CustomizeRequestWrapper(mockRequest));
+
+            assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
+            verify(payClient, never()).refund(any(RefundDto.class));
             verify(mockLock).lock();
             verify(mockLock).unlock();
         }
