@@ -10,11 +10,13 @@ import com.github.pagehelper.PageInfo;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.http.HttpEntity;
+import org.apache.http.HttpHeaders;
 import org.apache.http.entity.ContentType;
 import org.apache.http.nio.entity.NStringEntity;
 import org.apache.http.util.EntityUtils;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.client.Request;
+import org.elasticsearch.client.RequestOptions;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
@@ -47,6 +49,10 @@ import java.util.Objects;
 @Slf4j
 @AllArgsConstructor
 public class BusinessEsHandle {
+
+    private static final int BULK_BATCH_SIZE = 500;
+
+    private static final String NDJSON_CONTENT_TYPE = "application/x-ndjson";
 
     private final RestClient restClient;
 
@@ -165,21 +171,111 @@ public class BusinessEsHandle {
         if (CollectionUtil.isEmpty(params)) {
             return false;
         }
+        String endpoint;
+        if (esTypeSwitch) {
+            endpoint = "/" + indexName + "/" + indexType;
+        } else {
+            endpoint = "/" + indexName + "/_doc";
+        }
+        return doAdd("POST", endpoint, params);
+    }
+
+    /**
+     * 添加（指定文档 ID，幂等 upsert）
+     *
+     * @param indexName  索引名字
+     * @param indexType  索引类型
+     * @param documentId 文档 ID
+     * @param params     参数 key:字段名 value:具体值
+     * @return boolean
+     */
+    public boolean add(String indexName, String indexType, String documentId, Map<String, Object> params) {
+        if (!esSwitch) {
+            return false;
+        }
+        if (CollectionUtil.isEmpty(params)) {
+            return false;
+        }
+        String endpoint;
+        if (esTypeSwitch) {
+            endpoint = "/" + indexName + "/" + indexType + "/" + documentId;
+        } else {
+            endpoint = "/" + indexName + "/_doc/" + documentId;
+        }
+        return doAdd("PUT", endpoint, params);
+    }
+
+    private boolean doAdd(String method, String endpoint, Map<String, Object> params) {
         try {
             String jsonString = JSON.toJSONString(params);
             HttpEntity entity = new NStringEntity(jsonString, ContentType.APPLICATION_JSON);
-            String endpoint;
-            if (esTypeSwitch) {
-                endpoint = "/" + indexName + "/" + indexType;
-            } else {
-                endpoint = "/" + indexName + "/_doc";
-            }
             log.info("add dsl : {}", jsonString);
-            Response indexResponse = execute("POST", endpoint, entity);
+            Response indexResponse = execute(method, endpoint, entity);
             int statusCode = indexResponse.getStatusLine().getStatusCode();
             return statusCode == 201 || statusCode == 200;
         } catch (Exception e) {
             log.error("add error", e);
+        }
+        return false;
+    }
+
+    /**
+     * 批量添加（Bulk API，每 500 条一批）
+     *
+     * @param indexName 索引名字
+     * @param indexType 索引类型
+     * @param params    参数列表 key:字段名 value:具体值
+     * @return boolean 全部批次成功返回 true
+     */
+    public boolean batchAdd(String indexName, String indexType, List<Map<String, Object>> params) {
+        if (!esSwitch) {
+            return false;
+        }
+        if (CollectionUtil.isEmpty(params)) {
+            return false;
+        }
+        boolean allSuccess = true;
+        for (int i = 0; i < params.size(); i += BULK_BATCH_SIZE) {
+            List<Map<String, Object>> batch = params.subList(i, Math.min(i + BULK_BATCH_SIZE, params.size()));
+            if (!doBulkAdd(indexName, indexType, batch)) {
+                allSuccess = false;
+            }
+        }
+        return allSuccess;
+    }
+
+    private boolean doBulkAdd(String indexName, String indexType, List<Map<String, Object>> batch) {
+        try {
+            StringBuilder bulkBody = new StringBuilder(batch.size() * 128);
+            for (Map<String, Object> param : batch) {
+                bulkBody.append("{\"index\":{}}\n");
+                bulkBody.append(JSON.toJSONString(param)).append('\n');
+            }
+            String endpoint;
+            if (esTypeSwitch) {
+                endpoint = "/" + indexName + "/" + indexType + "/_bulk";
+            } else {
+                endpoint = "/" + indexName + "/_bulk";
+            }
+            log.info("batchAdd dsl : {}", bulkBody);
+            HttpEntity entity = new NStringEntity(bulkBody.toString(), ContentType.create(NDJSON_CONTENT_TYPE));
+            RequestOptions options = RequestOptions.DEFAULT.toBuilder()
+                    .addHeader(HttpHeaders.CONTENT_TYPE, NDJSON_CONTENT_TYPE)
+                    .build();
+            Response response = execute("POST", endpoint, entity, options);
+            if (response.getStatusLine().getStatusCode() != RestStatus.OK.getStatus()) {
+                log.error("batchAdd http error, indexName:{}, statusCode:{}", indexName, response.getStatusLine().getStatusCode());
+                return false;
+            }
+            String result = EntityUtils.toString(response.getEntity());
+            JSONObject resultJsonObject = JSONObject.parseObject(result);
+            if (Objects.nonNull(resultJsonObject) && Boolean.TRUE.equals(resultJsonObject.getBoolean("errors"))) {
+                log.error("batchAdd partial errors, indexName:{}, result:{}", indexName, result);
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            log.error("batchAdd error", e);
         }
         return false;
     }
@@ -401,9 +497,16 @@ public class BusinessEsHandle {
      * 发送 REST 请求到 ES，统一 Request 构建逻辑。
      */
     private Response execute(String method, String path, HttpEntity entity) throws IOException {
+        return execute(method, path, entity, null);
+    }
+
+    private Response execute(String method, String path, HttpEntity entity, RequestOptions options) throws IOException {
         Request request = new Request(method, path);
         if (Objects.nonNull(entity)) {
             request.setEntity(entity);
+        }
+        if (Objects.nonNull(options)) {
+            request.setOptions(options);
         }
         return restClient.performRequest(request);
     }

@@ -79,6 +79,7 @@ public class ProgramElasticsearchInitData extends AbstractApplicationPostConstru
         // 预加载所有票档价格聚合数据（MIN/MAX price），避免逐条查询
         Map<Long, TicketCategoryAggregate> ticketCategorieMap = programService.selectTicketCategorieMap(allProgramIdList);
 
+        List<Map<String, Object>> programDocList = new ArrayList<>(allProgramIdList.size());
         for (Long programId : allProgramIdList) {
             ProgramVo programVo = programService.getDetailFromDb(programId);
             // 将 ProgramVo 字段映射为 ES document 的 flat map（20+ 字段）
@@ -108,9 +109,11 @@ public class ProgramElasticsearchInitData extends AbstractApplicationPostConstru
             map.put(ProgramDocumentParamName.MAX_PRICE,
                     Optional.ofNullable(ticketCategorieMap.get(programVo.getId()))
                             .map(TicketCategoryAggregate::getMaxPrice).orElse(null));
-            businessEsHandle.add(SpringUtil.getPrefixDistinctionName() + "-" +
-                    ProgramDocumentParamName.INDEX_NAME, ProgramDocumentParamName.INDEX_TYPE, map);
+            programDocList.add(map);
         }
+        // 批量写入（Bulk API 每 500 条一批）
+        businessEsHandle.batchAdd(SpringUtil.getPrefixDistinctionName() + "-" +
+                ProgramDocumentParamName.INDEX_NAME, ProgramDocumentParamName.INDEX_TYPE, programDocList);
     }
 
     /**
