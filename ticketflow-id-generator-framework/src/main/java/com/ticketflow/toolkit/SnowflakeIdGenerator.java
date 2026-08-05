@@ -48,6 +48,7 @@ public class SnowflakeIdGenerator {
         } else {
             this.datacenterId = getDatacenterId(maxDatacenterId);
             workerId = getMaxWorkerId(datacenterId, maxWorkerId);
+            log.warn("Redis work id allocation unavailable, fallback to MAC+PID: workId={}, datacenterId={}, collision risk across instances", workerId, datacenterId);
         }
     }
 
@@ -117,11 +118,11 @@ public class SnowflakeIdGenerator {
         }
 
         if (lastTimestamp == timestamp) {
-            // 相同毫秒内，序列号自增
-            sequence = (sequence + 1) & sequenceMask;
-            if (sequence == 0) {
-                // 同一毫秒的序列数已经达到最大
+            // 相同毫秒内，序列号自增；耗尽（或继承自其他掩码的高值）则等待下一毫秒
+            if (sequence >= sequenceMask) {
                 timestamp = tilNextMillis(lastTimestamp);
+            } else {
+                sequence = (sequence + 1) & sequenceMask;
             }
         } else {
             // 不同毫秒内，序列号置为 1 - 3 随机数
