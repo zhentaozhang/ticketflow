@@ -114,9 +114,12 @@ alipay:
   alipayPublicKey: ${ALIPAY_PUBLIC_KEY}
   contentKey: ${ALIPAY_CONTENT_KEY}
 wxpay:
+  # enabled=false（默认）：不注册微信支付 Bean，缺配置也可启动
+  # enabled=true：需配置完整商户参数，否则微信支付相关 Bean 构造失败
   enabled: ${WXPAY_ENABLED:false}
-  appId: ${WXPAY_APP_ID}
-  mchId: ${WXPAY_MCH_ID}
-  merchantSerialNo: ${WXPAY_MERCHANT_SERIAL_NO}
-  merchantPrivateKeyPath: ${WXPAY_MERCHANT_PRIVATE_KEY_PATH}
-  apiV3Key: ${WXPAY_API_V3_KEY}
+  # 空默认值：cfg 缺变量时绑定为空串（而非占位符字面量），调用时快速失败
+  appId: ${WXPAY_APP_ID:}
+  mchId: ${WXPAY_MCH_ID:}
+  merchantSerialNo: ${WXPAY_MERCHANT_SERIAL_NO:}
+  merchantPrivateKeyPath: ${WXPAY_MERCHANT_PRIVATE_KEY_PATH:}
+  apiV3Key: ${WXPAY_API_V3_KEY:}
