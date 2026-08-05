@@ -2,11 +2,10 @@ package com.ticketflow.initialize.constant;
 
 /**
  * 初始化执行策略类型常量。
- * 定义了 4 种 Spring 初始化时机：
+ * 定义了 3 种 Spring 初始化时机：
  * APPLICATION_EVENT_LISTENER  — ApplicationStartedEvent 事件驱动
  * APPLICATION_POST_CONSTRUCT  — @PostConstruct 立即执行
  * APPLICATION_INITIALIZING_BEAN — InitializingBean afterPropertiesSet
- * APPLICATION_COMMAND_LINE_RUNNER — CommandLineRunner 启动后参数执行
  * <p>
  * 由 CompositeInit 根据策略类型分类调度
  */
@@ -18,5 +17,4 @@ public class InitializeHandlerType {
 
     public static final String APPLICATION_INITIALIZING_BEAN = "application_initializing_bean";
 
-    public static final String APPLICATION_COMMAND_LINE_RUNNER = "application_command_line_runner";
 }

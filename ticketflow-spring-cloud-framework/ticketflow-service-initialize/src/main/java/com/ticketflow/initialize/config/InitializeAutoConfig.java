@@ -1,6 +1,5 @@
 package com.ticketflow.initialize.config;
 
-import com.ticketflow.initialize.execute.ApplicationCommandLineRunnerExecute;
 import com.ticketflow.initialize.execute.ApplicationInitializingBeanExecute;
 import com.ticketflow.initialize.execute.ApplicationPostConstructExecute;
 import com.ticketflow.initialize.execute.ApplicationStartEventListenerExecute;
@@ -28,11 +27,5 @@ public class InitializeAutoConfig {
     public ApplicationStartEventListenerExecute applicationStartEventListenerExecute(
             ConfigurableApplicationContext applicationContext){
         return new ApplicationStartEventListenerExecute(applicationContext);
-    }
-    
-    @Bean
-    public ApplicationCommandLineRunnerExecute applicationCommandLineRunnerExecute(
-            ConfigurableApplicationContext applicationContext){
-        return new ApplicationCommandLineRunnerExecute(applicationContext);
     }
 }

@@ -1,4 +1,4 @@
-package com.ticketflow.fiterbalance;
+package com.ticketflow.filterbalance;
 
 
 import com.ticketflow.balance.FilterLoadBalance;

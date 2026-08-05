@@ -82,7 +82,10 @@ public class ServerGrayFilter extends AbstractServerFilter {
                 Map<String,String> map = new HashMap<>(servers.size());
                 for (ServiceInstance serviceInstance : servers) {
                     NacosServiceInstance instance = (NacosServiceInstance)serviceInstance;
-                    String balanceGray = instance.getMetadata().get(GRAY_PARAMETER);
+                    String balanceGray = Optional.ofNullable(instance.getMetadata())
+                            .filter(CollectionUtil::isNotEmpty)
+                            .map(metadata -> metadata.get(GRAY_PARAMETER))
+                            .orElse(GRAY_FLAG_FALSE);
                     if (StringUtil.isEmpty(balanceGray) || Objects.isNull(map.get(balanceGray.toLowerCase()))) {
                         balanceGray = GRAY_FLAG_FALSE;
                     }

@@ -13,12 +13,12 @@ import lombok.Data;
 public class BasePageDto {
 
 
-    @Schema(name = "pageNumber", type = "Long", description = "页码", requiredMode = RequiredMode.REQUIRED)
+    @Schema(name = "pageNumber", type = "Integer", description = "页码", requiredMode = RequiredMode.REQUIRED)
     @NotNull
     private Integer pageNumber;
 
 
-    @Schema(name = "pageSize", type = "Long", description = "页大小", requiredMode = RequiredMode.REQUIRED)
+    @Schema(name = "pageSize", type = "Integer", description = "页大小", requiredMode = RequiredMode.REQUIRED)
     @NotNull
     private Integer pageSize;
 }

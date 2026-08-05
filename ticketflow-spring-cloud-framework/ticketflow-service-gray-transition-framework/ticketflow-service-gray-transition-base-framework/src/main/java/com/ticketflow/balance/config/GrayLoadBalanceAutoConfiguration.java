@@ -6,7 +6,7 @@ import com.ticketflow.enhance.config.EnhanceLoadBalancerClientConfiguration.Bloc
 import com.ticketflow.enhance.config.EnhanceLoadBalancerClientConfiguration.ReactiveSupportConfiguration;
 import com.ticketflow.filter.AbstractServerFilter;
 import com.ticketflow.filter.impl.ServerGrayFilter;
-import com.ticketflow.fiterbalance.DefaultFilterLoadBalance;
+import com.ticketflow.filterbalance.DefaultFilterLoadBalance;
 import org.springframework.cloud.loadbalancer.annotation.LoadBalancerClients;
 import org.springframework.context.annotation.Bean;
 

@@ -24,7 +24,7 @@ public class GatewayContextAutoConfiguration {
     }
     
     @Bean
-    public ContextHandler webMvcContext(){
+    public ContextHandler gatewayContextHandler(){
         return new GatewayContextHandler();
     }
 }
