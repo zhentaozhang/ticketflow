@@ -27,6 +27,7 @@ import com.ticketflow.vo.TradeCheckVo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -34,7 +35,9 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_FAILURE_RESULT;
@@ -44,6 +47,7 @@ import static com.ticketflow.constant.Constant.WX_NOTIFY_SUCCESS_RESULT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -77,6 +81,7 @@ class PayServiceTest {
     void setUp() {
         when(payStrategyContext.get(anyString())).thenReturn(payStrategyHandler);
         when(uidGenerator.getUid()).thenReturn(1000L);
+        when(refundBillMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(new ArrayList<>());
     }
 
     private PayBill payBill(Integer status) {
@@ -235,6 +240,7 @@ class PayServiceTest {
         when(payStrategyHandler.signVerify(anyMap())).thenReturn(true);
         when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.NO_PAY.getCode()));
         when(payStrategyHandler.dataVerify(anyMap(), any(PayBill.class))).thenReturn(true);
+        when(payBillMapper.update(any(PayBill.class), any(LambdaUpdateWrapper.class))).thenReturn(1);
 
         NotifyVo result = payService.notify(notifyDto());
 
@@ -244,10 +250,24 @@ class PayServiceTest {
     }
 
     @Test
+    void notify_更新0行_返回失败() {
+        when(payStrategyHandler.signVerify(anyMap())).thenReturn(true);
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.NO_PAY.getCode()));
+        when(payStrategyHandler.dataVerify(anyMap(), any(PayBill.class))).thenReturn(true);
+        when(payBillMapper.update(any(PayBill.class), any(LambdaUpdateWrapper.class))).thenReturn(0);
+
+        NotifyVo result = payService.notify(notifyDto());
+
+        assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result.getPayResult());
+        verify(payBillMapper).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+    }
+
+    @Test
     void notify_微信渠道成功_应答SUCCESS() {
         when(payStrategyHandler.signVerify(anyMap())).thenReturn(true);
         when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.NO_PAY.getCode()));
         when(payStrategyHandler.dataVerify(anyMap(), any(PayBill.class))).thenReturn(true);
+        when(payBillMapper.update(any(PayBill.class), any(LambdaUpdateWrapper.class))).thenReturn(1);
 
         NotifyDto dto = notifyDto();
         dto.setChannel(PayChannel.WX.getValue());
@@ -384,23 +404,106 @@ class PayServiceTest {
     }
 
     @Test
-    void refund_成功_更新账单并插入退款记录() {
+    void refund_累计已退超限_拒绝() {
         when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
-        when(payStrategyHandler.refund(anyString(), any(), anyString()))
-                .thenReturn(new RefundResult(true, "refunded", "SUCCESS"));
+        RefundBill existed = new RefundBill();
+        existed.setRefundAmount(new BigDecimal("60.00"));
+        when(refundBillMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(List.of(existed));
+
+        RefundDto dto = refundDto();
+        dto.setAmount(new BigDecimal("50.00"));
+        TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
+                () -> payService.refund(dto));
+        assertEquals(BaseCode.REFUND_AMOUNT_GREATER_THAN_PAY_AMOUNT.getCode(), ex.getCode());
+        verify(payStrategyHandler, never()).refund(anyString(), any(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void refund_部分退款_插入退款记录且账单保持已支付() {
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
+        when(payStrategyHandler.refund(anyString(), any(), any(), anyString(), anyString()))
+                .thenReturn(new RefundResult(true, "refunded", "SUCCESS", 2));
 
         String result = payService.refund(refundDto());
 
-        assertEquals("20260804000000000001", result);
-        verify(payBillMapper).updateById(any(PayBill.class));
+        assertEquals("1000", result);
+        ArgumentCaptor<RefundBill> refundBillCaptor = ArgumentCaptor.forClass(RefundBill.class);
+        verify(refundBillMapper).insert(refundBillCaptor.capture());
+        assertEquals("1000", refundBillCaptor.getValue().getOutRefundNo());
+        assertEquals(new BigDecimal("50.00"), refundBillCaptor.getValue().getRefundAmount());
+        assertEquals(2, refundBillCaptor.getValue().getRefundStatus());
+        // 部分退款（50/100）不改变账单状态
+        verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+    }
+
+    @Test
+    void refund_全额退款_账单置已退款() {
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
+        when(payStrategyHandler.refund(anyString(), any(), any(), anyString(), anyString()))
+                .thenReturn(new RefundResult(true, "refunded", "SUCCESS", 2));
+
+        RefundDto dto = refundDto();
+        dto.setAmount(new BigDecimal("100.00"));
+        payService.refund(dto);
+
+        verify(payBillMapper).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
         verify(refundBillMapper).insert(any(RefundBill.class));
+    }
+
+    @Test
+    void refund_全额退款渠道处理中_账单保持已支付() {
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
+        when(payStrategyHandler.refund(anyString(), any(), any(), anyString(), anyString()))
+                .thenReturn(new RefundResult(true, "PROCESSING", "PROCESSING", 1));
+
+        RefundDto dto = refundDto();
+        dto.setAmount(new BigDecimal("100.00"));
+        payService.refund(dto);
+
+        // 处理中不置账单为已退款，待 RefundCheckTask 确认成功后翻转
+        verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+        verify(refundBillMapper).insert(any(RefundBill.class));
+    }
+
+    @Test
+    void refund_已退部分金额_剩余额度内可继续退() {
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
+        // 已有处理中的部分退款 60 元，剩余额度 40 元内可继续退（部分退款场景）
+        RefundBill processing = new RefundBill();
+        processing.setRefundStatus(1);
+        processing.setRefundAmount(new BigDecimal("60.00"));
+        when(refundBillMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(List.of(processing));
+        when(payStrategyHandler.refund(anyString(), any(), any(), anyString(), anyString()))
+                .thenReturn(new RefundResult(true, "refunded", "SUCCESS", 2));
+
+        RefundDto dto = refundDto();
+        dto.setAmount(new BigDecimal("40.00"));
+        payService.refund(dto);
+
+        verify(payStrategyHandler).refund(anyString(), any(), any(), anyString(), anyString());
+        verify(refundBillMapper).insert(any(RefundBill.class));
+    }
+
+    @Test
+    void refund_微信处理中_插入处理中退款记录() {
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
+        when(payStrategyHandler.refund(anyString(), any(), any(), anyString(), anyString()))
+                .thenReturn(new RefundResult(true, "PROCESSING", "PROCESSING", 1));
+
+        payService.refund(refundDto());
+
+        ArgumentCaptor<RefundBill> refundBillCaptor = ArgumentCaptor.forClass(RefundBill.class);
+        verify(refundBillMapper).insert(refundBillCaptor.capture());
+        assertEquals(1, refundBillCaptor.getValue().getRefundStatus());
+        // 处理中不置账单为已退款
+        verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
     }
 
     @Test
     void refund_渠道失败_抛异常() {
         when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
-        when(payStrategyHandler.refund(anyString(), any(), anyString()))
-                .thenReturn(new RefundResult(false, null, "退款失败"));
+        when(payStrategyHandler.refund(anyString(), any(), any(), anyString(), anyString()))
+                .thenReturn(new RefundResult(false, null, "退款失败", null));
 
         assertThrows(TicketFlowFrameException.class, () -> payService.refund(refundDto()));
         verify(refundBillMapper, never()).insert(any(RefundBill.class));

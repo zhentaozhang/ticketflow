@@ -6,12 +6,13 @@ import com.alipay.api.AlipayApiException;
 import com.alipay.api.AlipayClient;
 import com.alipay.api.AlipayConstants;
 import com.alipay.api.internal.util.AlipaySignature;
-import com.alipay.api.internal.util.WebUtils;
 import com.alipay.api.request.AlipayTradePagePayRequest;
 import com.alipay.api.request.AlipayTradeQueryRequest;
+import com.alipay.api.request.AlipayTradeFastpayRefundQueryRequest;
 import com.alipay.api.request.AlipayTradeRefundRequest;
 import com.alipay.api.response.AlipayTradePagePayResponse;
 import com.alipay.api.response.AlipayTradeQueryResponse;
+import com.alipay.api.response.AlipayTradeFastpayRefundQueryResponse;
 import com.alipay.api.response.AlipayTradeRefundResponse;
 import com.ticketflow.entity.PayBill;
 import com.ticketflow.enums.AlipayTradeStatus;
@@ -149,7 +150,6 @@ public class AlipayStrategyHandler implements PayStrategyHandler {
         try {
             //构建查询参数，将订单号放入，调用SDK查询
             AlipayTradeQueryRequest request = new AlipayTradeQueryRequest();
-            WebUtils.setNeedCheckServerTrusted(false);
             JSONObject bizContent = new JSONObject();
             bizContent.put("out_trade_no", outTradeNo);
             request.setBizContent(bizContent.toString());
@@ -180,19 +180,58 @@ public class AlipayStrategyHandler implements PayStrategyHandler {
     }
     
     @Override
-    public RefundResult refund(String outTradeNo, BigDecimal price, String reason) {
+    public RefundResult refund(String outTradeNo, BigDecimal price, BigDecimal originalAmount, String reason, String outRefundNo) {
         AlipayTradeRefundRequest request = new AlipayTradeRefundRequest();
         JSONObject bizContent = new JSONObject();
         bizContent.put("out_trade_no", outTradeNo);
         bizContent.put("refund_amount", price);
         bizContent.put("refund_reason", reason);
+        // 退款单号作为幂等键：同一单号重复请求支付宝返回原结果，且作为退款查询依据
+        bizContent.put("out_request_no", outRefundNo);
         
         request.setBizContent(bizContent.toString());
         try {
             AlipayTradeRefundResponse response = alipayClient.execute(request);
-            return new RefundResult(response.isSuccess(),response.getBody(),response.getMsg());
+            if (!response.isSuccess()) {
+                log.error("支付宝退款结果失败 response : {}", JSON.toJSONString(response));
+                return new RefundResult(false, response.getBody(), response.getMsg(), null);
+            }
+            // 支付宝退款同步返回结果，受理即成功
+            return new RefundResult(true, response.getBody(), response.getMsg(), 2);
         } catch (AlipayApiException e) {
-            log.error("alipay refund error",e);
+            log.error("alipay refund error", e);
+            throw new TicketFlowFrameException(BaseCode.REFUND_ERROR);
+        }
+    }
+
+    @Override
+    public RefundResult queryRefund(String outTradeNo, String outRefundNo) {
+        AlipayTradeFastpayRefundQueryRequest request = new AlipayTradeFastpayRefundQueryRequest();
+        JSONObject bizContent = new JSONObject();
+        bizContent.put("out_trade_no", outTradeNo);
+        bizContent.put("out_request_no", outRefundNo);
+        request.setBizContent(bizContent.toString());
+        try {
+            AlipayTradeFastpayRefundQueryResponse response = alipayClient.execute(request);
+            if (!response.isSuccess()) {
+                log.error("支付宝退款查询结果失败 response : {}", JSON.toJSONString(response));
+                return new RefundResult(false, response.getBody(), response.getMsg(), null);
+            }
+            JSONObject jsonResponse = JSON.parseObject(response.getBody());
+            JSONObject alipayTradeFastpayRefundQueryResponse =
+                    jsonResponse.getJSONObject("alipay_trade_fastpay_refund_query_response");
+            String refundStatus = alipayTradeFastpayRefundQueryResponse.getString("refund_status");
+            if ("REFUND_SUCCESS".equals(refundStatus)) {
+                return new RefundResult(true, response.getBody(), refundStatus, 2);
+            }
+            if ("REFUND_PROCESSING".equals(refundStatus)) {
+                return new RefundResult(true, response.getBody(), refundStatus, 1);
+            }
+            // REFUND_FAIL / REFUND_CLOSED：退款失败或关闭
+            log.error("支付宝退款未成功 refundStatus : {}", refundStatus);
+            return new RefundResult(false, response.getBody(), refundStatus, null);
+        } catch (AlipayApiException e) {
+            log.error("alipay refund query error, outRefundNo : {}", outRefundNo, e);
             throw new TicketFlowFrameException(BaseCode.REFUND_ERROR);
         }
     }

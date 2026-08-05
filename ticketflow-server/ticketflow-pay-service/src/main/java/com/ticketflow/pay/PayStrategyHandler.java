@@ -49,11 +49,21 @@ public interface PayStrategyHandler {
     /**
      * 退款
      * @param outTradeNo 订单号
-     * @param price 支付价格
+     * @param price 退款金额
+     * @param originalAmount 原支付金额（部分退款时渠道需校验原订单金额）
      * @param reason 原因
+     * @param outRefundNo 退款单号（渠道侧幂等键，重复请求返回原结果）
      * @return 结果
      * */
-    RefundResult refund(String outTradeNo, BigDecimal price, String reason);
+    RefundResult refund(String outTradeNo, BigDecimal price, BigDecimal originalAmount, String reason, String outRefundNo);
+    
+    /**
+     * 退款状态查询
+     * @param outTradeNo 订单号
+     * @param outRefundNo 退款单号
+     * @return 结果（refundStatus 1=处理中 2=已退款成功；success=false 表示退款失败/关闭）
+     * */
+    RefundResult queryRefund(String outTradeNo, String outRefundNo);
     
     /**
      * 支付渠道

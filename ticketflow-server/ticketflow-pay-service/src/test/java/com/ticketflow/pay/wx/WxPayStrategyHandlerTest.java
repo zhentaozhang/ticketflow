@@ -1,11 +1,17 @@
 package com.ticketflow.pay.wx;
 
 import com.ticketflow.entity.PayBill;
+import com.ticketflow.pay.RefundResult;
 import com.ticketflow.pay.wx.config.WxPayProperties;
 import com.wechat.pay.java.core.notification.NotificationParser;
 import com.wechat.pay.java.core.notification.RequestParam;
 import com.wechat.pay.java.service.payments.model.Transaction;
 import com.wechat.pay.java.service.payments.model.TransactionAmount;
+import com.wechat.pay.java.service.refund.RefundService;
+import com.wechat.pay.java.service.refund.model.CreateRequest;
+import com.wechat.pay.java.service.refund.model.QueryByOutRefundNoRequest;
+import com.wechat.pay.java.service.refund.model.Refund;
+import com.wechat.pay.java.service.refund.model.Status;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -198,5 +204,90 @@ class WxPayStrategyHandlerTest {
         // 同一 nonce 再次到达视为重放
         assertFalse(handler.signVerify(signParams(nonce)));
         verify(notificationParser).parse(any(RequestParam.class), eq(Transaction.class));
+    }
+
+    // ==================== refund / queryRefund ====================
+
+    @Test
+    void refund_部分退款_total为原支付金额_refund为退款金额() throws Exception {
+        RefundService refundService = mock(RefundService.class);
+        WxPayStrategyHandler refundHandler = new WxPayStrategyHandler(null, notificationParser, refundService, properties);
+        Refund refund = new Refund();
+        refund.setStatus(Status.SUCCESS);
+        when(refundService.create(any(CreateRequest.class))).thenReturn(refund);
+
+        RefundResult result = refundHandler.refund("202608041234567890",
+                new BigDecimal("40.00"), new BigDecimal("100.00"), "部分退款", "refund-123");
+
+        assertTrue(result.isSuccess());
+        assertEquals(2, result.getRefundStatus());
+        ArgumentCaptor<CreateRequest> captor = ArgumentCaptor.forClass(CreateRequest.class);
+        verify(refundService).create(captor.capture());
+        CreateRequest request = captor.getValue();
+        assertEquals("refund-123", request.getOutRefundNo());
+        // total=原支付金额 100 元=10000 分，refund=本次退款 40 元=4000 分
+        assertEquals(10000L, request.getAmount().getTotal());
+        assertEquals(4000L, request.getAmount().getRefund());
+    }
+
+    @Test
+    void refund_微信处理中_返回处理中状态() throws Exception {
+        RefundService refundService = mock(RefundService.class);
+        WxPayStrategyHandler refundHandler = new WxPayStrategyHandler(null, notificationParser, refundService, properties);
+        Refund refund = new Refund();
+        refund.setStatus(Status.PROCESSING);
+        when(refundService.create(any(CreateRequest.class))).thenReturn(refund);
+
+        RefundResult result = refundHandler.refund("202608041234567890",
+                new BigDecimal("100.00"), new BigDecimal("100.00"), "全额退款", "refund-456");
+
+        assertTrue(result.isSuccess());
+        assertEquals(1, result.getRefundStatus());
+    }
+
+    @Test
+    void refund_退款关闭_返回失败() throws Exception {
+        RefundService refundService = mock(RefundService.class);
+        WxPayStrategyHandler refundHandler = new WxPayStrategyHandler(null, notificationParser, refundService, properties);
+        Refund refund = new Refund();
+        refund.setStatus(Status.CLOSED);
+        when(refundService.create(any(CreateRequest.class))).thenReturn(refund);
+
+        RefundResult result = refundHandler.refund("202608041234567890",
+                new BigDecimal("100.00"), new BigDecimal("100.00"), "全额退款", "refund-789");
+
+        assertFalse(result.isSuccess());
+    }
+
+    @Test
+    void queryRefund_成功_返回已退款() throws Exception {
+        RefundService refundService = mock(RefundService.class);
+        WxPayStrategyHandler refundHandler = new WxPayStrategyHandler(null, notificationParser, refundService, properties);
+        Refund refund = new Refund();
+        refund.setStatus(Status.SUCCESS);
+        when(refundService.queryByOutRefundNo(any(QueryByOutRefundNoRequest.class))).thenReturn(refund);
+
+        RefundResult result = refundHandler.queryRefund("202608041234567890", "refund-123");
+
+        assertTrue(result.isSuccess());
+        assertEquals(2, result.getRefundStatus());
+        ArgumentCaptor<QueryByOutRefundNoRequest> captor =
+                ArgumentCaptor.forClass(QueryByOutRefundNoRequest.class);
+        verify(refundService).queryByOutRefundNo(captor.capture());
+        assertEquals("refund-123", captor.getValue().getOutRefundNo());
+    }
+
+    @Test
+    void queryRefund_处理中_返回处理中状态() throws Exception {
+        RefundService refundService = mock(RefundService.class);
+        WxPayStrategyHandler refundHandler = new WxPayStrategyHandler(null, notificationParser, refundService, properties);
+        Refund refund = new Refund();
+        refund.setStatus(Status.PROCESSING);
+        when(refundService.queryByOutRefundNo(any(QueryByOutRefundNoRequest.class))).thenReturn(refund);
+
+        RefundResult result = refundHandler.queryRefund("202608041234567890", "refund-123");
+
+        assertTrue(result.isSuccess());
+        assertEquals(1, result.getRefundStatus());
     }
 }

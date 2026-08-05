@@ -25,11 +25,16 @@ public class RefundBill extends BaseTableData {
      * 商户订单号
      */
     private String outOrderNo;
-    
+
     /**
      * 账单id
      */
     private Long payBillId;
+
+    /**
+     * 退款单号（渠道侧幂等键、退款状态查询依据），唯一
+     */
+    private String outRefundNo;
 
     /**
      * 退款金额
@@ -37,7 +42,7 @@ public class RefundBill extends BaseTableData {
     private BigDecimal refundAmount;
 
     /**
-     * 账单退款状态 1：未退款 2：已退款
+     * 账单退款状态 1：退款处理中 2：已退款 3：退款失败
      */
     private Integer refundStatus;
 
@@ -45,9 +50,10 @@ public class RefundBill extends BaseTableData {
      * 退款时间
      */
     private Date refundTime;
-    
+
     /**
      * 退款原因
-     * */
+     *
+     */
     private String reason;
 }
