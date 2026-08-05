@@ -56,7 +56,7 @@ aj:
   captcha:
     cache-type: redis
     type: default
-    water-mark: \u6211\u7684\u6C34\u5370
+    water-mark: "我的水印"
     slip-offset: 5
     aes-status: true
     interference-options: 2

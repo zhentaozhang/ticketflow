@@ -66,6 +66,8 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
         Collection<Long> orderNumberValues = columnNameAndShardingValuesMap.get("order_number");
         //user_id条件的值
         Collection<Long> userIdValues = columnNameAndShardingValuesMap.get("user_id");
+        //id条件的值
+        Collection<Long> idValues = columnNameAndShardingValuesMap.get("id");
 
         Long value = null;
         //如果是order_number查询
@@ -76,6 +78,9 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
         } else if (CollectionUtil.isNotEmpty(userIdValues)) {
             value = userIdValues.stream().findFirst()
                     .orElseThrow(() -> new TicketFlowFrameException(BaseCode.USER_ID_NOT_EXIST));
+            //如果是id查询
+        } else if (CollectionUtil.isNotEmpty(idValues)) {
+            value = idValues.stream().findFirst().orElse(null);
         }
         //如果order_number或者user_id的值存在
         if (Objects.nonNull(value)) {
