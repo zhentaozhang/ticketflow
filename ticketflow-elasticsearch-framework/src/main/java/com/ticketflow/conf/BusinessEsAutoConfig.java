@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.Objects;
 
 /**
+ *
  * ES自动配置。初始化Elasticsearch的RestClient连接，支持认证和集群配置。
  */
 @Slf4j
