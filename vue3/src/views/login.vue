@@ -108,7 +108,7 @@ import { isPhoneNumber, isEmailAddress } from '@/utils/index'
 import { ref, getCurrentInstance } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/store/modules/auth'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { CHANNEL_CODE } from '@/utils/constants'
 import { User, Lock, WarningFilled, ArrowLeft } from '@element-plus/icons-vue'
 
@@ -121,6 +121,7 @@ interface LoginForm {
 
 const userStore = useAuthStore()
 const router = useRouter()
+const route = useRoute()
 const loading = ref<boolean>(false)
 const activeName = ref<string>('first')
 const register = ref<boolean>(true)
