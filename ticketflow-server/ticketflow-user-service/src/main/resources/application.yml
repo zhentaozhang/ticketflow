@@ -112,6 +112,10 @@ management:
     metrics:
       export:
         enabled: true
+manage:
+  username: ${MANAGE_USERNAME:admin}
+  # 开发环境弱口令；生产环境必须通过环境变量 MANAGE_PASSWORD 覆盖（或 jasypt 加密），禁止使用默认值
+  password: ${MANAGE_PASSWORD:admin123}
 jasypt:
   encryptor:
     password: ${JASYPT_ENCRYPTOR_PASSWORD}
