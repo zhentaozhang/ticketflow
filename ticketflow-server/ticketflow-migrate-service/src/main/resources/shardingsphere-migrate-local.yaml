@@ -1,0 +1,40 @@
+dataSources:
+  ds_0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:3306/ticketflow_order_0?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    maxPoolSize: 20
+    minPoolSize: 5
+  ds_1:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:3306/ticketflow_order_1?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    maxPoolSize: 20
+    minPoolSize: 5
+
+rules:
+  - !SHARDING
+    tables:
+      d_order:
+        actualDataNodes: ds_$->{0..1}.d_order_$->{0..3}
+        databaseStrategy:
+          hint:
+            shardingAlgorithmName: database-order-hint
+        tableStrategy:
+          hint:
+            shardingAlgorithmName: table-order-hint
+    shardingAlgorithms:
+      database-order-hint:
+        type: CLASS_BASED
+        props:
+          strategy: hint
+          algorithmClassName: com.ticketflow.shardingsphere.algorithm.DatabaseOrderHintShardingAlgorithm
+      table-order-hint:
+        type: CLASS_BASED
+        props:
+          strategy: hint
+          algorithmClassName: com.ticketflow.shardingsphere.algorithm.TableOrderHintShardingAlgorithm

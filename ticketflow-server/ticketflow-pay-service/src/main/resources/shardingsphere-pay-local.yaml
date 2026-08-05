@@ -1,0 +1,55 @@
+dataSources:
+  ds_0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:3306/ticketflow_pay_0?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    maxPoolSize: 20
+    minPoolSize: 5
+  ds_1:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:3306/ticketflow_pay_1?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    maxPoolSize: 20
+    minPoolSize: 5
+
+rules:
+  - !SHARDING
+    tables:
+      d_pay_bill:
+        actualDataNodes: ds_$->{0..1}.d_pay_bill_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: out_order_no
+            shardingAlgorithmName: database-pay-complex
+        tableStrategy:
+          complex:
+            shardingColumns: out_order_no
+            shardingAlgorithmName: table-pay-complex
+      d_refund_bill:
+        actualDataNodes: ds_$->{0..1}.d_refund_bill_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: out_order_no
+            shardingAlgorithmName: database-pay-complex
+        tableStrategy:
+          complex:
+            shardingColumns: out_order_no
+            shardingAlgorithmName: table-pay-complex
+    shardingAlgorithms:
+      database-pay-complex:
+        type: CLASS_BASED
+        props:
+          strategy: complex
+          algorithmClassName: com.ticketflow.shardingsphere.DatabaseOrderComplexGeneArithmetic
+          sharding-count: 2
+          table-sharding-count: 2
+      table-pay-complex:
+        type: CLASS_BASED
+        props:
+          strategy: complex
+          algorithmClassName: com.ticketflow.shardingsphere.TableOrderComplexGeneArithmetic
+          sharding-count: 2

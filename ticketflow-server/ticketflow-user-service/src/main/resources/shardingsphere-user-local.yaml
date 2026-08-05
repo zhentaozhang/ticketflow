@@ -1,0 +1,75 @@
+dataSources:
+  ds_0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:3306/ticketflow_user_0?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    maxPoolSize: 20
+    minPoolSize: 5
+  ds_1:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:3306/ticketflow_user_1?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    maxPoolSize: 20
+    minPoolSize: 5
+
+rules:
+  - !SHARDING
+    tables:
+      d_user:
+        actualDataNodes: ds_$->{0..1}.d_user_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: id
+            shardingAlgorithmName: database-user-complex
+        tableStrategy:
+          complex:
+            shardingColumns: id
+            shardingAlgorithmName: table-user-complex
+      d_ticket_user:
+        actualDataNodes: ds_$->{0..1}.d_ticket_user_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: user_id
+            shardingAlgorithmName: database-user-complex
+        tableStrategy:
+          complex:
+            shardingColumns: user_id
+            shardingAlgorithmName: table-user-complex
+      d_user_email:
+        actualDataNodes: ds_$->{0..1}.d_user_email_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: user_id
+            shardingAlgorithmName: database-user-complex
+        tableStrategy:
+          complex:
+            shardingColumns: user_id
+            shardingAlgorithmName: table-user-complex
+      d_user_mobile:
+        actualDataNodes: ds_$->{0..1}.d_user_mobile_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: user_id
+            shardingAlgorithmName: database-user-complex
+        tableStrategy:
+          complex:
+            shardingColumns: user_id
+            shardingAlgorithmName: table-user-complex
+    shardingAlgorithms:
+      database-user-complex:
+        type: CLASS_BASED
+        props:
+          strategy: complex
+          algorithmClassName: com.ticketflow.shardingsphere.DatabaseOrderComplexGeneArithmetic
+          sharding-count: 2
+          table-sharding-count: 2
+      table-user-complex:
+        type: CLASS_BASED
+        props:
+          strategy: complex
+          algorithmClassName: com.ticketflow.shardingsphere.TableOrderComplexGeneArithmetic
+          sharding-count: 2
