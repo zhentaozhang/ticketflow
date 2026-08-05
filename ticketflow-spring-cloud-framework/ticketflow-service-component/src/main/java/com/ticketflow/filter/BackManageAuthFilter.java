@@ -8,7 +8,6 @@ import com.ticketflow.enums.BaseCode;
 import com.ticketflow.properties.BackManageProperties;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
-import jakarta.servlet.annotation.WebFilter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.NonNull;
@@ -25,7 +24,6 @@ import java.io.PrintWriter;
  *
  * 与前端业务接口隔离——普通用户请求（无 back_manage header）直接跳过
  */
-@WebFilter(value = "/*", filterName = "backManageAuthFilter")
 public class BackManageAuthFilter extends OncePerRequestFilter {
     
     private String trueStr = "true";

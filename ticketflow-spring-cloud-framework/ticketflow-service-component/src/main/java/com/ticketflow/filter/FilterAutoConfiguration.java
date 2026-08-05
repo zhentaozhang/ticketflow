@@ -6,7 +6,6 @@ import com.ticketflow.properties.BackManageProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
-import org.springframework.core.annotation.Order;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
@@ -20,25 +19,21 @@ import org.springframework.web.filter.OncePerRequestFilter;
 public class FilterAutoConfiguration {
 
     @Bean
-    @Order(-11)
     public OncePerRequestFilter backManageAuthFilter(BackManageProperties backManageProperties) {
         return new BackManageAuthFilter(backManageProperties);
     }
 
     @Bean
-    @Order(-10)
     public RequestWrapperFilter requestWrapperFilter() {
         return new RequestWrapperFilter();
     }
 
     @Bean
-    @Order(1)
     public BaseParameterFilter baseParameterFilter() {
         return new BaseParameterFilter();
     }
 
     @Bean
-    @Order(-1)
     public SkyWalkingFilter skyWalkingFilter() {
         return new SkyWalkingFilter();
     }
