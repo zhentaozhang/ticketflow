@@ -1,7 +1,6 @@
 package com.ticketflow.toolkit;
 
 import cn.hutool.core.date.SystemClock;
-import cn.hutool.core.lang.Assert;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang.StringUtils;
 
@@ -52,29 +51,6 @@ public class SnowflakeIdGenerator {
         }
     }
 
-    public SnowflakeIdGenerator(InetAddress inetAddress) {
-        this.inetAddress = inetAddress;
-        this.datacenterId = getDatacenterId(maxDatacenterId);
-        this.workerId = getMaxWorkerId(datacenterId, maxWorkerId);
-        initLog();
-    }
-
-    private void initLog() {
-        if (log.isDebugEnabled()) {
-            log.debug("Initialization SnowflakeIdGenerator datacenterId:" + this.datacenterId + " workerId:" + this.workerId);
-        }
-    }
-
-    public SnowflakeIdGenerator(long workerId, long datacenterId) {
-        Assert.isFalse(workerId > maxWorkerId || workerId < 0,
-                String.format("worker Id can't be greater than %d or less than 0", maxWorkerId));
-        Assert.isFalse(datacenterId > maxDatacenterId || datacenterId < 0,
-                String.format("datacenter Id can't be greater than %d or less than 0", maxDatacenterId));
-        this.workerId = workerId;
-        this.datacenterId = datacenterId;
-        initLog();
-    }
-
     protected long getMaxWorkerId(long datacenterId, long maxWorkerId) {
         StringBuilder mpid = new StringBuilder();
         mpid.append(datacenterId);
@@ -107,8 +83,19 @@ public class SnowflakeIdGenerator {
         return id;
     }
 
+    private static final long GENE_SEQUENCE_MASK = (1L << 6) - 1;
+
     //在这里处理了时钟回拨
     public long getBase() {
+        return getBase(sequenceMask);
+    }
+
+    /**
+     * 时钟回拨处理 + 序列号自增。序列掩码由调用方决定：
+     * 标准雪花用 12 位（4096/ms），基因法订单号必须用 6 位（64/ms），
+     * 否则 sequence 左移 6 位后会覆盖 workerId/dataCenterId 位段，破坏订单号唯一性。
+     */
+    private long getBase(long sequenceMask) {
         int five = 5;
         long timestamp = timeGen();
         //闰秒
@@ -156,49 +143,6 @@ public class SnowflakeIdGenerator {
     }
 
     /**
-     * @deprecated 此方法已被废弃，不需要学习
-     */
-    @Deprecated
-    public synchronized long getOrderNumber(long userId, long tableCount, long databaseCount) {
-        long timestamp = getBase();
-
-        // 步骤1：计算基因位数 = 表基因位数 + 库基因位数
-        // 表基因位数
-        long tableGeneLength = log2N(tableCount);
-        // 库基因位数
-        long databaseGeneLength = log2N(databaseCount);
-        long totalGeneLength = tableGeneLength + databaseGeneLength;
-
-        // 步骤2：创建基因掩码，用于提取用户ID的后N位
-        long geneMask = (1L << totalGeneLength) - 1;
-
-        // 步骤3：从用户ID中提取后N位作为完整基因（包含表基因+库基因）
-        long userGene = userId & geneMask;
-
-        // 步骤4：生成订单编号
-        // 结构：[时间戳][数据中心ID][机器ID][序列号][基因信息]
-        return ((timestamp - BASIS_TIME) << timestampLeftShift)
-                | (datacenterId << datacenterIdShift)
-                | (workerId << workerIdShift)
-                | (sequence << totalGeneLength)
-                | userGene;
-    }
-
-    /**
-     * @deprecated 此方法已被废弃，不需要学习
-     */
-    @Deprecated
-    public synchronized long getOrderNumber(long userId, long tableCount) {
-        long timestamp = getBase();
-        long sequenceShift = log2N(tableCount);
-        return ((timestamp - BASIS_TIME) << timestampLeftShift)
-                | (datacenterId << datacenterIdShift)
-                | (workerId << workerIdShift)
-                | (sequence << sequenceShift)
-                | (userId % tableCount);
-    }
-
-    /**
      * 【方案1】生成订单编号 - 固定预留6位基因位
      * 核心思想：预留足够多的基因位，支持未来扩容而无需修改生成逻辑
      * <p>
@@ -215,7 +159,9 @@ public class SnowflakeIdGenerator {
      * @return 订单编号
      */
     public synchronized long getOrderNumber(long userId) {
-        long timestamp = getBase();
+        // 基因法序列掩码必须与基因位宽一致（6 位 = 64/ms），
+        // 超出会覆盖 workerId/dataCenterId 位段导致订单号碰撞
+        long timestamp = getBase(GENE_SEQUENCE_MASK);
 
         // 固定预留6位基因位，支持未来扩容
         // 6位 = 可支持最大 2^6 = 64 种分片组合（8库8表）
@@ -246,21 +192,5 @@ public class SnowflakeIdGenerator {
 
     protected long timeGen() {
         return SystemClock.now();
-    }
-
-    public static long parseIdTimestamp(long id) {
-        return (id >> 22) + BASIS_TIME;
-    }
-
-    public long log2N(long count) {
-        return (long) (Math.log(count) / Math.log(2));
-    }
-
-    public long getMaxWorkerId() {
-        return maxWorkerId;
-    }
-
-    public long getMaxDatacenterId() {
-        return maxDatacenterId;
     }
 }
