@@ -10,13 +10,11 @@ import com.github.pagehelper.PageInfo;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.http.HttpEntity;
-import org.apache.http.HttpHeaders;
 import org.apache.http.entity.ContentType;
 import org.apache.http.nio.entity.NStringEntity;
 import org.apache.http.util.EntityUtils;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.client.Request;
-import org.elasticsearch.client.RequestOptions;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
@@ -259,10 +257,7 @@ public class BusinessEsHandle {
             }
             log.info("batchAdd dsl : {}", bulkBody);
             HttpEntity entity = new NStringEntity(bulkBody.toString(), ContentType.create(NDJSON_CONTENT_TYPE));
-            RequestOptions options = RequestOptions.DEFAULT.toBuilder()
-                    .addHeader(HttpHeaders.CONTENT_TYPE, NDJSON_CONTENT_TYPE)
-                    .build();
-            Response response = execute("POST", endpoint, entity, options);
+            Response response = execute("POST", endpoint, entity);
             if (response.getStatusLine().getStatusCode() != RestStatus.OK.getStatus()) {
                 log.error("batchAdd http error, indexName:{}, statusCode:{}", indexName, response.getStatusLine().getStatusCode());
                 return false;
@@ -497,16 +492,9 @@ public class BusinessEsHandle {
      * 发送 REST 请求到 ES，统一 Request 构建逻辑。
      */
     private Response execute(String method, String path, HttpEntity entity) throws IOException {
-        return execute(method, path, entity, null);
-    }
-
-    private Response execute(String method, String path, HttpEntity entity, RequestOptions options) throws IOException {
         Request request = new Request(method, path);
         if (Objects.nonNull(entity)) {
             request.setEntity(entity);
-        }
-        if (Objects.nonNull(options)) {
-            request.setOptions(options);
         }
         return restClient.performRequest(request);
     }
