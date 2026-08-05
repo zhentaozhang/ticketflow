@@ -6,8 +6,6 @@ import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.ticketflow.dto.EsDataQueryDto;
 import com.ticketflow.dto.EsDocumentMappingDto;
-import com.ticketflow.dto.EsGeoPointDto;
-import com.ticketflow.dto.EsGeoPointSortDto;
 import com.github.pagehelper.PageInfo;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -20,25 +18,20 @@ import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
-import org.elasticsearch.common.geo.GeoDistance;
-import org.elasticsearch.common.unit.DistanceUnit;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.json.JsonXContent;
 import org.elasticsearch.index.query.BoolQueryBuilder;
-import org.elasticsearch.index.query.GeoDistanceQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.search.sort.FieldSortBuilder;
-import org.elasticsearch.search.sort.GeoDistanceSortBuilder;
 import org.elasticsearch.search.sort.SortBuilders;
 import org.elasticsearch.search.sort.SortOrder;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -47,8 +40,7 @@ import java.util.Objects;
 
 /**
  * ES 业务操作封装（RestClient 原生 HTTP 方式，非 Spring Data）。
- * 提供：索引创建/删除、文档增删改查、Bool 复合查询、分页搜索、
- * 高亮、地理位置排序（GeoDistance）、searchAfter 深分页。
+ * 提供：索引创建/删除、文档增删改查、Bool 复合查询、分页搜索、高亮。
  * esSwitch=false 时所有操作静默跳过（调试/降级用）。
  * esTypeSwitch 兼容 ES 6.x（type）与 7.x+（无 type）两种模式。
  */
@@ -106,10 +98,7 @@ public class BusinessEsHandle {
         String source = indexRequest.source().utf8ToString();
         log.info("create index execute dsl : {}", source);
         HttpEntity entity = new NStringEntity(source, ContentType.APPLICATION_JSON);
-        Request request = new Request("PUT", "/" + indexName);
-        request.setEntity(entity);
-        request.addParameters(Collections.<String, String>emptyMap());
-        Response performRequest = restClient.performRequest(request);
+        execute("PUT", "/" + indexName, entity);
     }
 
     /**
@@ -124,18 +113,14 @@ public class BusinessEsHandle {
             return false;
         }
         try {
-            String path = "";
+            String path;
             if (esTypeSwitch) {
-                path = "/" + indexName + "/" + indexType + "/_mapping?include_type_name";
+                path = "/" + indexName + "/" + indexType + "/_mapping";
             } else {
                 path = "/" + indexName + "/_mapping";
             }
-            Request request = new Request("GET", path);
-            request.addParameters(Collections.<String, String>emptyMap());
-            Response response = restClient.performRequest(request);
-            String result = EntityUtils.toString(response.getEntity());
-            System.out.println(JSON.toJSONString(result));
-            return "OK".equals(response.getStatusLine().getReasonPhrase());
+            Response response = execute("GET", path, null);
+            return response.getStatusLine().getStatusCode() == RestStatus.OK.getStatus();
         } catch (Exception e) {
             if (e instanceof ResponseException && ((ResponseException) e).getResponse().getStatusLine().getStatusCode() == RestStatus.NOT_FOUND.getStatus()) {
                 log.warn("index not exist ! indexName:{}, indexType:{}", indexName, indexType);
@@ -157,26 +142,12 @@ public class BusinessEsHandle {
             return false;
         }
         try {
-            Request request = new Request("DELETE", "/" + indexName);
-            request.addParameters(Collections.<String, String>emptyMap());
-            Response response = restClient.performRequest(request);
-            return "OK".equals(response.getStatusLine().getReasonPhrase());
+            Response response = execute("DELETE", "/" + indexName, null);
+            return response.getStatusLine().getStatusCode() == RestStatus.OK.getStatus();
         } catch (Exception e) {
             log.error("deleteIndex error", e);
         }
         return false;
-    }
-
-    /**
-     * 清空索引下所有数据
-     *
-     * @param indexName 索引名字
-     */
-    public void deleteData(String indexName) {
-        if (!esSwitch) {
-            return;
-        }
-        deleteIndex(indexName);
     }
 
     /**
@@ -188,19 +159,6 @@ public class BusinessEsHandle {
      * @return boolean
      */
     public boolean add(String indexName, String indexType, Map<String, Object> params) {
-        return add(indexName, indexType, params, null);
-    }
-
-    /**
-     * 添加
-     *
-     * @param indexName 索引名字
-     * @param indexType 索引类型
-     * @param params    参数 key:字段名 value:具体值
-     * @param id        文档id 如果为空，则使用es默认id
-     * @return boolean
-     */
-    public boolean add(String indexName, String indexType, Map<String, Object> params, String id) {
         if (!esSwitch) {
             return false;
         }
@@ -210,22 +168,16 @@ public class BusinessEsHandle {
         try {
             String jsonString = JSON.toJSONString(params);
             HttpEntity entity = new NStringEntity(jsonString, ContentType.APPLICATION_JSON);
-            String endpoint = "";
+            String endpoint;
             if (esTypeSwitch) {
                 endpoint = "/" + indexName + "/" + indexType;
             } else {
                 endpoint = "/" + indexName + "/_doc";
             }
-            if (StringUtil.isNotEmpty(id)) {
-                endpoint = endpoint + "/" + id;
-            }
             log.info("add dsl : {}", jsonString);
-            Request request = new Request("POST", endpoint);
-            request.setEntity(entity);
-            request.addParameters(Collections.<String, String>emptyMap());
-            Response indexResponse = restClient.performRequest(request);
-            String reasonPhrase = indexResponse.getStatusLine().getReasonPhrase();
-            return "created".equalsIgnoreCase(reasonPhrase) || "ok".equalsIgnoreCase(reasonPhrase);
+            Response indexResponse = execute("POST", endpoint, entity);
+            int statusCode = indexResponse.getStatusLine().getStatusCode();
+            return statusCode == 201 || statusCode == 200;
         } catch (Exception e) {
             log.error("add error", e);
         }
@@ -242,91 +194,14 @@ public class BusinessEsHandle {
      * @return List
      */
     public <T> List<T> query(String indexName, String indexType, List<EsDataQueryDto> esDataQueryDtoList, Class<T> clazz) throws IOException {
-        if (!esSwitch) {
-            return new ArrayList<>();
-        }
-        return query(indexName, indexType, null, esDataQueryDtoList, null, null, null, null, null, clazz);
-    }
-
-    /**
-     * 查询
-     *
-     * @param indexName          索引名字
-     * @param indexType          索引类型
-     * @param esGeoPointDto      经纬度查询参数
-     * @param esDataQueryDtoList 参数
-     * @param clazz              返回的类型
-     * @return List
-     */
-    public <T> List<T> query(String indexName, String indexType, EsGeoPointDto esGeoPointDto, List<EsDataQueryDto> esDataQueryDtoList, Class<T> clazz) throws IOException {
-        if (!esSwitch) {
-            return new ArrayList<>();
-        }
-        return query(indexName, indexType, esGeoPointDto, esDataQueryDtoList, null, null, null, null, null, clazz);
-    }
-
-    /**
-     * 查询
-     *
-     * @param indexName          索引名字
-     * @param indexType          索引类型
-     * @param esDataQueryDtoList 参数
-     * @param sortParam          普通参数排序 不排序则为空 如果进行了排序，会返回es中的排序字段sort，需要用户在返回的实体类中添加sort字段
-     * @param sortOrder          升序还是降序，为空则降序
-     * @param clazz              返回的类型
-     * @return List
-     */
-    public <T> List<T> query(String indexName, String indexType, List<EsDataQueryDto> esDataQueryDtoList, String sortParam, SortOrder sortOrder, Class<T> clazz) throws IOException {
-        if (!esSwitch) {
-            return new ArrayList<>();
-        }
-        return query(indexName, indexType, null, esDataQueryDtoList, sortParam, null, sortOrder, null, null, clazz);
-    }
-
-    /**
-     * 查询
-     *
-     * @param indexName            索引名字
-     * @param indexType            索引类型
-     * @param esDataQueryDtoList   参数
-     * @param geoPointDtoSortParam 经纬度參數排序 不排序则为空 如果进行了排序，会返回es中的排序字段sort，需要用户在返回的实体类中添加sort字段
-     * @param sortOrder            升序还是降序，为空则降序
-     * @param clazz                返回的类型
-     * @return List
-     */
-    public <T> List<T> query(String indexName, String indexType, List<EsDataQueryDto> esDataQueryDtoList, EsGeoPointSortDto geoPointDtoSortParam, SortOrder sortOrder, Class<T> clazz) throws IOException {
-        if (!esSwitch) {
-            return new ArrayList<>();
-        }
-        return query(indexName, indexType, null, esDataQueryDtoList, null, geoPointDtoSortParam, sortOrder, null, null, clazz);
-    }
-
-
-    /**
-     * 查询
-     *
-     * @param indexName            索引名字
-     * @param indexType            索引类型
-     * @param esGeoPointDto        经纬度查询参数
-     * @param esDataQueryDtoList   参数
-     * @param sortParam            普通參數排序 不排序则为空 如果进行了排序，会返回es中的排序字段sort，需要用户在返回的实体类中添加sort字段
-     * @param geoPointDtoSortParam 经纬度參數排序 不排序则为空 如果进行了排序，会返回es中的排序字段sort，需要用户在返回的实体类中添加sort字段
-     * @param sortOrder            升序还是降序，为空则降序
-     * @param pageSize             searchAfterSort搜索的页大小
-     * @param searchAfterSort      sort值
-     * @param clazz                返回的类型
-     * @return List
-     */
-    public <T> List<T> query(String indexName, String indexType, EsGeoPointDto esGeoPointDto, List<EsDataQueryDto> esDataQueryDtoList, String sortParam, EsGeoPointSortDto geoPointDtoSortParam, SortOrder sortOrder, Integer pageSize, Object[] searchAfterSort, Class<T> clazz) throws IOException {
         List<T> list = new ArrayList<>();
         if (!esSwitch) {
             return list;
         }
-        SearchSourceBuilder sourceBuilder = getSearchSourceBuilder(esGeoPointDto, esDataQueryDtoList, sortParam, geoPointDtoSortParam, sortOrder);
+        SearchSourceBuilder sourceBuilder = getSearchSourceBuilder(esDataQueryDtoList, null, null);
         executeQuery(indexName, indexType, list, null, clazz, sourceBuilder, null);
         return list;
     }
-
 
     /**
      * 查询(分页)
@@ -357,44 +232,6 @@ public class BusinessEsHandle {
      * @return PageInfo
      */
     public <T> PageInfo<T> queryPage(String indexName, String indexType, List<EsDataQueryDto> esDataQueryDtoList, String sortParam, SortOrder sortOrder, Integer pageNo, Integer pageSize, Class<T> clazz) throws IOException {
-        return queryPage(indexName, indexType, null, esDataQueryDtoList, sortParam, null, sortOrder, pageNo, pageSize, clazz);
-    }
-
-    /**
-     * 查询(分页)
-     *
-     * @param indexName          索引名字
-     * @param indexType          索引类型
-     * @param esGeoPointDto      经纬度查询参数
-     * @param esDataQueryDtoList 参数
-     * @param pageNo             页码
-     * @param pageSize           页大小
-     * @param clazz              返回的类型
-     * @return PageInfo
-     */
-    public <T> PageInfo<T> queryPage(String indexName, String indexType, EsGeoPointDto esGeoPointDto, List<EsDataQueryDto> esDataQueryDtoList, Integer pageNo, Integer pageSize, Class<T> clazz) throws IOException {
-        return queryPage(indexName, indexType, esGeoPointDto, esDataQueryDtoList, null, null, null, pageNo, pageSize, clazz);
-    }
-
-    /**
-     * 查询(分页)
-     *
-     * @param indexName          索引名字
-     * @param indexType          索引类型
-     * @param esGeoPointDto      经纬度查询参数
-     * @param esDataQueryDtoList 参数
-     * @param sortParam          排序参数 不排序则为空 如果进行了排序，会返回es中的排序字段sort，需要用户在返回的实体类中添加sort字段
-     * @param sortOrder          升序还是降序，为空则降序
-     * @param pageNo             页码
-     * @param pageSize           页大小
-     * @param clazz              返回的类型
-     * @return
-     * @throws IOException
-     */
-    public <T> PageInfo<T> queryPage(String indexName, String indexType, EsGeoPointDto esGeoPointDto,
-                                     List<EsDataQueryDto> esDataQueryDtoList, String sortParam,
-                                     EsGeoPointSortDto geoPointDtoSortParam, SortOrder sortOrder, Integer pageNo,
-                                     Integer pageSize, Class<T> clazz) throws IOException {
         List<T> list = new ArrayList<>();
         PageInfo<T> pageInfo = new PageInfo<>(list);
         pageInfo.setPageNum(pageNo);
@@ -402,14 +239,18 @@ public class BusinessEsHandle {
         if (!esSwitch) {
             return pageInfo;
         }
-        SearchSourceBuilder sourceBuilder = getSearchSourceBuilder(esGeoPointDto, esDataQueryDtoList, sortParam, geoPointDtoSortParam, sortOrder);
+        if (Objects.isNull(pageNo) || Objects.isNull(pageSize) || pageNo <= 0 || pageSize <= 0) {
+            log.warn("queryPage invalid page params, indexName:{}, pageNo:{}, pageSize:{}", indexName, pageNo, pageSize);
+            return pageInfo;
+        }
+        SearchSourceBuilder sourceBuilder = getSearchSourceBuilder(esDataQueryDtoList, sortParam, sortOrder);
         sourceBuilder.from((pageNo - 1) * pageSize);
         sourceBuilder.size(pageSize);
         executeQuery(indexName, indexType, list, pageInfo, clazz, sourceBuilder, null);
         return pageInfo;
     }
 
-    private SearchSourceBuilder getSearchSourceBuilder(EsGeoPointDto esGeoPointDto, List<EsDataQueryDto> esDataQueryDtoList, String sortParam, EsGeoPointSortDto geoPointDtoSortParam, SortOrder sortOrder) {
+    private SearchSourceBuilder getSearchSourceBuilder(List<EsDataQueryDto> esDataQueryDtoList, String sortParam, SortOrder sortOrder) {
         SearchSourceBuilder sourceBuilder = new SearchSourceBuilder();
         if (Objects.isNull(sortOrder)) {
             sortOrder = SortOrder.DESC;
@@ -418,17 +259,6 @@ public class BusinessEsHandle {
             FieldSortBuilder sort = SortBuilders.fieldSort(sortParam);
             sort.order(sortOrder);
             sourceBuilder.sort(sort);
-        }
-        if (Objects.nonNull(geoPointDtoSortParam)) {
-            GeoDistanceSortBuilder sort = SortBuilders.geoDistanceSort("geoPoint", geoPointDtoSortParam.getLatitude().doubleValue(), geoPointDtoSortParam.getLongitude().doubleValue());
-            sort.unit(DistanceUnit.METERS);
-            sort.order(sortOrder);
-            sourceBuilder.sort(sort);
-        }
-        if (Objects.nonNull(esGeoPointDto)) {
-            QueryBuilder geoQuery = new GeoDistanceQueryBuilder(esGeoPointDto.getParamName()).distance(Long.MAX_VALUE, DistanceUnit.KILOMETERS)
-                    .point(esGeoPointDto.getLatitude().doubleValue(), esGeoPointDto.getLongitude().doubleValue()).geoDistance(GeoDistance.PLANE);
-            sourceBuilder.query(geoQuery);
         }
         BoolQueryBuilder boolQuery = QueryBuilders.boolQuery();
         for (EsDataQueryDto esDataQueryDto : esDataQueryDtoList) {
@@ -475,7 +305,7 @@ public class BusinessEsHandle {
     /**
      * ES 查询执行核心：发送 DSL → 解析 response → 反序列化到 list/pageInfo。
      * 处理 ES 7.x+ total 格式差异（hits.total 从数字变为对象）。
-     * 支持 highlight 回填和高亮字段替换、searchAfter sort 值提取。
+     * 支持 highlight 回填和高亮字段替换、sort 值提取。
      */
     public <T> void executeQuery(String indexName, String indexType, List<T> list, PageInfo<T> pageInfo, Class<T> clazz,
                                  SearchSourceBuilder sourceBuilder, List<String> highLightFieldNameList) throws IOException {
@@ -489,10 +319,7 @@ public class BusinessEsHandle {
         }
         String endpoint = endpointStringBuilder.toString();
         log.info("query execute query dsl : {}", string);
-        Request request = new Request("POST", endpoint);
-        request.setEntity(entity);
-        request.addParameters(Collections.emptyMap());
-        Response response = restClient.performRequest(request);
+        Response response = execute("POST", endpoint, entity);
         String result = EntityUtils.toString(response.getEntity());
         if (StringUtil.isEmpty(result)) {
             return;
@@ -529,11 +356,16 @@ public class BusinessEsHandle {
             }
             String esId = data.getString("_id");
             JSONObject jsonObject = data.getJSONObject("_source");
+            if (Objects.isNull(jsonObject)) {
+                continue;
+            }
             // searchAfter 深分页：提取 sort 值并填充到返回实体中
             JSONArray jsonArray = data.getJSONArray("sort");
             if (Objects.nonNull(jsonArray) && !jsonArray.isEmpty()) {
-                Long sort = jsonArray.getLong(0);
-                jsonObject.put("sort", sort);
+                Object sortValue = jsonArray.get(0);
+                if (sortValue instanceof Number) {
+                    jsonObject.put("sort", ((Number) sortValue).longValue());
+                }
             }
             // 高亮：用高亮片段替换原始字段值
             JSONObject highlight = data.getJSONObject("highlight");
@@ -558,12 +390,21 @@ public class BusinessEsHandle {
             return;
         }
         try {
-            Request request = new Request("DELETE", "/" + index + "/_doc/" + documentId);
-            request.addParameters(Collections.<String, String>emptyMap());
-            Response response = restClient.performRequest(request);
+            Response response = execute("DELETE", "/" + index + "/_doc/" + documentId, null);
             log.info("deleteByDocumentId result : {}", response.getStatusLine().getReasonPhrase());
         } catch (Exception e) {
-            log.error("deleteData error", e);
+            log.error("deleteByDocumentId error", e);
         }
+    }
+
+    /**
+     * 发送 REST 请求到 ES，统一 Request 构建逻辑。
+     */
+    private Response execute(String method, String path, HttpEntity entity) throws IOException {
+        Request request = new Request(method, path);
+        if (Objects.nonNull(entity)) {
+            request.setEntity(entity);
+        }
+        return restClient.performRequest(request);
     }
 }

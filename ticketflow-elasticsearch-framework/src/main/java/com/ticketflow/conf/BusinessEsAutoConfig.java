@@ -3,6 +3,7 @@ package com.ticketflow.conf;
 
 import com.ticketflow.util.StringUtil;
 import com.ticketflow.util.BusinessEsHandle;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.http.Header;
 import org.apache.http.HttpHeaders;
 import org.apache.http.HttpHost;
@@ -25,6 +26,7 @@ import java.util.Objects;
 /**
  * ES自动配置。初始化Elasticsearch的RestClient连接，支持认证和集群配置。
  */
+@Slf4j
 @EnableConfigurationProperties(BusinessEsProperties.class)
 @ConditionalOnProperty(value = "elasticsearch.ip")
 public class BusinessEsAutoConfig {
@@ -39,15 +41,21 @@ public class BusinessEsAutoConfig {
         RestClientBuilder builder = RestClient.builder(hosts);
         String userName = businessEsProperties.getUserName();
         String passWord = businessEsProperties.getPassWord();
-        if (StringUtil.isNotEmpty(userName) && !defaultValue.equals(userName) && StringUtil.isNotEmpty(passWord) && !defaultValue.equals(passWord)) {
-            //开始设置用户名和密码
-            CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
+        boolean needAuth = StringUtil.isNotEmpty(userName) && !defaultValue.equals(userName) && StringUtil.isNotEmpty(passWord) && !defaultValue.equals(passWord);
+        CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
+        if (needAuth) {
             credentialsProvider.setCredentials(AuthScope.ANY, new UsernamePasswordCredentials(userName, passWord));
-            builder.setHttpClientConfigCallback(httpClientBuilder -> httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider).setDefaultIOReactorConfig(IOReactorConfig.custom()
-                    // 设置线程数
-                    .setIoThreadCount(businessEsProperties.getMaxConnectNum()).build()));
         }
-        Header[] defaultHeaders = {new BasicHeader(HttpHeaders.CONTENT_TYPE, "application/json"), new BasicHeader("Role", "Read")};
+        builder.setHttpClientConfigCallback(httpClientBuilder -> {
+            if (needAuth) {
+                httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider);
+            }
+            httpClientBuilder.setDefaultIOReactorConfig(IOReactorConfig.custom()
+                    // 设置 I/O 线程数
+                    .setIoThreadCount(businessEsProperties.getMaxConnectNum()).build());
+            return httpClientBuilder;
+        });
+        Header[] defaultHeaders = {new BasicHeader(HttpHeaders.CONTENT_TYPE, "application/json")};
         // 设置每个请求需要发送的默认headers，这样就不用在每个请求中指定它们。
         builder.setDefaultHeaders(defaultHeaders);
         // 设置相关参数
@@ -65,13 +73,18 @@ public class BusinessEsAutoConfig {
      *
      */
     private HttpHost makeHttpHost(String s) {
-        assert StringUtil.isNotEmpty(s);
         String[] address = s.split(":");
         if (address.length == ADDRESS_LENGTH) {
-            String ip = address[0];
-            int port = Integer.parseInt(address[1]);
-            return new HttpHost(ip, port, HTTP_SCHEME);
+            try {
+                String ip = address[0];
+                int port = Integer.parseInt(address[1]);
+                return new HttpHost(ip, port, HTTP_SCHEME);
+            } catch (NumberFormatException e) {
+                log.warn("invalid elasticsearch host config : {}", s);
+                return null;
+            }
         } else {
+            log.warn("invalid elasticsearch host config : {}", s);
             return null;
         }
     }
