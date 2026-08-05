@@ -11,9 +11,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
  * Servlet 过滤器链自动配置。
- * 注册 RequestParamContextFilter（参数传播）、
- * BackManageAuthFilter（后台认证）、
- * RequestWrapperFilter（请求体缓存）
+ * 注册 BackManageAuthFilter（后台认证）、
+ * RequestWrapperFilter（请求体缓存）、
+ * BaseParameterFilter（上下文参数透传）、
+ * SkyWalkingFilter（链路追踪）
  */
 @EnableConfigurationProperties(BackManageProperties.class)
 public class FilterAutoConfiguration {

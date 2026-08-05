@@ -13,6 +13,8 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 对账线程池。为对账任务提供独立线程池，避免影响业务主流程。
+ * 注意：与 ticketflow-thread-pool-framework 的 BusinessThreadPool 结构重复（core+1 / max=CPU×5 / 60s），
+ * 因拒绝策略（CallerRunsPolicy 不丢任务）与守护线程语义不同，暂不统一
  */
 public class ThreadPool {
     

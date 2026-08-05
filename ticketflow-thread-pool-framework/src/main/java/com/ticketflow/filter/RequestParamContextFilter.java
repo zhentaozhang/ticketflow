@@ -16,9 +16,9 @@ import static com.ticketflow.constant.Constant.TRACE_ID;
 
 /**
  * 链路上下文过滤器（Servlet）。
- * 在请求进入时从 Header 提取 userId、channel、grayVersion 等参数，
- * 存入 BaseParameterHolder（ThreadLocal），
- * 请求结束时清理
+ * 将请求 Header 中的 traceId 写入 MDC，便于日志链路追踪，
+ * 请求结束时清理，避免线程复用导致上下文污染。
+ * 注意：traceId 的 MDC 处理与 service-component 的 BaseParameterFilter 重叠（均为幂等 put/remove）
  */
 
 public class RequestParamContextFilter extends OncePerRequestFilter {
