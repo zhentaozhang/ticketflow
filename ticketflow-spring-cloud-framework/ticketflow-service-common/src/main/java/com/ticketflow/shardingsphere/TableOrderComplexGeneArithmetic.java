@@ -67,6 +67,8 @@ public class TableOrderComplexGeneArithmetic implements ComplexKeysShardingAlgor
         Collection<Long> userIdValues = columnNameAndShardingValuesMap.get("user_id");
         //id条件的值
         Collection<Long> idValues = columnNameAndShardingValuesMap.get("id");
+        //program_id条件的值（program_id 与 id 同值域，分片结果一致）
+        Collection<Long> programIdValues = columnNameAndShardingValuesMap.get("program_id");
 
         //分片键的值
         Long value = null;
@@ -79,6 +81,9 @@ public class TableOrderComplexGeneArithmetic implements ComplexKeysShardingAlgor
             //如果是id查询
         } else if (CollectionUtil.isNotEmpty(idValues)) {
             value = idValues.stream().findFirst().orElse(null);
+            //如果是program_id查询
+        } else if (CollectionUtil.isNotEmpty(programIdValues)) {
+            value = programIdValues.stream().findFirst().orElse(null);
         }
         //如果order_number或者user_id的值存在
         if (Objects.nonNull(value)) {
