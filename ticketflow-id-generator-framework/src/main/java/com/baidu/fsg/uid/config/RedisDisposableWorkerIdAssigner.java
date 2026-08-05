@@ -19,10 +19,30 @@ public class RedisDisposableWorkerIdAssigner implements WorkerIdAssigner {
         this.redisTemplate = redisTemplate;
     }
     
+    private static final int MAX_RETRY_TIMES = 3;
+
     @Override
     public long assignWorkerId() {
-        String key = "uid_work_id";
-        Long increment = redisTemplate.opsForValue().increment(key);
-        return Optional.ofNullable(increment).orElseThrow(() -> new TicketFlowFrameException(BaseCode.UID_WORK_ID_ERROR));
+        // Redis 短暂不可用容忍：退避重试，避免部署窗口 Redis 重启导致启动失败
+        for (int i = 1; i <= MAX_RETRY_TIMES; i++) {
+            try {
+                String key = "uid_work_id";
+                Long increment = redisTemplate.opsForValue().increment(key);
+                return Optional.ofNullable(increment).orElseThrow(() -> new TicketFlowFrameException(BaseCode.UID_WORK_ID_ERROR));
+            } catch (TicketFlowFrameException e) {
+                throw e;
+            } catch (Exception e) {
+                if (i == MAX_RETRY_TIMES) {
+                    throw new TicketFlowFrameException(e);
+                }
+                try {
+                    Thread.sleep(1000L * i);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new TicketFlowFrameException(ie);
+                }
+            }
+        }
+        throw new TicketFlowFrameException(BaseCode.UID_WORK_ID_ERROR);
     }
 }
