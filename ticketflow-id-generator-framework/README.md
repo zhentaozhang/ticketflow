@@ -123,10 +123,10 @@ Lua 脚本（`lua/workAndDataCenterId.lua`）细节：
 
 ## 6. 已知不足
 
-- **getUid 启动强依赖 Redis**：部署时 Redis 不可用 → `afterPropertiesSet` 抛异常 → 启动失败（设计权衡，见第 5 节）
+- **getUid 启动依赖 Redis**：短暂不可用会自动重试（3 次退避），持续不可用则启动失败（设计权衡，见第 5 节）
 - **订单号链路 Redis 挂时的新实例兜底有撞号风险**：MAC+PID 哈希在多实例容器下可能重复（权衡取舍，可接受概率）
-- **无集成测试**：Lua 脚本行为、Redis 分配、分片路由依赖真实环境，目前靠手工验证
-- **预留 API**：`getId()`（标准雪花）、`parseUid()`（解析 ID 位段）在接口中但当前无业务调用
+- **无集成测试**：Lua 脚本行为、Redis 分配、分片路由依赖真实环境；位布局与唯一性已由单元测试覆盖
+- **预留 API**：`parseUid()`（解析 ID 位段）在接口中但当前无业务调用
 
 ---
 
@@ -145,7 +145,7 @@ Lua 脚本（`lua/workAndDataCenterId.lua`）细节：
 ```
 ticketflow-id-generator-framework/
 ├── com.baidu.fsg.uid/                 百度 uid-generator 移植（含 ticketflow 定制）
-│   ├── UidGenerator                   业务入口接口（getUid/getId/getOrderNumber/parseUid）
+│   ├── UidGenerator                   业务入口接口（getUid/getOrderNumber/parseUid）
 │   ├── BitsAllocator                  1+28+22+13 位分配器
 │   ├── impl/
 │   │   ├── DefaultUidGenerator        基础实现（位分配 + workerId 初始化 + 回拨拒绝）
