@@ -16,7 +16,6 @@ import java.util.concurrent.TimeUnit;
  * keys:    SpEL 表达式，支持 #paramName 引用方法参数
  * lockType:  Reentrant / Fair / Read / Write
  * waitTime:  获取锁等待时间，超时执行 lockTimeoutStrategy
- * leaseTime: 持有锁最长时间，到期自动释放
  * lockTimeoutStrategy: 超时策略（目前仅 FAIL）
  */
 @Target(value= {ElementType.TYPE, ElementType.METHOD})
