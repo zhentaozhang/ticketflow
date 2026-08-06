@@ -26,4 +26,21 @@
             #{id}
         </foreach>
     </delete>
+
+    <insert id="batchInsertIgnore">
+        insert ignore into d_order
+        (id, order_number, identifier_id, program_id, program_item_picture, user_id,
+         program_title, program_place, program_show_time, program_permit_choose_seat,
+         distribution_mode, take_ticket_mode, order_price, pay_order_type, order_status,
+         reconciliation_status, order_version, create_order_time, cancel_order_time,
+         pay_order_time, create_time, edit_time, status)
+        values
+        <foreach collection="list" item="row" separator=",">
+            (#{row.id}, #{row.orderNumber}, #{row.identifierId}, #{row.programId}, #{row.programItemPicture}, #{row.userId},
+             #{row.programTitle}, #{row.programPlace}, #{row.programShowTime}, #{row.programPermitChooseSeat},
+             #{row.distributionMode}, #{row.takeTicketMode}, #{row.orderPrice}, #{row.payOrderType}, #{row.orderStatus},
+             #{row.reconciliationStatus}, #{row.orderVersion}, #{row.createOrderTime}, #{row.cancelOrderTime},
+             #{row.payOrderTime}, #{row.createTime}, #{row.editTime}, #{row.status})
+        </foreach>
+    </insert>
 </mapper>

@@ -1,9 +1,16 @@
 package com.ticketflow.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.ticketflow.dto.ShardingMigrationDto;
 import com.ticketflow.entity.Order;
+import com.ticketflow.entity.OrderTicketUser;
+import com.ticketflow.entity.OrderTicketUserRecord;
+import com.ticketflow.mapper.MigrateMapper;
 import com.ticketflow.mapper.OrderMapper;
+import com.ticketflow.mapper.OrderTicketUserMapper;
+import com.ticketflow.mapper.OrderTicketUserRecordMapper;
+import com.ticketflow.shardingsphere.ShardingGeneUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.shardingsphere.infra.hint.HintManager;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -14,6 +21,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * 分库分表扩容迁移服务（基因法方案1）
@@ -26,7 +34,9 @@ import java.util.Map;
  * <p>
  * 扩容路径示例：
  * - 2库4表 → 2库8表（只加表）
- *
+ * <p>
+ * 支持的表：d_order / d_order_ticket_user / d_order_ticket_user_record（均按 order_number 基因分片），
+ * 每次迁移会依次处理三张表。
  **/
 @Slf4j
 @Service
@@ -34,6 +44,32 @@ public class ShardingMigrationService {
 
     @Autowired
     private OrderMapper orderMapper;
+
+    @Autowired
+    private OrderTicketUserMapper orderTicketUserMapper;
+
+    @Autowired
+    private OrderTicketUserRecordMapper orderTicketUserRecordMapper;
+
+    /**
+     * 单张分片表的迁移上下文
+     *
+     * @param <T> 实体类型
+     */
+    private static class TableContext<T> {
+        private final String logicTableName;
+        private final MigrateMapper<T> mapper;
+        private final Function<T, Long> idGetter;
+        private final Function<T, Long> orderNumberGetter;
+
+        TableContext(String logicTableName, MigrateMapper<T> mapper,
+                     Function<T, Long> idGetter, Function<T, Long> orderNumberGetter) {
+            this.logicTableName = logicTableName;
+            this.mapper = mapper;
+            this.idGetter = idGetter;
+            this.orderNumberGetter = orderNumberGetter;
+        }
+    }
 
     /**
      * 执行分库分表扩容迁移
@@ -51,30 +87,18 @@ public class ShardingMigrationService {
 
         MigrationStatistics statistics = new MigrationStatistics();
 
-        // 遍历所有旧的物理表
-        for (int dbIndex = 0; dbIndex < dto.getOldDatabaseCount(); dbIndex++) {
-            for (int tableIndex = 0; tableIndex < dto.getOldTableCount(); tableIndex++) {
-                String sourceDb = "ds_" + dbIndex;
-                String sourceTable = "d_order_" + tableIndex;
+        // 三张订单主表均以 order_number 分片，依次处理
+        List<TableContext<?>> tables = List.of(
+                new TableContext<>("d_order", orderMapper,
+                        Order::getId, Order::getOrderNumber),
+                new TableContext<>("d_order_ticket_user", orderTicketUserMapper,
+                        OrderTicketUser::getId, OrderTicketUser::getOrderNumber),
+                new TableContext<>("d_order_ticket_user_record", orderTicketUserRecordMapper,
+                        OrderTicketUserRecord::getId, OrderTicketUserRecord::getOrderNumber)
+        );
 
-                log.info("处理源表：{}.{}", sourceDb, sourceTable);
-
-                // 迁移该表的数据
-                TableMigrationResult result = migrateTableData(
-                        dbIndex, tableIndex,
-                        dto.getOldDatabaseCount(), dto.getOldTableCount(),
-                        dto.getNewDatabaseCount(), dto.getNewTableCount(),
-                        dto.getBatchSize(), dto.getDryRun()
-                );
-
-                statistics.totalScanned += result.scannedCount;
-                statistics.totalMigrated += result.migratedCount;
-                statistics.totalSkipped += result.skippedCount;
-
-                log.info("表 {}.{} 处理完成：扫描{}条，迁移{}条，跳过{}条",
-                        sourceDb, sourceTable,
-                        result.scannedCount, result.migratedCount, result.skippedCount);
-            }
+        for (TableContext<?> table : tables) {
+            migrateTable(table, dto, statistics);
         }
 
         log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -90,10 +114,42 @@ public class ShardingMigrationService {
     /**
      * 迁移单张表的数据
      */
-    private TableMigrationResult migrateTableData(int sourceDbIndex, int sourceTableIndex,
-                                                  int oldDbCount, int oldTableCount,
-                                                  int newDbCount, int newTableCount,
-                                                  int batchSize, boolean dryRun) {
+    private void migrateTable(TableContext<?> table, ShardingMigrationDto dto, MigrationStatistics statistics) {
+        // 遍历所有旧的物理表
+        for (int dbIndex = 0; dbIndex < dto.getOldDatabaseCount(); dbIndex++) {
+            for (int tableIndex = 0; tableIndex < dto.getOldTableCount(); tableIndex++) {
+                String sourceDb = "ds_" + dbIndex;
+                String sourceTable = table.logicTableName + "_" + tableIndex;
+
+                log.info("处理源表：{}.{}", sourceDb, sourceTable);
+
+                // 迁移该表的数据
+                TableMigrationResult result = migrateTableData(
+                        table, dbIndex, tableIndex,
+                        dto.getOldDatabaseCount(), dto.getOldTableCount(),
+                        dto.getNewDatabaseCount(), dto.getNewTableCount(),
+                        dto.getBatchSize(), dto.getDryRun()
+                );
+
+                statistics.totalScanned += result.scannedCount;
+                statistics.totalMigrated += result.migratedCount;
+                statistics.totalSkipped += result.skippedCount;
+
+                log.info("表 {}.{} 处理完成：扫描{}条，迁移{}条，跳过{}条",
+                        sourceDb, sourceTable,
+                        result.scannedCount, result.migratedCount, result.skippedCount);
+            }
+        }
+    }
+
+    /**
+     * 迁移单张物理表的数据
+     */
+    private <T> TableMigrationResult migrateTableData(TableContext<T> table,
+                                                      int sourceDbIndex, int sourceTableIndex,
+                                                      int oldDbCount, int oldTableCount,
+                                                      int newDbCount, int newTableCount,
+                                                      int batchSize, boolean dryRun) {
         TableMigrationResult result = new TableMigrationResult();
         long lastId = 0;
         int batchCount = 0;
@@ -104,39 +160,40 @@ public class ShardingMigrationService {
             // ═══════════════════════════════════════════════════════
             // 第1步：使用 Hint 强制路由，从源表分批读取数据
             // ═══════════════════════════════════════════════════════
-            List<Order> orders;
+            List<T> rows;
             try (HintManager hintManager = HintManager.getInstance()) {
                 // Hint 强制路由到指定的物理库和物理表
-                hintManager.addDatabaseShardingValue("d_order", String.valueOf(sourceDbIndex));
-                hintManager.addTableShardingValue("d_order", String.valueOf(sourceTableIndex));
+                hintManager.addDatabaseShardingValue(table.logicTableName, String.valueOf(sourceDbIndex));
+                hintManager.addTableShardingValue(table.logicTableName, String.valueOf(sourceTableIndex));
 
-                orders = orderMapper.selectList(
-                        Wrappers.lambdaQuery(Order.class)
-                                .gt(Order::getId, lastId)
-                                .orderByAsc(Order::getId)
-                                .last("LIMIT " + batchSize)
-                );
+                QueryWrapper<T> wrapper = Wrappers.query();
+                wrapper.orderByAsc("id");
+                if (lastId > 0) {
+                    wrapper.gt("id", lastId);
+                }
+                wrapper.last("LIMIT " + batchSize);
+                rows = table.mapper.selectList(wrapper);
             }
 
-            if (orders.isEmpty()) {
+            if (rows.isEmpty()) {
                 break;
             }
 
-            result.scannedCount += orders.size();
+            result.scannedCount += rows.size();
 
             // ═══════════════════════════════════════════════════════
             // 第2步：按新算法计算目标位置，分组待迁移数据
             // ═══════════════════════════════════════════════════════
-            // key: "目标库索引_目标表索引", value: 待迁移的订单列表
-            Map<String, List<Order>> targetGroupMap = new HashMap<>();
+            // key: "目标库索引_目标表索引", value: 待迁移的数据列表
+            Map<String, List<T>> targetGroupMap = new HashMap<>();
 
-            for (Order order : orders) {
+            for (T row : rows) {
                 // 使用订单号计算新位置（订单号低6位包含userId基因）
-                Long shardingKey = order.getOrderNumber();
+                Long shardingKey = table.orderNumberGetter.apply(row);
 
                 // 计算新的表索引和库索引
-                int newTableIndex = calculateTableIndex(shardingKey, newTableCount);
-                int newDbIndex = calculateDatabaseIndex(shardingKey, newDbCount, newTableCount);
+                int newTableIndex = (int) ShardingGeneUtils.tableIndex(newTableCount, shardingKey);
+                int newDbIndex = (int) ShardingGeneUtils.databaseIndex(newDbCount, shardingKey, newTableCount);
 
                 // 判断位置是否变化
                 if (newDbIndex == sourceDbIndex && newTableIndex == sourceTableIndex) {
@@ -145,7 +202,7 @@ public class ShardingMigrationService {
                 } else {
                     // 位置变化，需要迁移
                     String targetKey = newDbIndex + "_" + newTableIndex;
-                    targetGroupMap.computeIfAbsent(targetKey, k -> new ArrayList<>()).add(order);
+                    targetGroupMap.computeIfAbsent(targetKey, k -> new ArrayList<>()).add(row);
                 }
             }
 
@@ -153,29 +210,29 @@ public class ShardingMigrationService {
             // 第3步：批量迁移到目标表
             // ═══════════════════════════════════════════════════════
             if (!dryRun) {
-                for (Map.Entry<String, List<Order>> entry : targetGroupMap.entrySet()) {
+                for (Map.Entry<String, List<T>> entry : targetGroupMap.entrySet()) {
                     String[] parts = entry.getKey().split("_");
                     int targetDbIndex = Integer.parseInt(parts[0]);
                     int targetTableIndex = Integer.parseInt(parts[1]);
-                    List<Order> toMigrate = entry.getValue();
+                    List<T> toMigrate = entry.getValue();
 
                     // 插入到目标表
-                    insertToTarget(targetDbIndex, targetTableIndex, toMigrate);
+                    insertToTarget(table, targetDbIndex, targetTableIndex, toMigrate);
 
                     // 从源表删除
-                    deleteFromSource(sourceDbIndex, sourceTableIndex, toMigrate);
+                    deleteFromSource(table, sourceDbIndex, sourceTableIndex, toMigrate);
 
                     result.migratedCount += toMigrate.size();
                 }
             } else {
                 // 预演模式，只统计不实际迁移
-                for (List<Order> toMigrate : targetGroupMap.values()) {
+                for (List<T> toMigrate : targetGroupMap.values()) {
                     result.migratedCount += toMigrate.size();
                 }
             }
 
             // 更新游标
-            lastId = orders.get(orders.size() - 1).getId();
+            lastId = table.idGetter.apply(rows.get(rows.size() - 1));
 
             // 控制速度，避免数据库压力过大
             if (batchCount % 10 == 0) {
@@ -191,17 +248,16 @@ public class ShardingMigrationService {
     }
 
     /**
-     * 使用 Hint 强制路由，批量插入到目标表
+     * 使用 Hint 强制路由，批量插入到目标表。
+     * 使用 INSERT IGNORE 保证幂等：已存在的行跳过，迁移中断后重跑可自愈
      */
     @Transactional(rollbackFor = Exception.class)
-    public void insertToTarget(int dbIndex, int tableIndex, List<Order> orders) {
+    public <T> void insertToTarget(TableContext<T> table, int dbIndex, int tableIndex, List<T> rows) {
         try (HintManager hintManager = HintManager.getInstance()) {
-            hintManager.addDatabaseShardingValue("d_order", String.valueOf(dbIndex));
-            hintManager.addTableShardingValue("d_order", String.valueOf(tableIndex));
+            hintManager.addDatabaseShardingValue(table.logicTableName, String.valueOf(dbIndex));
+            hintManager.addTableShardingValue(table.logicTableName, String.valueOf(tableIndex));
 
-            for (Order order : orders) {
-                orderMapper.insert(order);
-            }
+            table.mapper.batchInsertIgnore(rows);
         }
     }
 
@@ -209,39 +265,14 @@ public class ShardingMigrationService {
      * 使用 Hint 强制路由，从源表删除已迁移数据
      */
     @Transactional(rollbackFor = Exception.class)
-    public void deleteFromSource(int dbIndex, int tableIndex, List<Order> orders) {
+    public <T> void deleteFromSource(TableContext<T> table, int dbIndex, int tableIndex, List<T> rows) {
         try (HintManager hintManager = HintManager.getInstance()) {
-            hintManager.addDatabaseShardingValue("d_order", String.valueOf(dbIndex));
-            hintManager.addTableShardingValue("d_order", String.valueOf(tableIndex));
+            hintManager.addDatabaseShardingValue(table.logicTableName, String.valueOf(dbIndex));
+            hintManager.addTableShardingValue(table.logicTableName, String.valueOf(tableIndex));
 
-            List<Long> ids = orders.stream().map(Order::getId).toList();
-            orderMapper.physicalDeleteByIds(ids);
+            List<Long> ids = rows.stream().map(table.idGetter).toList();
+            table.mapper.physicalDeleteByIds(ids);
         }
-    }
-
-    /**
-     * 计算表索引（取低N位）
-     * N = log2(tableCount)
-     * <p>
-     * 示例：tableCount=8 时，取低3位
-     */
-    private int calculateTableIndex(Long shardingKey, int tableCount) {
-        return (int) ((tableCount - 1) & shardingKey);
-    }
-
-    /**
-     * 计算库索引（右移表基因位后取低M位）
-     * M = log2(databaseCount)
-     * <p>
-     * 示例：tableCount=8, databaseCount=4 时，右移3位后取低2位
-     */
-    private int calculateDatabaseIndex(Long shardingKey, int databaseCount, int tableCount) {
-        long tableGeneLength = log2N(tableCount);
-        return (int) ((databaseCount - 1) & (shardingKey >> tableGeneLength));
-    }
-
-    private long log2N(long count) {
-        return (long) (Math.log(count) / Math.log(2));
     }
 
     /**

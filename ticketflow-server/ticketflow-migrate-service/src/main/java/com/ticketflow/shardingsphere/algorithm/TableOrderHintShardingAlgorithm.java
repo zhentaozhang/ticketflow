@@ -29,8 +29,8 @@ public class TableOrderHintShardingAlgorithm implements HintShardingAlgorithm<St
         // 获取第一个值（表后缀，如 "0", "1", "2", "3"）
         String tableSuffix = values.iterator().next();
 
-        // 根据后缀构造物理表名称（逻辑表为 d_order，物理表为 d_order_0, d_order_1, ...）
-        String targetTable = "d_order_" + tableSuffix;
+        // 根据逻辑表名构造物理表（逻辑表 d_order/d_order_ticket_user/...，物理表加 "_" + 后缀）
+        String targetTable = shardingValue.getLogicTableName() + "_" + tableSuffix;
 
         // 验证目标表是否存在
         if (!availableTargetNames.contains(targetTable)) {

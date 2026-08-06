@@ -34,6 +34,8 @@ public class TableOrderComplexGeneArithmetic implements ComplexKeysShardingAlgor
     @Override
     public void init(Properties props) {
         shardingCount = Integer.parseInt(props.getProperty(SHARDING_COUNT_KEY_NAME));
+        // 位运算分片要求分片数为 2 的幂，配置错误早暴露，避免静默错误路由
+        ShardingGeneUtils.checkPowerOfTwo(shardingCount, SHARDING_COUNT_KEY_NAME);
     }
 
     /**
@@ -69,6 +71,8 @@ public class TableOrderComplexGeneArithmetic implements ComplexKeysShardingAlgor
         Collection<Long> idValues = columnNameAndShardingValuesMap.get("id");
         //program_id条件的值（program_id 与 id 同值域，分片结果一致）
         Collection<Long> programIdValues = columnNameAndShardingValuesMap.get("program_id");
+        //payment表的分片列 out_order_no 值即订单号字符串，与 order_number 等价
+        Collection<Long> outOrderNoValues = columnNameAndShardingValuesMap.get("out_order_no");
 
         //分片键的值
         Long value = null;
@@ -84,11 +88,27 @@ public class TableOrderComplexGeneArithmetic implements ComplexKeysShardingAlgor
             //如果是program_id查询
         } else if (CollectionUtil.isNotEmpty(programIdValues)) {
             value = programIdValues.stream().findFirst().orElse(null);
+            //如果是out_order_no查询（订单号字符串，与 order_number 同基因）
+        } else if (CollectionUtil.isNotEmpty(outOrderNoValues)) {
+            value = Long.parseLong(String.valueOf(outOrderNoValues.stream().findFirst().orElse(null)));
+        }
+        //订单号与用户ID同时出现时（如订单列表双条件查询），两个分片键必须路由到同一分片表，
+        //否则说明基因位定义已不一致，fail-fast 防止静默错误路由
+        if (CollectionUtil.isNotEmpty(orderNumberValues) && CollectionUtil.isNotEmpty(userIdValues)) {
+            long orderNumberIndex = ShardingGeneUtils.tableIndex(shardingCount,
+                    orderNumberValues.stream().findFirst().get());
+            long userIdIndex = ShardingGeneUtils.tableIndex(shardingCount,
+                    userIdValues.stream().findFirst().get());
+            if (orderNumberIndex != userIdIndex) {
+                throw new IllegalArgumentException(
+                        String.format("order_number 与 user_id 基因位路由不一致，order_number 路由到表 %d，user_id 路由到表 %d",
+                                orderNumberIndex, userIdIndex));
+            }
         }
         //如果order_number或者user_id的值存在
         if (Objects.nonNull(value)) {
             //表索引 = 分片键的低N位（N = log2(表数量)）
-            actualTableNames.add(logicTableName + "_" + ((shardingCount - 1) & value));
+            actualTableNames.add(logicTableName + "_" + ShardingGeneUtils.tableIndex(shardingCount, value));
             return actualTableNames;
         }
         //如果没有分片键查询，则把所有真实表返回
