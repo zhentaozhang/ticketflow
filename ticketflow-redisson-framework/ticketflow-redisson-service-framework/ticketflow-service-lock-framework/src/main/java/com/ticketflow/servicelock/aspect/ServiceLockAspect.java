@@ -64,10 +64,10 @@ public class ServiceLockAspect {
             String customLockTimeoutStrategy = servicelock.customLockTimeoutStrategy();
             if (StringUtil.isNotEmpty(customLockTimeoutStrategy)) {
                 return handleCustomLockTimeoutStrategy(customLockTimeoutStrategy, joinPoint);
-            }else{
-                servicelock.lockTimeoutStrategy().handler(lockName);
             }
-            return joinPoint.proceed();
+            servicelock.lockTimeoutStrategy().handler(lockName);
+            // 兜底：即使超时策略实现不抛异常，也绝不在未持有锁的情况下执行业务
+            throw new RuntimeException(lockName + "请求频繁");
         }
     }
 
