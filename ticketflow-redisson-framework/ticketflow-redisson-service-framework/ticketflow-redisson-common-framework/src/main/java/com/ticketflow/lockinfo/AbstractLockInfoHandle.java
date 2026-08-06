@@ -24,11 +24,14 @@ import static com.ticketflow.core.Constants.SEPARATOR;
  * 锁名构造器的抽象基类。
  *
  * 最终生成的 Redis 锁 key 格式：
- *   {prefixDistinctionName}-{getLockPrefixName()}:{name}:{SpEL 解析后的 key 值}
+ *   {prefixDistinctionName}-{getLockPrefixName()}:{name}:{key 值}
  *   示例：default-SERVICE_LOCK:PROGRAM_ORDER_CREATE_V1:123
  *
  * getLockName()      — 从 @ServiceLock/@RepeatExecuteLimit 注解 + SpEL 动态构建（给切面用）
  * simpleGetLockName() — 直接拼接字符串（给 ServiceLockTool 手动调用用）
+ *
+ * 两个入口统一使用 getLockPrefixName() 前缀，保证同一业务名（name+key）
+ * 在注解入口与编程式入口（ServiceLockTool）下生成相同的锁名，跨入口互斥生效。
  *
  * SpEL 解析（getSpElKey）：将注解中的 "#programId" 等表达式，根据方法参数名和入参值求值。
  * 使用 ExtParameterNameDiscoverer 获取参数名（兼容 Java 8 -parameters 和无 -parameters 编译）。
@@ -40,8 +43,6 @@ import static com.ticketflow.core.Constants.SEPARATOR;
 @Slf4j
 public abstract class AbstractLockInfoHandle implements LockInfoHandle {
     
-    private static final String LOCK_DISTRIBUTE_ID_NAME_PREFIX = "LOCK_DISTRIBUTE_ID";
-
     private final ParameterNameDiscoverer nameDiscoverer = new ExtParameterNameDiscoverer();
 
     private final ExpressionParser parser = new SpelExpressionParser();
@@ -64,7 +65,7 @@ public abstract class AbstractLockInfoHandle implements LockInfoHandle {
             }
         }
         return SpringUtil.getPrefixDistinctionName() + "-" + 
-                LOCK_DISTRIBUTE_ID_NAME_PREFIX + SEPARATOR + name + SEPARATOR + String.join(SEPARATOR, definitionKeyList);
+                getLockPrefixName() + SEPARATOR + name + SEPARATOR + String.join(SEPARATOR, definitionKeyList);
     }
 
     /**

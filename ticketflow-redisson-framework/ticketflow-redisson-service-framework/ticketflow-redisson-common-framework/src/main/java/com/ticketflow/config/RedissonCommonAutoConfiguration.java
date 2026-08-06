@@ -12,9 +12,7 @@ import org.springframework.boot.autoconfigure.AutoConfigureBefore;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
-import org.springframework.util.ReflectionUtils;
 
-import java.lang.reflect.Method;
 import java.util.Objects;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -36,8 +34,7 @@ public class RedissonCommonAutoConfiguration {
     public RedissonClient redissonClient(RedisProperties redisProperties, RedissonBaseProperties redissonBaseProperties){
         Config config = new Config();
         String prefix = "redis://";
-        Method method = ReflectionUtils.findMethod(RedisProperties.class, "isSsl");
-        if (method != null && (Boolean)ReflectionUtils.invokeMethod(method, redisProperties)) {
+        if (Objects.nonNull(redisProperties.getSsl()) && redisProperties.getSsl().isEnabled()) {
             prefix = "rediss://";
         }
         config.useSingleServer()

@@ -49,6 +49,7 @@ public class RedissonFairLocker implements ServiceLocker {
         try {
             return lock.tryLock(waitTime, unit);
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             return false;
         }
     }
@@ -59,6 +60,7 @@ public class RedissonFairLocker implements ServiceLocker {
         try {
             return lock.tryLock(waitTime, leaseTime, unit);
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             return false;
         }
     }
