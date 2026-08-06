@@ -17,6 +17,11 @@ import java.util.concurrent.TimeUnit;
  * lockType:  Reentrant / Fair / Read / Write
  * waitTime:  获取锁等待时间，超时执行 lockTimeoutStrategy
  * lockTimeoutStrategy: 超时策略（目前仅 FAIL）
+ *
+ * 支持类级声明：类注解作为默认配置，方法级注解优先覆盖（同 @Transactional 语义）。
+ * 锁与事务时序：锁先于事务开启、释放晚于事务提交的保证仅在加锁方法上
+ * 同时标注 @Transactional 时成立（切面 @Order(-10) 低于事务拦截器默认顺序）。
+ * 若 @Transactional 标注在更外层方法或发生自调用，锁可能在事务提交前释放。
  */
 @Target(value= {ElementType.TYPE, ElementType.METHOD})
 @Retention(value= RetentionPolicy.RUNTIME)

@@ -24,6 +24,7 @@ import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.springframework.core.annotation.Order;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -44,6 +45,40 @@ public class ServiceLockAspect {
 
     @Around("@annotation(servicelock)")
     public Object around(ProceedingJoinPoint joinPoint, ServiceLock servicelock) throws Throwable {
+        return lockAndProceed(joinPoint, servicelock);
+    }
+
+    /**
+     * 类级 @ServiceLock 支持：类注解作为默认锁配置；方法上已有 @ServiceLock 时直接放行，
+     * 交由方法级切面处理（避免双重加锁），语义与 @Transactional 一致（方法级覆盖类级）。
+     */
+    @Around("@within(servicelock)")
+    public Object aroundClass(ProceedingJoinPoint joinPoint, ServiceLock servicelock) throws Throwable {
+        if (isMethodAnnotated(joinPoint)) {
+            return joinPoint.proceed();
+        }
+        return lockAndProceed(joinPoint, servicelock);
+    }
+
+    private boolean isMethodAnnotated(ProceedingJoinPoint joinPoint) {
+        Method signatureMethod = ((MethodSignature) joinPoint.getSignature()).getMethod();
+        if (signatureMethod.isAnnotationPresent(ServiceLock.class)) {
+            return true;
+        }
+        try {
+            Method targetMethod = joinPoint.getTarget().getClass()
+                    .getMethod(signatureMethod.getName(), signatureMethod.getParameterTypes());
+            return targetMethod.isAnnotationPresent(ServiceLock.class);
+        } catch (NoSuchMethodException e) {
+            return false;
+        }
+    }
+
+    private Object lockAndProceed(ProceedingJoinPoint joinPoint, ServiceLock servicelock) throws Throwable {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            log.warn("serviceLock:{} 在已开启的事务内获取，锁释放可能早于事务提交，存在竞态；请将 @ServiceLock 与 @Transactional 标注在同一方法",
+                    servicelock.name());
+        }
         LockInfoHandle lockInfoHandle = lockInfoHandleFactory.getLockInfoHandle(LockInfoType.SERVICE_LOCK);
         String lockName = lockInfoHandle.getLockName(joinPoint, servicelock.name(),servicelock.keys());
         LockType lockType = servicelock.lockType();

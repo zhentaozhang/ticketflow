@@ -96,7 +96,8 @@ public class RedisStreamAutoConfig {
                     Thread thread = new Thread(r);
                     thread.setName("thread-consumer-stream-task-" + threadCount.getAndIncrement());
                     return thread;
-                });
+                },
+                new ThreadPoolExecutor.CallerRunsPolicy());
     }
     public void checkConsumerType(String consumerType){
         if ((!RedisStreamConstant.GROUP.equals(consumerType)) && (!RedisStreamConstant.BROADCAST.equals(consumerType))) {

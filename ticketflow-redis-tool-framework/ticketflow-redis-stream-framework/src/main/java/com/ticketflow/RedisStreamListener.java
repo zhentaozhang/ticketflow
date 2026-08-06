@@ -18,14 +18,10 @@ public class RedisStreamListener implements StreamListener<String, ObjectRecord<
 
     @Override
     public void onMessage(ObjectRecord<String, String> message) {
-        try{
-            RecordId messageId = message.getId();
-            String value = message.getValue();
-            log.info("redis stream 消费到了数据 messageId : {}, streamName : {}, message : {}", 
-                    messageId, message.getStream(), value);
-            messageConsumer.accept(message);
-        }catch (Exception e){
-            log.error("onMessage error",e);
-        }
+        RecordId messageId = message.getId();
+        String value = message.getValue();
+        log.info("redis stream 消费到了数据 messageId : {}, streamName : {}, message : {}",
+                messageId, message.getStream(), value);
+        messageConsumer.accept(message);
     }
 }

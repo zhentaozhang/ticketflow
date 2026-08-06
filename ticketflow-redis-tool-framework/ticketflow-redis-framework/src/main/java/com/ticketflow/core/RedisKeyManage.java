@@ -24,9 +24,6 @@ public enum RedisKeyManage {
      *
      */
 
-    Key("key", "键值测试", "value为TestCacheDto类型", "k"),
-    Key2("key:%s", "键值占位测试", "value为TestCacheDto类型", "k"),
-
     USER_LOGIN("user_login_%s_%s", "user_login", "value为UserVo类型", "k"),
 
     PRODUCT_STOCK("product_stock:%s", "商品库存id", "value为库存", "k"),
@@ -138,15 +135,6 @@ public enum RedisKeyManage {
         this.keyIntroduce = keyIntroduce;
         this.valueIntroduce = valueIntroduce;
         this.author = author;
-    }
-
-    public static RedisKeyManage getRc(String keyCode) {
-        for (RedisKeyManage re : RedisKeyManage.values()) {
-            if (re.key.equals(keyCode)) {
-                return re;
-            }
-        }
-        return null;
     }
 
 }

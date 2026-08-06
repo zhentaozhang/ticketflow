@@ -4,7 +4,6 @@ package com.ticketflow.config;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
@@ -12,14 +11,6 @@ import org.springframework.data.redis.serializer.StringRedisSerializer;
  * Redis框架自动配置。配置RedisTemplate序列化方式和StringRedisTemplate Bean。
  **/
 public class RedisFrameWorkAutoConfig {
-
-    @Bean("redisToolRedisTemplate")
-    public RedisTemplate redisTemplate(RedisConnectionFactory redisConnectionFactory) {
-        RedisTemplate redisTemplate = new RedisTemplate();
-        redisTemplate.setDefaultSerializer(new StringRedisSerializer());
-        redisTemplate.setConnectionFactory(redisConnectionFactory);
-        return redisTemplate;
-    }
 
     @Primary
     @Bean("redisToolStringRedisTemplate")

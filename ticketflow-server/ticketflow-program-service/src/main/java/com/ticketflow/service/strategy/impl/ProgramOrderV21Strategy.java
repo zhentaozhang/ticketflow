@@ -87,7 +87,8 @@ public class ProgramOrderV21Strategy implements ProgramOrderStrategy {
             String lockKey = StrUtil.join("-",PROGRAM_ORDER_CREATE_V2,
                     programOrderCreateDto.getProgramId(),ticketCategoryId);
             ReentrantLock localLock = localLockCache.getLock(lockKey,false);
-            RLock serviceLock = serviceLockTool.getLock(LockType.Reentrant, lockKey);
+            RLock serviceLock = serviceLockTool.getLock(LockType.Reentrant, PROGRAM_ORDER_CREATE_V2,
+                    new String[]{String.valueOf(programOrderCreateDto.getProgramId()), String.valueOf(ticketCategoryId)});
             localLockList.add(localLock);
             serviceLockList.add(serviceLock);
         }

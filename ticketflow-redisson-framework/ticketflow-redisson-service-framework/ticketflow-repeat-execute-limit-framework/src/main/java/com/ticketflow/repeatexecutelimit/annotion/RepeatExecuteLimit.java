@@ -12,6 +12,10 @@ import java.lang.annotation.Target;
  * 在指定 time 内，相同的 name+keys 只会执行一次，
  * 后续请求直接抛出异常或返回
  * <p>
+ * 支持类级声明：类注解作为默认配置，方法级注解优先覆盖（同 @Transactional 语义）。
+ * 幂等标记在业务成功后写入，晚于同方法上 @Transactional 的提交（切面 @Order(-11)
+ * 低于事务拦截器默认顺序）；若 @Transactional 标注在更外层方法，标记可能早于提交。
+ * <p>
  * 配合 RepeatExecuteLimitAspect 使用
  */
 @Target(value = {ElementType.TYPE, ElementType.METHOD})
@@ -33,8 +37,12 @@ public @interface RepeatExecuteLimit {
     String[] keys();
 
     /**
-     * 在多长时间内一直保持幂等，如果不配置则以执行方法为准
-     *
+     * 业务执行成功后保持幂等的时间（秒）。
+     * <p>
+     * durationTime &gt; 0：业务成功后在 Redis 写入幂等标记并保持 durationTime 秒，
+     * 期间相同 name+keys 的请求直接快速失败；
+     * durationTime = 0（默认）：仅防并发（锁持有期间互斥），不写入幂等标记，
+     * 业务完成后相同请求可再次执行。Kafka 消费幂等等场景应显式配置 durationTime。
      */
     long durationTime() default 0L;
 
