@@ -351,10 +351,12 @@ flowchart LR
 | 组件 | 定位 | 核心能力 |
 |------|------|----------|
 | **分布式 ID 生成器** | 框架 | 融合百度 UID + 雪花算法，支持基因法订单号、RingBuffer 预缓存、Redis 自动分配 WorkerId |
-| **验证码框架** | 框架 | 滑块拼图、文字点选、旋转拼图三种验证，Java SPI 发现，Local/Redis 双缓存 |
+| **验证码框架** | 框架 | 滑块拼图、文字点选两种验证，Spring Bean 委托分发，Local/Redis 双缓存 |
 | **线程池框架** | 框架 | 自动透传 MDC traceId 与请求上下文，解决异步链路追踪断裂 |
 | **灰度发布框架** | 框架 | 网关层 + WebMvc 拦截器双层灰度路由 |
-| **Redis 工具框架** | 框架 | Redis Stream 广播消费、分布式锁注解、布隆过滤器、延迟队列 |
+| **Redis 工具框架** | 框架 | Redis Stream 广播消费、缓存工具 |
+| **Redisson 框架** | 框架 | 分布式锁注解（可重入/公平/读写）、布隆过滤器、延迟队列 |
+| **ES 框架** | 框架 | Elasticsearch 文档 CRUD 封装与查询 DTO 映射 |
 
 ---
 
@@ -553,7 +555,8 @@ ticketflow/
 │   ├── ticketflow-pay-service/                # 支付服务
 │   ├── ticketflow-customize-service/          # 定制服务
 │   ├── ticketflow-admin-service/              # 监控服务
-│   └── ticketflow-migrate-service/            # 迁移服务
+│   ├── ticketflow-migrate-service/            # 迁移服务
+│   └── ticketflow-mybatis-plus-service/       # MyBatis-Plus 代码生成工具
 ├── ticketflow-server-client/                  # Feign API 接口
 ├── ticketflow-spring-cloud-framework/         # Spring Cloud 公共框架
 ├── ticketflow-redis-tool-framework/           # Redis 工具
