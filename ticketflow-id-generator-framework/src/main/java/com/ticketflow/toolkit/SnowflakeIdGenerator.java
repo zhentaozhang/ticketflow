@@ -48,7 +48,7 @@ public class SnowflakeIdGenerator {
         } else {
             this.datacenterId = getDatacenterId(maxDatacenterId);
             workerId = getMaxWorkerId(datacenterId, maxWorkerId);
-            log.warn("Redis work id allocation unavailable, fallback to MAC+PID: workId={}, datacenterId={}, collision risk across instances", workerId, datacenterId);
+            log.error("Redis work id allocation unavailable, fallback to MAC+PID: workId={}, datacenterId={}, collision risk across instances", workerId, datacenterId);
         }
     }
 
@@ -125,8 +125,10 @@ public class SnowflakeIdGenerator {
                 sequence = (sequence + 1) & sequenceMask;
             }
         } else {
-            // 不同毫秒内，序列号置为 1 - 3 随机数
-            sequence = ThreadLocalRandom.current().nextLong(1, 3);
+            // 不同毫秒内,序列号从 [1,64) 随机起点。
+            // 扩展为 64 个起点:低流量时覆盖的基因组合从 2 种增至 63 种,
+            // 缓解低 6 位基因(分库分表索引)在冷启动阶段的分布热点
+            sequence = initialSequence();
         }
 
         lastTimestamp = timestamp;
@@ -181,6 +183,16 @@ public class SnowflakeIdGenerator {
                 | (workerId << workerIdShift)
                 | (sequence << fixedGeneLength)
                 | userGene;
+    }
+
+    /**
+     * 新毫秒的序列号随机起点。
+     * 独立方法便于测试覆写固定值（如全 1/全 0 验证序列号边界）
+     *
+     * @return [1, 64) 的随机数，覆盖 6 位基因序列全部取值
+     */
+    protected long initialSequence() {
+        return ThreadLocalRandom.current().nextLong(1, 64);
     }
 
     protected long tilNextMillis(long lastTimestamp) {

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ticketflow.mapper.OrderTicketUserRecordMapper">
+    <delete id="physicalDeleteByIds">
+        delete
+        from d_order_ticket_user_record
+        where id in 
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+
+    <insert id="batchInsertIgnore">
+        insert ignore into d_order_ticket_user_record
+        (id, order_number, identifier_id, ticket_user_order_id, program_id, user_id,
+         ticket_user_id, seat_id, seat_info, ticket_category_id, order_price,
+         record_type_code, record_type_value, reconciliation_status, create_type,
+         create_time, edit_time, status)
+        values
+        <foreach collection="list" item="row" separator=",">
+            (#{row.id}, #{row.orderNumber}, #{row.identifierId}, #{row.ticketUserOrderId}, #{row.programId}, #{row.userId},
+             #{row.ticketUserId}, #{row.seatId}, #{row.seatInfo}, #{row.ticketCategoryId}, #{row.orderPrice},
+             #{row.recordTypeCode}, #{row.recordTypeValue}, #{row.reconciliationStatus}, #{row.createType},
+             #{row.createTime}, #{row.editTime}, #{row.status})
+        </foreach>
+    </insert>
+</mapper>

@@ -47,6 +47,9 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
     public void init(Properties props) {
         this.shardingCount = Integer.parseInt(props.getProperty(SHARDING_COUNT_KEY_NAME));
         this.tableShardingCount = Integer.parseInt(props.getProperty(TABLE_SHARDING_COUNT_KEY_NAME));
+        // 位运算分片要求分片数为 2 的幂，配置错误早暴露，避免静默错误路由
+        ShardingGeneUtils.checkPowerOfTwo(shardingCount, SHARDING_COUNT_KEY_NAME);
+        ShardingGeneUtils.checkPowerOfTwo(tableShardingCount, TABLE_SHARDING_COUNT_KEY_NAME);
     }
 
 
@@ -70,6 +73,8 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
         Collection<Long> idValues = columnNameAndShardingValuesMap.get("id");
         //program_id条件的值（program_id 与 id 同值域，分片结果一致）
         Collection<Long> programIdValues = columnNameAndShardingValuesMap.get("program_id");
+        //payment表的分片列 out_order_no 值即订单号字符串，与 order_number 等价
+        Collection<Long> outOrderNoValues = columnNameAndShardingValuesMap.get("out_order_no");
 
         Long value = null;
         //如果是order_number查询
@@ -86,6 +91,22 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
             //如果是program_id查询
         } else if (CollectionUtil.isNotEmpty(programIdValues)) {
             value = programIdValues.stream().findFirst().orElse(null);
+            //如果是out_order_no查询（订单号字符串，与 order_number 同基因）
+        } else if (CollectionUtil.isNotEmpty(outOrderNoValues)) {
+            value = Long.parseLong(String.valueOf(outOrderNoValues.stream().findFirst().orElse(null)));
+        }
+        //订单号与用户ID同时出现时（如订单列表双条件查询），两个分片键必须路由到同一分片，
+        //否则说明基因位定义已不一致，fail-fast 防止静默错误路由
+        if (CollectionUtil.isNotEmpty(orderNumberValues) && CollectionUtil.isNotEmpty(userIdValues)) {
+            long orderNumberIndex = ShardingGeneUtils.databaseIndex(shardingCount,
+                    orderNumberValues.stream().findFirst().get(), tableShardingCount);
+            long userIdIndex = ShardingGeneUtils.databaseIndex(shardingCount,
+                    userIdValues.stream().findFirst().get(), tableShardingCount);
+            if (orderNumberIndex != userIdIndex) {
+                throw new IllegalArgumentException(
+                        String.format("order_number 与 user_id 基因位路由不一致，order_number 路由到库 %d，user_id 路由到库 %d",
+                                orderNumberIndex, userIdIndex));
+            }
         }
         //如果order_number或者user_id的值存在
         if (Objects.nonNull(value)) {
@@ -93,9 +114,11 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
             long databaseIndex = calculateDatabaseIndex(shardingCount, value, tableShardingCount);
             String databaseIndexStr = String.valueOf(databaseIndex);
             for (String actualSplitDatabaseName : allActualSplitDatabaseNames) {
-                //将所有的分库名和得到的分库索引进行匹配
-                if (actualSplitDatabaseName.contains(databaseIndexStr)) {
+                //将所有的分库名和得到的分库索引进行精确匹配（contains 在库名为 ds_1/ds_10 时存在前缀误匹配）
+                if (actualSplitDatabaseName.equals("ds_" + databaseIndexStr)) {
                     actualDatabaseNames.add(actualSplitDatabaseName);
+                    //记录命中分布，供 ShardingMetrics 快照观察分片热点
+                    ShardingMetrics.recordDatabaseHit(databaseIndex);
                     break;
                 }
             }
@@ -125,17 +148,6 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
      * @return 分配到的数据库编号
      */
     public long calculateDatabaseIndex(Integer databaseCount, Long splicingKey, Integer tableCount) {
-        // 计算表分片占用的bit位数
-        long tableGeneLength = log2N(tableCount);
-
-        // 将分片键右移tableGeneLength位，跳过表基因位
-        // 然后与(databaseCount-1)进行按位与运算，得到库索引
-        // 例如：ID=1101 (13), tableCount=4, databaseCount=4
-        //   tableGeneLength=2, ID>>2=11 (3), (4-1)&3=3
-        return (databaseCount - 1) & (splicingKey >> tableGeneLength);
-    }
-
-    public long log2N(long count) {
-        return (long) (Math.log(count) / Math.log(2));
+        return ShardingGeneUtils.databaseIndex(databaseCount, splicingKey, tableCount);
     }
 }
