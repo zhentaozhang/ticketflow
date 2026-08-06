@@ -92,4 +92,9 @@ public class DelayConsumerQueue extends DelayBaseQueue{
             log.error("destroy error",e);
         }
     }
+
+    public void shutdown() {
+        destroy(listenStartThreadPool);
+        destroy(executeTaskThreadPool);
+    }
 }

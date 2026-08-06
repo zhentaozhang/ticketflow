@@ -1,7 +1,5 @@
 package com.ticketflow.core;
 
-import java.util.concurrent.atomic.AtomicInteger;
-
 /**
  * 延迟队列热点分区选择器。
  *
@@ -13,7 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  **/
 public class IsolationRegionSelector {
 
-	private final AtomicInteger count = new AtomicInteger(0);
+	private int count = 0;
 
 	private final Integer thresholdValue;
 
@@ -22,16 +20,16 @@ public class IsolationRegionSelector {
 	}
 
 	private int reset() {
-		count.set(0);
-		return count.get();
+		count = 0;
+		return count;
 	}
 	
 	public synchronized int getIndex() {
-		int cur = count.get();
+		int cur = count;
 		if (cur >= thresholdValue) {
 			cur = reset();
 		} else {
-			count.incrementAndGet();
+			count++;
 		}
 		return cur;
 	}

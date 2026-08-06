@@ -29,23 +29,6 @@ public class RedissonDataHandle {
     }
     
     public Duration getDuration(long timeToLive, TimeUnit timeUnit){
-        switch (timeUnit) {
-            
-            case MINUTES -> {
-                return Duration.ofMinutes(timeToLive);
-            }
-            
-            case HOURS -> {
-                return Duration.ofHours(timeToLive);
-            }
-            
-            case DAYS -> {
-                return Duration.ofDays(timeToLive);
-            }
-            
-            default -> {
-                return Duration.ofSeconds(timeToLive);
-            }
-        }
+        return Duration.of(timeToLive, timeUnit.toChronoUnit());
     }
 }

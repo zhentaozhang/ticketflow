@@ -106,8 +106,8 @@ public class ServiceLockTool {
             }
         }else {
             LockTimeOutStrategy.FAIL.handler(lockName);
+            throw new RuntimeException(lockName + "请求频繁");
         }
-        return null;
     }
     
     /**

@@ -34,7 +34,7 @@ import static com.ticketflow.repeatexecutelimit.constant.RepeatExecuteLimitConst
 /**
  * 两层防重锁设计：
  * 第一层 — 本地 ReentrantLock（快速失败，同 JVM 内并发）
- * 第二层 — Redis Fair Lock（跨进程排队，按请求顺序获得锁）
+ * 第二层 — Redis Reentrant Lock + tryLock(0)（非阻塞快速失败，跨进程互斥）
  *
  * @Order(-11) 确保在 @Transactional 之前获取锁。
  */
