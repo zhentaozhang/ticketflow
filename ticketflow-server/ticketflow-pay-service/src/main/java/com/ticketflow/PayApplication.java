@@ -5,6 +5,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
 import org.springframework.cloud.openfeign.EnableFeignClients;
+import org.springframework.core.Ordered;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
 
@@ -13,7 +14,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
  * 对接支付宝 SDK，提供统一下单、异步回调通知、退款和交易查询能力
  */
 @MapperScan({"com.ticketflow.mapper"})
-@EnableTransactionManagement
+@EnableTransactionManagement(order = Ordered.LOWEST_PRECEDENCE)
 @EnableScheduling
 @EnableDiscoveryClient
 @EnableFeignClients
