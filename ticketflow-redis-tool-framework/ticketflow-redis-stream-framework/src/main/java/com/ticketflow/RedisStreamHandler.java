@@ -44,9 +44,26 @@ public class RedisStreamHandler {
             Map<String,Object> map = new HashMap<>(2);
             map.put("key","value");
             RecordId recordId = redisStreamPushHandler.push(JSON.toJSONString(map));
-            addGroup(streamName,group);
+            try {
+                addGroup(streamName, group);
+            } catch (RuntimeException e) {
+                if (!isBusyGroup(e)) {
+                    throw e;
+                }
+                log.warn("stream group already exists, skip create. streamName : {} group : {}", streamName, group);
+            }
             del(streamName,recordId);
             log.info("initStream streamName : {} group : {}",streamName,group);
         }
+    }
+
+    private boolean isBusyGroup(Throwable throwable){
+        if(Objects.isNull(throwable)){
+            return false;
+        }
+        if(throwable.getMessage() != null && throwable.getMessage().contains("BUSYGROUP")){
+            return true;
+        }
+        return isBusyGroup(throwable.getCause());
     }
 }

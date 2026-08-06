@@ -41,7 +41,7 @@ public class ApiDataService extends ServiceImpl<ApiDataMapper, ApiData> {
     @Autowired
     private UidGenerator uidGenerator;
 
-    @RepeatExecuteLimit(name = RepeatExecuteLimitConstants.CONSUMER_API_DATA_MESSAGE, keys = {"#apiData.id"})
+    @RepeatExecuteLimit(name = RepeatExecuteLimitConstants.CONSUMER_API_DATA_MESSAGE, keys = {"#apiData.id"}, durationTime = 60)
     public void saveApiData(ApiData apiData) {
         ApiData dbApiData = apiDataMapper.selectById(apiData.getId());
         if (Objects.isNull(dbApiData)) {

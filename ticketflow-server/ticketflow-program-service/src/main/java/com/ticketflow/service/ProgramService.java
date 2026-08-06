@@ -756,7 +756,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      * @RepeatExecuteLimit 防止 Kafka 重复消费导致超卖
      * @Transactional 保证 seat.update + ticketCategory.reduceRemainNumber 在同一个事务里
      */
-    @RepeatExecuteLimit(name = REDUCE_REMAIN_NUMBER, keys = {"#reduceRemainNumberDto.programId", "#reduceRemainNumberDto.seatIdList"})
+    @RepeatExecuteLimit(name = REDUCE_REMAIN_NUMBER, keys = {"#reduceRemainNumberDto.programId", "#reduceRemainNumberDto.seatIdList"}, durationTime = 60)
     @Transactional(rollbackFor = Exception.class)
     public Boolean operateSeatLockAndTicketCategoryRemainNumber(ReduceRemainNumberDto reduceRemainNumberDto) {
         List<TicketCategoryCountDto> ticketCategoryCountDtoList = reduceRemainNumberDto.getTicketCategoryCountDtoList();
@@ -815,7 +815,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      * V4：  先校验 LOCK 状态（悲观：只有锁定中的座位才能支付/取消），
      * 再按 pay/cancel 分别走 SOLD / NO_SOLD + 库存归还
      */
-    @RepeatExecuteLimit(name = PAY_OR_CANCEL_PROGRAM_ORDER, keys = {"#programOperateDataDto.programId", "#programOperateDataDto.seatIdList"})
+    @RepeatExecuteLimit(name = PAY_OR_CANCEL_PROGRAM_ORDER, keys = {"#programOperateDataDto.programId", "#programOperateDataDto.seatIdList"}, durationTime = 60)
     @Transactional(rollbackFor = Exception.class)
     public Boolean operateProgramData(ProgramOperateDataDto programOperateDataDto) {
         List<Long> seatIdList = programOperateDataDto.getSeatIdList();
