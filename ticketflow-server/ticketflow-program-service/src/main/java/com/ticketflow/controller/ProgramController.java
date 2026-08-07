@@ -97,12 +97,6 @@ public class ProgramController {
         return ApiResponse.ok(programService.localDetail(programGetDto));
     }
 
-    @Operation(summary = "获取所有节目id集合")
-    @PostMapping(value = "/all/list")
-    public ApiResponse<List<Long>> allList() {
-        return ApiResponse.ok(programService.getAllProgramIdList());
-    }
-
     @Operation(summary = "将要压测的节目相关数据进行预热(根据id)")
     @PostMapping(value = "/data/preheat")
     public ApiResponse<Boolean> dataPreheat(@Valid @RequestBody ProgramDataPreheatDto programDataPreheatDto) {
