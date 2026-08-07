@@ -13,7 +13,7 @@ import lombok.Data;
 @Schema(title="UserVo", description ="用户数据")
 public class UserVo {
     
-    @Schema(name ="id", type ="String", description ="用户id")
+    @Schema(name ="id", type ="Long", description ="用户id")
     private Long id;
     
     @Schema(name ="name", type ="String", description ="用户名字")

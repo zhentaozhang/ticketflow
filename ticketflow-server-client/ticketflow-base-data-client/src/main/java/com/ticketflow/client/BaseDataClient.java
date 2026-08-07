@@ -6,7 +6,6 @@ import com.ticketflow.dto.AreaSelectDto;
 import com.ticketflow.dto.GetChannelDataByCodeDto;
 import com.ticketflow.vo.AreaVo;
 import com.ticketflow.vo.GetChannelDataVo;
-import com.ticketflow.vo.TokenDataVo;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,7 +19,7 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * gateway 通过此接口查询渠道配置、Token TTL、地区数据
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "base-data-service", fallback = BaseDataClientFallback.class)
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "base-data-service")
 //                ↑ 服务名 = ticketflow-base-data-service  ↑ 被 gateway 和 program-service 使用
 public interface BaseDataClient {
     /**
@@ -29,12 +28,6 @@ public interface BaseDataClient {
      */
     @PostMapping("/channel/data/getByCode")
     ApiResponse<GetChannelDataVo> getByCode(GetChannelDataByCodeDto dto);
-
-    /**
-     * 查询Token TTL数据
-     */
-    @PostMapping(value = "/get")
-    ApiResponse<TokenDataVo> get();
 
     /**
      * 根据id集合批量查询地区名

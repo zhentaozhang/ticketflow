@@ -163,7 +163,7 @@ public class ProgramVo implements Serializable {
     private Integer programStatus;
     
     @Schema(name ="issueTime", type ="Date", description ="上架发行时间")
-    private Integer issueTime;
+    private Date issueTime;
     
     /**
      * 业务字段

@@ -3,10 +3,8 @@ package com.ticketflow.client;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.dto.TicketUserListDto;
 import com.ticketflow.dto.UserGetAndTicketUserListDto;
-import com.ticketflow.dto.UserIdDto;
 import com.ticketflow.vo.TicketUserVo;
 import com.ticketflow.vo.UserGetAndTicketUserListVo;
-import com.ticketflow.vo.UserVo;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,17 +18,9 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * 下游服务通过此接口查询用户基础信息和购票人列表
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "user-service", fallback = UserClientFallback.class)
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "user-service")
 //                ↑ Nacos 注册名 = ticketflow-user-service  ↑ order-service 下单时查购票人用
 public interface UserClient {
-
-    /**
-     * 查询用户(通过id)
-     * gateway鉴权时用——解析Token得到userId后查用户详情
-     */
-    @PostMapping(value = "/user/getById")
-    ApiResponse<UserVo> getById(UserIdDto dto);
-
 
     /**
      * 查询购票人列表(通过userId)

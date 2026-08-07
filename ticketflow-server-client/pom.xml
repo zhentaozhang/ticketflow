@@ -20,7 +20,6 @@
         <module>ticketflow-order-client</module>
         <module>ticketflow-base-data-client</module>
         <module>ticketflow-user-client</module>
-        <module>ticketflow-job-client</module>
         <module>ticketflow-customize-client</module>
         <module>ticketflow-program-client</module>
         <module>ticketflow-pay-client</module>
