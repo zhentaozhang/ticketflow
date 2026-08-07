@@ -78,13 +78,15 @@ public class RsaSignTool {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < keys.size() - 1; i++) {
             String key = keys.get(i);
-            String value = params.get(key);
+            Object rawValue = params.get(key);
+            String value = rawValue == null ? null : String.valueOf(rawValue);
             sb.append(buildKeyValue(key, value, false));
             sb.append("&");
         }
         
         String tailKey = keys.get(keys.size() - 1);
-        String tailValue = params.get(tailKey);
+        Object rawTailValue = params.get(tailKey);
+        String tailValue = rawTailValue == null ? null : String.valueOf(rawTailValue);
         sb.append(buildKeyValue(tailKey, tailValue, false));
         
         return sb.toString();
@@ -95,7 +97,8 @@ public class RsaSignTool {
      * */
     public static boolean verifyRsaSign256(Map<String, String> params, String publicKey){
         try {
-            String sign = params.get("sign");
+            Object rawSign = params.get("sign");
+            String sign = rawSign == null ? null : String.valueOf(rawSign);
             String content = getSignCheckContent(params);
             return verifyRsaSign256(content.getBytes(CHARSET), sign, publicKey);
         }catch (Exception e) {
