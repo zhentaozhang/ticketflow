@@ -3,7 +3,6 @@ package com.ticketflow.controller;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.dto.TicketCategoryAddDto;
 import com.ticketflow.dto.TicketCategoryDto;
-import com.ticketflow.dto.TicketCategoryListByProgramDto;
 import com.ticketflow.dto.TicketCategoryListDto;
 import com.ticketflow.service.TicketCategoryService;
 import com.ticketflow.vo.TicketCategoryDetailVo;
@@ -46,11 +45,5 @@ public class TicketCategoryController {
     @PostMapping(value = "/select/list")
     public ApiResponse<List<TicketCategoryDetailVo>> selectList(@Valid @RequestBody TicketCategoryListDto ticketCategoryDto) {
         return ApiResponse.ok(ticketCategoryService.selectList(ticketCategoryDto));
-    }
-
-    @Operation(summary  = "查询集合(programId查询)")
-    @PostMapping(value = "/select/list/by/program")
-    public ApiResponse<List<TicketCategoryDetailVo>> selectListByProgram(@Valid @RequestBody TicketCategoryListByProgramDto ticketCategoryListByProgramDto) {
-        return ApiResponse.ok(ticketCategoryService.selectListByProgram(ticketCategoryListByProgramDto));
     }
 }

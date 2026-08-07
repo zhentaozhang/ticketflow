@@ -10,7 +10,6 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.dto.TicketCategoryAddDto;
 import com.ticketflow.dto.TicketCategoryDto;
-import com.ticketflow.dto.TicketCategoryListByProgramDto;
 import com.ticketflow.dto.TicketCategoryListDto;
 import com.ticketflow.entity.Program;
 import com.ticketflow.entity.TicketCategory;
@@ -225,19 +224,4 @@ public class TicketCategoryService extends ServiceImpl<TicketCategoryMapper, Tic
         }).collect(Collectors.toList());
     }
 
-    /**
-     * 查询节目下所有票档。
-     *
-     * @param ticketCategoryListByProgramDto 节目票档查询参数
-     * @return 票档详情 Vo 列表
-     */
-    public List<TicketCategoryDetailVo> selectListByProgram(TicketCategoryListByProgramDto ticketCategoryListByProgramDto) {
-        List<TicketCategory> ticketCategorieList = ticketCategoryMapper.selectList(Wrappers.lambdaQuery(TicketCategory.class)
-                .eq(TicketCategory::getProgramId, ticketCategoryListByProgramDto.getProgramId()));
-        return ticketCategorieList.stream().map(ticketCategory -> {
-            TicketCategoryDetailVo ticketCategoryDetailVo = new TicketCategoryDetailVo();
-            BeanUtil.copyProperties(ticketCategory,ticketCategoryDetailVo);
-            return ticketCategoryDetailVo;
-        }).collect(Collectors.toList());
-    }
 }
