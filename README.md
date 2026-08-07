@@ -44,7 +44,7 @@
 
 - 订单号预留 6 位基因位，支撑 8 库 8 表共 64 种分片组合
 - 同一用户的所有订单落在同一分片，避免跨库查询与读扩散
-- 支持 1024 个虚拟槽位，物理表可在不停机状态下从 8 张扩至 4096 张
+- 支持 1024 个虚拟槽位，物理表可在不停机状态下从 16 张扩至 4096 张
 
 ### 统一分布式锁框架
 
@@ -186,7 +186,7 @@ flowchart TB
 
     %% ==================== 数据存储 ====================
     subgraph Storage[数据存储]
-        DB[(MySQL 8.0 × 10 实例<br/>ShardingSphere · 基因法分片)]:::storage
+        DB[(MySQL 8.0 · 10 数据库<br/>ShardingSphere · 基因法分片)]:::storage
     end
 
     %% ==================== 可观测性 ====================
@@ -299,10 +299,10 @@ flowchart LR
             P1[(ticketflow_program_1)]:::shard
         end
 
-        subgraph OrderShard[订单分片 · 2 库 4 表]
+        subgraph OrderShard[订单分片 · 2 库 8 表]
             direction LR
-            O0[(ticketflow_order_0<br/>d_order_0~3)]:::shard
-            O1[(ticketflow_order_1<br/>d_order_0~3)]:::shard
+            O0[(ticketflow_order_0<br/>d_order_0~7)]:::shard
+            O1[(ticketflow_order_1<br/>d_order_0~7)]:::shard
         end
 
         subgraph PayShard[支付分片 · 2 库]
@@ -315,7 +315,7 @@ flowchart LR
     subgraph Tables[核心分片表]
         TU[d_user · d_ticket_user<br/>d_user_email · d_user_mobile]:::table
         TP[d_program · d_ticket_category<br/>d_seat]:::table
-        TO[d_order · d_order_ticket_user]:::table
+        TO[d_order · d_order_ticket_user<br/>d_order_ticket_user_record]:::table
         TA[d_pay_bill · d_refund_bill]:::table
     end
 
@@ -337,7 +337,7 @@ flowchart LR
 | `ticketflow_customize` | 1 | `d_api_data`, `d_rule`, `d_message_record` |
 | `ticketflow_user_0 / _1` | 2 | `d_user`, `d_ticket_user`, `d_user_email`, `d_user_mobile` |
 | `ticketflow_program_0 / _1` | 2 | `d_program`, `d_ticket_category`, `d_seat` |
-| `ticketflow_order_0 / _1` | 8 (4×2) | `d_order` (8 物理表), `d_order_ticket_user` |
+| `ticketflow_order_0 / _1` | 16 (8×2) | `d_order` (16 物理表), `d_order_ticket_user`, `d_order_ticket_user_record` |
 | `ticketflow_pay_0 / _1` | 2 | `d_pay_bill`, `d_refund_bill` |
 
 > **基因法分片**：订单号嵌入 userId 后 6 位作为基因，同时支持 `user_id` 和 `order_number` 维度精准路由到同一分片，避免跨库查询。
