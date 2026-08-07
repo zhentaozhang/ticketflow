@@ -18,7 +18,7 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * order-service 通过此接口发起支付、查询支付状态、退款和接收回调
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "pay-service", fallback = PayClientFallback.class)
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "pay-service")
 //                ↑ Nacos 服务名  ↑ order-service 支付流程调用
 public interface PayClient {
     /**

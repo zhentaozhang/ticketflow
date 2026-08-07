@@ -61,8 +61,6 @@ mybatis-plus:
 feign:
   sentinel:
     enabled: false
-  hystrix:
-    enabled: true
   httpclient:
     enabled: false
   okhttp:

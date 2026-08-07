@@ -11,7 +11,7 @@ import lombok.Data;
 @Schema(title="UserGetAndTicketUserListDto", description ="查询用户以及用户下购票人集合入参")
 public class UserGetAndTicketUserListDto {
     
-    @Schema(name ="id", type ="Long", description ="用户id", requiredMode= RequiredMode.REQUIRED)
+    @Schema(name ="userId", type ="Long", description ="用户id", requiredMode= RequiredMode.REQUIRED)
     @NotNull
     private Long userId;
 }

@@ -20,7 +20,7 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * 票档查询、对账记录维护等内部接口
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"program-service",fallback = ProgramClientFallback.class)
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"program-service")
 //                ↑ Nacos 服务名  ↑ order-service 下单时锁座/扣余量用
 public interface ProgramClient {
     
@@ -58,7 +58,7 @@ public interface ProgramClient {
     /**
      * 添加节目对账记录任务
      */
-    @PostMapping(value = "program/record/task/add")
+    @PostMapping(value = "/program/record/task/add")
     ApiResponse<Integer> add(ProgramRecordTaskAddDto orderTicketUserRecordAddDto);
     
     /**

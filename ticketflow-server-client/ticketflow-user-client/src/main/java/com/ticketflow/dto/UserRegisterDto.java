@@ -40,10 +40,10 @@ public class UserRegisterDto implements Serializable {
     @NotBlank
     private String mobile;
 
-    @Schema(name = "mailStatus", type = "Boolean", description = "是否邮箱认证 true:已验证 false:未验证")
+    @Schema(name = "mailStatus", type = "Integer", description = "是否邮箱认证 1:已验证 0:未验证")
     private Integer mailStatus;
 
-    @Schema(name = "name", type = "String", description = "用户名字")
+    @Schema(name = "mail", type = "String", description = "邮箱")
     private String mail;
 
     @Schema(name = "relAuthenticationStatus", type = "Boolean", description = "否实名认证 1:已验证 0:未验证")

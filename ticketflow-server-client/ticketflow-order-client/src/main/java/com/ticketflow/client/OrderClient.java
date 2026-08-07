@@ -15,7 +15,7 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * program-service 和 gateway 通过此接口创建订单、查询账户下单数量
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"order-service",fallback = OrderClientFallback.class)
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"order-service")
 //                ↑ Nacos 服务名  ↑ program-service 下单时调用
 public interface OrderClient {
     
@@ -26,8 +26,4 @@ public interface OrderClient {
     /** 限购检查：账户下某个节目的已购订单数量 */
     @PostMapping("/order/account/order/count")
     ApiResponse<AccountOrderCountVo> accountOrderCount(AccountOrderCountDto dto);
-    
-    /** 数据迁移后：重置虚拟分片路由缓存 */
-    @PostMapping(value = "/order/reload/route/mapping/cache")
-    ApiResponse<Void> reloadRouteMappingCache();
 }

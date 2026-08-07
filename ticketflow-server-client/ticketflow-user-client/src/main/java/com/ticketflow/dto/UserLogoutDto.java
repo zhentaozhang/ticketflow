@@ -16,7 +16,7 @@ public class UserLogoutDto {
     @NotBlank
     private String code;
 
-    @Schema(name = "id", type = "Long", description = "token", requiredMode = RequiredMode.REQUIRED)
+    @Schema(name = "token", type = "String", description = "token", requiredMode = RequiredMode.REQUIRED)
     @NotBlank
     private String token;
 }
