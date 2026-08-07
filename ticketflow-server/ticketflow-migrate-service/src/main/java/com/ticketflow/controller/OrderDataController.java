@@ -40,7 +40,6 @@ public class OrderDataController {
     @Operation(summary = "分库分表扩容迁移（基因法方案1）")
     @PostMapping(value = "/sharding/migrate")
     public ApiResponse<Map<String, Object>> shardingMigrate(@RequestParam(name = "dryRun", defaultValue = "false") boolean dryRun) {
-        System.out.println("PROBE: shardingMigrate invoked, dryRun=" + dryRun);
         try {
             //从2库4表扩容到2库8表
             ShardingMigrationDto shardingMigrationDto = new ShardingMigrationDto();

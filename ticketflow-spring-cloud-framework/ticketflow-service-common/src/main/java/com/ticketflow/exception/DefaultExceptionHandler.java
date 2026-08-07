@@ -63,7 +63,6 @@ public class DefaultExceptionHandler {
     @ExceptionHandler(value = Throwable.class)
     public ApiResponse<String> defaultErrorHandler(HttpServletRequest request, Throwable throwable) {
         log.error("全局异常 错误信息 : {} method : {} url : {} query : {} ", throwable.getMessage(), request.getMethod(), getRequestUrl(request), getRequestQuery(request), throwable);
-        throwable.printStackTrace(System.err);
         return ApiResponse.error();
     }
 

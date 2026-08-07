@@ -7,10 +7,14 @@
 
 ## 分片规则
 
-- `tableIndex = (tableId - 1) & (orderNumber >> key) & (tableCount - 1)`
-- `databaseIndex = (databaseId - 1) & (orderNumber >> (key + log2(tableCount))) & (databaseCount - 1)`
-- order_number 生成时低位内嵌用户基因；扩容 4 表 → 8 表后，同一订单的库位与表位不变
-  （已验证：现库 7 行订单按 8 表规则位置全部不变，无需数据迁移）。
+- `tableIndex = (tableCount - 1) & orderNumber`（取低 log2(tableCount) 位）
+- `databaseIndex = (databaseCount - 1) & (orderNumber >> log2(tableCount))`（跳过表基因位后取低 log2(databaseCount) 位）
+- 实现见 `ShardingGeneUtils.tableIndex/databaseIndex`（`ticketflow-spring-cloud-framework/ticketflow-service-common`），
+  分片数必须为 2 的幂（`checkPowerOfTwo` 强制校验）。
+- order_number 生成时低位内嵌用户基因；扩容 4 表 → 8 表时，**表位是否变化取决于 order_number 的 bit2**：
+  仅当 bit2 = 0（即低 3 位 < 4）时表位不变，bit2 = 1 的订单会从 0..3 落到 4..7，需经迁移。
+  当前存量数据（现库 7 行订单）低 3 位均 < 4，按 8 表规则位置全部不变，无需迁移；
+  但这不是位运算不变量，新订单按 8 表规则可能落入 4..7，回滚前必须迁移回。
 
 ## 前置检查
 
@@ -52,8 +56,9 @@ curl -X POST 'http://127.0.0.1:8081/order/select/list' \
    `actualDataNodes` 0..7 → 0..3，`table-sharding-count` / `sharding-count` 8 → 4
 2. 重新打包并重启 order-service：
    `mvn -pl ticketflow-server/ticketflow-order-service package -DskipTests`
-3. 数据无需回滚：4 表与 8 表规则下数据落位一致（位运算不变量），
-   回滚只影响新写入的订单分表范围。
+3. 存量数据无需回滚：当前 7 行订单低 3 位均 < 4，4 表与 8 表规则下落位一致；
+   但若 8 表运行期间有新订单落入 4..7，回滚前需先用迁移服务
+   （反向配置 8 表 → 4 表）迁回，否则该部分订单路由不到。
 
 ## 注意事项
 
