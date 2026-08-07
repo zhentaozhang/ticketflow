@@ -104,4 +104,20 @@ class TableOrderComplexGeneArithmeticTest {
         assertTrue(result.containsAll(TABLE_NAMES));
         assertEquals(4, result.size());
     }
+
+    @Test
+    void doSharding_eightTables_routesByLow3Bits() {
+        // 扩容后 8 表：表基因 = 低 3 位（4 表时 = 低 2 位），相同 order 号路由结果不变
+        TableOrderComplexGeneArithmetic algo = new TableOrderComplexGeneArithmetic();
+        Properties props = new Properties();
+        props.setProperty("sharding-count", "8");
+        algo.init(props);
+        List<String> names = List.of("d_order_0", "d_order_1", "d_order_2", "d_order_3",
+                "d_order_4", "d_order_5", "d_order_6", "d_order_7");
+        long orderNumber = 1L << 32 | 0x2AL;
+        Collection<String> result = algo.doSharding(names,
+                new ComplexKeysShardingValue<>(LOGIC_TABLE, cols("order_number", orderNumber, null), Collections.emptyMap()));
+        assertEquals(List.of("d_order_2"), new ArrayList<>(result));
+        // 6 表场景在 4 表下不存在，扩容前路由为 d_order_2（0x2A & 3），扩容后仍为 d_order_2（0x2A & 7 = 2）
+    }
 }
