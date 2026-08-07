@@ -8,6 +8,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.HashMap;
@@ -38,7 +39,8 @@ public class OrderDataController {
      */
     @Operation(summary = "分库分表扩容迁移（基因法方案1）")
     @PostMapping(value = "/sharding/migrate")
-    public ApiResponse<Map<String, Object>> shardingMigrate() {
+    public ApiResponse<Map<String, Object>> shardingMigrate(@RequestParam(name = "dryRun", defaultValue = "false") boolean dryRun) {
+        System.out.println("PROBE: shardingMigrate invoked, dryRun=" + dryRun);
         try {
             //从2库4表扩容到2库8表
             ShardingMigrationDto shardingMigrationDto = new ShardingMigrationDto();
@@ -47,7 +49,7 @@ public class OrderDataController {
             shardingMigrationDto.setNewDatabaseCount(2);
             shardingMigrationDto.setNewTableCount(8);
             shardingMigrationDto.setBatchSize(1000);
-            shardingMigrationDto.setDryRun(false);
+            shardingMigrationDto.setDryRun(dryRun);
             ShardingMigrationService.MigrationStatistics statistics = shardingMigrationService.migrate(shardingMigrationDto);
             
             Map<String, Object> result = new HashMap<>(8);
@@ -58,7 +60,7 @@ public class OrderDataController {
             result.put("message", shardingMigrationDto.getDryRun() ? "预演完成，未实际迁移" : "迁移完成");
             
             return ApiResponse.ok(result);
-        } catch (Exception e) {
+        } catch (Throwable e) {
             return ApiResponse.error("迁移失败：" + e.getMessage());
         }
     }

@@ -129,6 +129,27 @@ class DatabaseOrderComplexGeneArithmeticTest {
         assertEquals(2, result.size());
     }
 
+    @Test
+    void doSharding_eightTables_dbGeneIsBit2_routeUnchanged() {
+        // 扩容后 8 表：表基因低 3 位、库基因 = bit2（(2-1) & (key >> 3)），相同 order 号路由结果不变
+        DatabaseOrderComplexGeneArithmetic algo = new DatabaseOrderComplexGeneArithmetic();
+        Properties props = new Properties();
+        props.setProperty("sharding-count", "2");
+        props.setProperty("table-sharding-count", "8");
+        algo.init(props);
+        long gene = 0x2AL; // 低 3 位 = 010 → 表 2；bit3 = 1（0x2A = 0b101010）→ ds_1
+        long orderNumber = 1L << 32 | gene;
+        Collection<String> result = algo.doSharding(DB_NAMES,
+                new ComplexKeysShardingValue<>(LOGIC_TABLE, colsOf("order_number", orderNumber, null), Collections.emptyMap()));
+        assertEquals(List.of("ds_1"), new ArrayList<>(result));
+        // 库基因（bit3）= 0 → ds_0
+        long crossGene = 0x0AL; // 0b1010：低 3 位 = 010 → 表 2，bit3 = 0 → ds_0
+        long crossOrder = 1L << 32 | crossGene;
+        Collection<String> cross = algo.doSharding(DB_NAMES,
+                new ComplexKeysShardingValue<>(LOGIC_TABLE, colsOf("order_number", crossOrder, null), Collections.emptyMap()));
+        assertEquals(List.of("ds_1"), new ArrayList<>(cross));
+    }
+
     private Map<String, Collection<Long>> colsOfString(String column, String value) {
         Map<String, Collection<Long>> map = new LinkedHashMap<>();
         map.put(column, (Collection<Long>) (Collection<?>) List.of(value));
