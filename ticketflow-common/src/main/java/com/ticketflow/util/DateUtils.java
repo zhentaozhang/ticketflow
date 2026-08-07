@@ -104,19 +104,25 @@ public class DateUtils {
     public static final String FORMAT_NO_MILLISECOND = "yyyyMMddHHmmssSSS";
     
     public static final String FORMAT_UTC = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
-    
+
+    /**
+     * 北京时区（东八区，无夏令时）。
+     * now() 系列方法显式使用该时区解析，消除对 JVM 默认时区的依赖
+     */
+    private static final TimeZone BEIJING_TIME_ZONE = TimeZone.getTimeZone("Asia/Shanghai");
+
     /**
      * 获取北京当前时间
      * */
     public static Date now(){
-        return parseDateTime(getFormatedDateString(8,FORMAT_SECOND));
+        return parse(getFormatedDateString(8, FORMAT_SECOND), FORMAT_SECOND, BEIJING_TIME_ZONE);
     }
     
     /**
      * 获取北京当前时间
      * */
     public static Date now(String format){
-        return parseDateTime(getFormatedDateString(8,format),format);
+        return parse(getFormatedDateString(8, format), format, BEIJING_TIME_ZONE);
     }
     
     public static String nowStr(){
@@ -258,6 +264,29 @@ public class DateUtils {
         }
         try {
             return getSimpleDateFormat(formatStyle).parse(dateString);
+        } catch (ParseException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    /**
+     * 将字符串格式时间转化为 Date 格式时间（指定时区）
+     *
+     * @param dateString 字符串时间（如：2022-06-17 16:06:17）
+     * @param formatStyle 格式内容
+     * @param timeZone 解析使用的时区
+     * @return Date 格式时间
+     */
+    private static Date parse(String dateString, String formatStyle, TimeZone timeZone) {
+        String s = getString(dateString);
+        if (s.isEmpty()) {
+            return null;
+        }
+        try {
+            SimpleDateFormat sdf = getSimpleDateFormat(formatStyle);
+            sdf.setTimeZone(timeZone);
+            return sdf.parse(dateString);
         } catch (ParseException e) {
             e.printStackTrace();
             return null;
@@ -645,13 +674,13 @@ public class DateUtils {
     }
  
     /**
-     * 获取该日期所在周开始日期
+     * 获取该日期所在周结束日期
      * 
      * @param date 日期所在时间
-     * @return 所在周开始日期
+     * @return 所在周结束日期
      */
     public static Date getWeekDateEnd(Date date) {
-        return getWeekDateEnd(getWeekDate(date, WEEK_7_SUNDAY));
+        return getDateEnd(getWeekDate(date, WEEK_7_SUNDAY));
     }
  
     /**

@@ -159,17 +159,16 @@ public class ApiResponse<T> implements Serializable {
     /**
      * 创建错误响应，并携带业务数据。
      * <p>
-     * 注意：
-     * 当前方法参数 code 没有赋值给 apiResponse.code，
-     * 而固定使用 -100。
+     * 示例：
+     * ApiResponse.error(10054, argumentErrorList)
      * <p>
-     * data 用于保存额外错误信息。
+     * data 用于保存额外错误信息（如参数校验错误详情）。
      */
     public static <T> ApiResponse<T> error(Integer code, T data) {
 
         ApiResponse<T> apiResponse = new ApiResponse<T>();
 
-        apiResponse.code = -100;
+        apiResponse.code = code;
         apiResponse.data = data;
 
         return apiResponse;

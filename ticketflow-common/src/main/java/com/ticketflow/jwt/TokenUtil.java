@@ -3,7 +3,7 @@ package com.ticketflow.jwt;
 import com.alibaba.fastjson.JSONObject;
 import com.ticketflow.enums.BaseCode;
 import com.ticketflow.exception.TicketFlowFrameException;
-import io.jsonwebtoken.ExpiredJwtException;
+import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.JwtBuilder;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
@@ -49,8 +49,13 @@ public class TokenUtil {
                     .parseClaimsJws(token)
                     .getBody()
                     .getSubject();
-        } catch (ExpiredJwtException jwtException) {
+        } catch (JwtException jwtException) {
+            // 覆盖过期、签名不符、格式错误等所有 JWT 校验失败场景
             log.error("parseToken error", jwtException);
+            throw new TicketFlowFrameException(BaseCode.TOKEN_EXPIRE);
+        } catch (IllegalArgumentException e) {
+            // token 为 null 或空串
+            log.error("parseToken error", e);
             throw new TicketFlowFrameException(BaseCode.TOKEN_EXPIRE);
         }
 
