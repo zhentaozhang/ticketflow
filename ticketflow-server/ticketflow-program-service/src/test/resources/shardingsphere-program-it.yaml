@@ -1,0 +1,98 @@
+dataSources:
+  ds_0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:13307/ticketflow_program_0?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    maxPoolSize: 20
+    minPoolSize: 5
+  ds_1:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:13307/ticketflow_program_1?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    maxPoolSize: 20
+    minPoolSize: 5
+
+rules:
+  - !SHARDING
+    tables:
+      d_program:
+        actualDataNodes: ds_$->{0..1}.d_program_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: id
+            shardingAlgorithmName: database-program-complex
+        tableStrategy:
+          complex:
+            shardingColumns: id
+            shardingAlgorithmName: table-program-complex
+      d_program_group:
+        actualDataNodes: ds_$->{0..1}.d_program_group_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: id
+            shardingAlgorithmName: database-program-complex
+        tableStrategy:
+          complex:
+            shardingColumns: id
+            shardingAlgorithmName: table-program-complex
+      d_program_show_time:
+        actualDataNodes: ds_$->{0..1}.d_program_show_time_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: program_id
+            shardingAlgorithmName: database-program-complex
+        tableStrategy:
+          complex:
+            shardingColumns: program_id
+            shardingAlgorithmName: table-program-complex
+      d_seat:
+        actualDataNodes: ds_$->{0..1}.d_seat_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: program_id
+            shardingAlgorithmName: database-program-complex
+        tableStrategy:
+          complex:
+            shardingColumns: program_id
+            shardingAlgorithmName: table-program-complex
+      d_ticket_category:
+        actualDataNodes: ds_$->{0..1}.d_ticket_category_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: program_id
+            shardingAlgorithmName: database-program-complex
+        tableStrategy:
+          complex:
+            shardingColumns: program_id
+            shardingAlgorithmName: table-program-complex
+      d_program_record_task:
+        actualDataNodes: ds_$->{0..1}.d_program_record_task_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: program_id
+            shardingAlgorithmName: database-program-complex
+        tableStrategy:
+          complex:
+            shardingColumns: program_id
+            shardingAlgorithmName: table-program-complex
+    broadcastTables:
+      - undo_log
+      - d_program_category
+    shardingAlgorithms:
+      database-program-complex:
+        type: CLASS_BASED
+        props:
+          strategy: complex
+          algorithmClassName: com.ticketflow.shardingsphere.DatabaseOrderComplexGeneArithmetic
+          sharding-count: 2
+          table-sharding-count: 2
+      table-program-complex:
+        type: CLASS_BASED
+        props:
+          strategy: complex
+          algorithmClassName: com.ticketflow.shardingsphere.TableOrderComplexGeneArithmetic
+          sharding-count: 2
