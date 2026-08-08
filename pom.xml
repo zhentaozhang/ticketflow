@@ -60,7 +60,9 @@
 		<maven-resources.version>3.2.0</maven-resources.version>
 		<maven-source.version>3.2.1</maven-source.version>
 		<maven-surefire.version>3.5.4</maven-surefire.version>
-		<testcontainers.version>1.19.8</testcontainers.version>
+		<testcontainers.version>2.0.5</testcontainers.version>
+		<commons-lang3.version>3.17.0</commons-lang3.version>
+		<commons-io.version>2.18.0</commons-io.version>
 		<flatten-maven.version>1.4.1</flatten-maven.version>
 		<fastjson.version>2.0.9</fastjson.version>
 		<oshi-core.version>6.2.2</oshi-core.version>
@@ -103,6 +105,23 @@
 	</dependencies>
 	<dependencyManagement>
 		<dependencies>
+			<dependency>
+				<groupId>org.testcontainers</groupId>
+				<artifactId>testcontainers-bom</artifactId>
+				<version>${testcontainers.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.commons</groupId>
+				<artifactId>commons-lang3</artifactId>
+				<version>${commons-lang3.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>commons-io</groupId>
+				<artifactId>commons-io</artifactId>
+				<version>${commons-io.version}</version>
+			</dependency>
 			<dependency>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-dependencies</artifactId>
