@@ -200,6 +200,25 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- testcontainers：集成测试（*IT）真实中间件 -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-mysql</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-kafka</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
     
     <build>
@@ -210,6 +229,8 @@
                 <version>${spring-boot.version}</version>
                 <configuration>
                     <mainClass>com.ticketflow.ProgramApplication</mainClass>
+                    <!-- 以 -exec 后缀生成可执行 fat jar，主 jar 保持普通结构，避免集成测试 classpath 加载 BOOT-INF 类失败 -->
+                    <classifier>exec</classifier>
                     <!-- 如果以jar包启动需要将此配置去掉 -->
                     <!--<skip>true</skip>-->
                 </configuration>
@@ -218,6 +239,19 @@
                         <id>repackage</id>
                         <goals>
                             <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-surefire.version}</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
                         </goals>
                     </execution>
                 </executions>
