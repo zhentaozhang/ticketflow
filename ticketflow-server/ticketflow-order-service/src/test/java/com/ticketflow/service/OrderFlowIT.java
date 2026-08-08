@@ -19,10 +19,10 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.KafkaContainer;
-import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.kafka.KafkaContainer;
+import org.testcontainers.mysql.MySQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import java.io.File;
@@ -51,7 +51,7 @@ class OrderFlowIT {
     private static final int MYSQL_FIXED_PORT = 13306;
 
     @Container
-    static MySQLContainer<?> mysql = new MySQLContainer<>(DockerImageName.parse("mysql:8.0"))
+    static MySQLContainer mysql = new MySQLContainer(DockerImageName.parse("mysql:8.0"))
             .withPassword("root");
 
     static {
@@ -64,7 +64,7 @@ class OrderFlowIT {
             .withExposedPorts(6379);
 
     @Container
-    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.5.0"));
+    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("apache/kafka:3.7.0"));
 
     @DynamicPropertySource
     static void dynamicProps(DynamicPropertyRegistry registry) {
@@ -148,6 +148,7 @@ class OrderFlowIT {
         domain.setProgramId(10L);
         domain.setUserId(userId);
         domain.setProgramTitle("集成测试演出");
+        domain.setProgramPermitChooseSeat(1);
         domain.setOrderPrice(new java.math.BigDecimal("300"));
         domain.setOrderTicketUserCreateDtoList(List.of(ticketUser, copyWithSeat(ticketUser, 5002L)));
         return domain;
@@ -164,10 +165,17 @@ class OrderFlowIT {
         return copy;
     }
 
+    private static long geneOrderNumber(Long userId, long seq) {
+        // 与 SnowflakeIdGenerator.getOrderNumber 基因规则一致：低 6 位 = userId 后 6 位，
+        // 保证 order_number 与 user_id 在 ShardingSphere 基因路由中落同一库表
+        long base = System.currentTimeMillis() * 100 + seq;
+        return base & ~0x3FL | (userId & 0x3FL);
+    }
+
     @Test
     void doCreate_真实写库并计数_成功下单() {
         Long userId = 20260808L;
-        Long orderNumber = System.currentTimeMillis() * 10 + 1;
+        Long orderNumber = geneOrderNumber(userId, 1);
 
         String result = orderService.doCreate(buildDomain(userId, orderNumber));
 
@@ -187,7 +195,7 @@ class OrderFlowIT {
 
     @Test
     void doCreate_重复订单号_抛订单已存在() {
-        Long orderNumber = System.currentTimeMillis() * 10 + 2;
+        Long orderNumber = geneOrderNumber(300L, 2);
 
         orderService.doCreate(buildDomain(300L, orderNumber));
 
