@@ -35,6 +35,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -166,6 +167,7 @@ public class PayService {
         // 按失败应答让渠道重试，避免重复处理）
         PayBill updatePayBill = new PayBill();
         updatePayBill.setPayBillStatus(PayBillStatus.PAY.getCode());
+        updatePayBill.setPayTime(DateUtils.now());
         LambdaUpdateWrapper<PayBill> payBillLambdaUpdateWrapper =
                 Wrappers.lambdaUpdate(PayBill.class)
                         .eq(PayBill::getOutOrderNo, params.get("out_trade_no"))
@@ -237,12 +239,19 @@ public class PayService {
             throw new TicketFlowFrameException(BaseCode.PAY_BILL_IS_NOT_PAY_STATUS);
         }
         // 累计已退金额（含渠道受理中未完成的退款单，不含退款失败的终态单），防止超退
-        BigDecimal refundedAmount = refundBillMapper.selectList(
-                        Wrappers.lambdaQuery(RefundBill.class)
-                                .eq(RefundBill::getOutOrderNo, refundDto.getOrderNumber())
-                                .eq(RefundBill::getStatus, 1)
-                                .in(RefundBill::getRefundStatus, 1, 2))
-                .stream().map(RefundBill::getRefundAmount)
+        List<RefundBill> refundBillList = refundBillMapper.selectList(
+                Wrappers.lambdaQuery(RefundBill.class)
+                        .eq(RefundBill::getOutOrderNo, refundDto.getOrderNumber())
+                        .eq(RefundBill::getStatus, 1)
+                        .in(RefundBill::getRefundStatus, 1, 2));
+        BigDecimal refundedAmount = refundBillList.stream().map(RefundBill::getRefundAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        // 已确认到账的累计退款（不含处理中单）：账单置 REFUND 的判断依据。
+        // 处理中单最终可能失败，若按含在途的累计判断，在途单失败后账单已置 REFUND
+        // 无法继续退款，会导致少退
+        BigDecimal confirmedRefundedAmount = refundBillList.stream()
+                .filter(refundBill -> Objects.equals(refundBill.getRefundStatus(), 2))
+                .map(RefundBill::getRefundAmount)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
         if (refundedAmount.add(refundDto.getAmount()).compareTo(payBill.getPayAmount()) > 0) {
@@ -269,11 +278,11 @@ public class PayService {
         refundBill.setRefundTime(DateUtils.now());
         refundBill.setReason(refundDto.getReason());
         refundBillMapper.insert(refundBill);
-        // 渠道已确认成功（refundStatus=2）且累计已退达到支付金额才将账单置为 REFUND；
+        // 渠道已确认成功（refundStatus=2）且已确认到账累计（含本次）达到支付金额才将账单置为 REFUND；
         // 渠道处理中（refundStatus=1，常见于微信）保持 PAY，由 RefundCheckTask 确认成功后翻转；
         // 部分退款保持 PAY 可继续退；条件更新兜底并发：0 行说明账单状态已被其他流程更新，不覆盖
         if (Objects.equals(refundResult.getRefundStatus(), 2)
-                && refundedAmount.add(refundDto.getAmount()).compareTo(payBill.getPayAmount()) >= 0) {
+                && confirmedRefundedAmount.add(refundDto.getAmount()).compareTo(payBill.getPayAmount()) >= 0) {
             PayBill updatePayBill = new PayBill();
             updatePayBill.setPayBillStatus(PayBillStatus.REFUND.getCode());
             LambdaUpdateWrapper<PayBill> payBillLambdaUpdateWrapper =

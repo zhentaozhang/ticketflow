@@ -45,6 +45,7 @@ import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_SUCCESS_RESULT;
 import static com.ticketflow.constant.Constant.WX_NOTIFY_FAILURE_RESULT;
 import static com.ticketflow.constant.Constant.WX_NOTIFY_SUCCESS_RESULT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -246,7 +247,10 @@ class PayServiceTest {
 
         assertEquals(ALIPAY_NOTIFY_SUCCESS_RESULT, result.getPayResult());
         assertEquals("20260804000000000001", result.getOutTradeNo());
-        verify(payBillMapper).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+        ArgumentCaptor<PayBill> payBillCaptor = ArgumentCaptor.forClass(PayBill.class);
+        verify(payBillMapper).update(payBillCaptor.capture(), any(LambdaUpdateWrapper.class));
+        // 成功回调需记录支付成功时间（payTime 语义=支付完成时间，而非发起支付时间）
+        assertNotNull(payBillCaptor.getValue().getPayTime());
     }
 
     @Test
@@ -416,6 +420,58 @@ class PayServiceTest {
                 () -> payService.refund(dto));
         assertEquals(BaseCode.REFUND_AMOUNT_GREATER_THAN_PAY_AMOUNT.getCode(), ex.getCode());
         verify(payStrategyHandler, never()).refund(anyString(), any(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void refund_在途单未确认不算已确认累计_账单保持已支付() {
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
+        // 存量：60 元退款单渠道处理中（refundStatus=1，未确认到账）
+        RefundBill processing = new RefundBill();
+        processing.setRefundStatus(1);
+        processing.setRefundAmount(new BigDecimal("60.00"));
+        when(refundBillMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(List.of(processing));
+        when(payStrategyHandler.refund(anyString(), any(), any(), anyString(), anyString()))
+                .thenReturn(new RefundResult(true, "refunded", "SUCCESS", 2));
+
+        RefundDto dto = refundDto();
+        dto.setAmount(new BigDecimal("40.00"));
+        payService.refund(dto);
+
+        // 累计达全额（60+40=100）但已确认累计（40）未达全额：
+        // 在途单最终可能失败，账单保持 PAY 可继续退款，避免少退
+        verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+        verify(refundBillMapper).insert(any(RefundBill.class));
+    }
+
+    @Test
+    void refund_已确认累计满额_账单置已退款() {
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
+        // 存量：60 元退款单已确认到账（refundStatus=2）
+        RefundBill confirmed = new RefundBill();
+        confirmed.setRefundStatus(2);
+        confirmed.setRefundAmount(new BigDecimal("60.00"));
+        when(refundBillMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(List.of(confirmed));
+        when(payStrategyHandler.refund(anyString(), any(), any(), anyString(), anyString()))
+                .thenReturn(new RefundResult(true, "refunded", "SUCCESS", 2));
+
+        RefundDto dto = refundDto();
+        dto.setAmount(new BigDecimal("40.00"));
+        payService.refund(dto);
+
+        // 已确认累计 60 + 本次成功 40 = 100 达全额，置 REFUND
+        verify(payBillMapper).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+        verify(refundBillMapper).insert(any(RefundBill.class));
+    }
+
+    @Test
+    void notify_非法渠道_抛策略不存在异常() {
+        when(payStrategyContext.get(anyString()))
+                .thenThrow(new TicketFlowFrameException(BaseCode.PAY_STRATEGY_NOT_EXIST));
+
+        TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
+                () -> payService.notify(notifyDto()));
+        assertEquals(BaseCode.PAY_STRATEGY_NOT_EXIST.getCode(), ex.getCode());
+        verify(payBillMapper, never()).selectOne(any(LambdaQueryWrapper.class));
     }
 
     @Test

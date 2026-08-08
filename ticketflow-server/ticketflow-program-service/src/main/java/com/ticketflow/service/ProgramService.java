@@ -232,7 +232,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         setQueryTime(programSearchDto);
         //使用elasticsearch查询
         PageVo<ProgramListVo> pageVo = programEs.search(programSearchDto);
-        if (CollectionUtil.isNotEmpty(pageVo.getList())) {
+        if (pageVo != null && CollectionUtil.isNotEmpty(pageVo.getList())) {
             return pageVo;
         }
         //ES 无数据或不可用时走 DB 兜底（DB 侧无搜索词条件，仅按分类/时间过滤）
@@ -379,7 +379,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         setQueryTime(programPageListDto);
         //使用elasticsearch查询
         PageVo<ProgramListVo> pageVo = programEs.selectPage(programPageListDto);
-        if (CollectionUtil.isNotEmpty(pageVo.getList())) {
+        if (pageVo != null && CollectionUtil.isNotEmpty(pageVo.getList())) {
             return pageVo;
         }
         return dbSelectPage(programPageListDto);
@@ -836,8 +836,8 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
             throw new TicketFlowFrameException(BaseCode.SEAT_OPERATE_IS_NOT_NOT_SOLD_OR_SOLD);
         }
         Integer orderVersion = programOperateDataDto.getOrderVersion();
-        // V1-V3：直接在 DB 检查 SOLD 并更新（无 LOCK 中间态）
-        if (!orderVersion.equals(ProgramOrderVersion.V4_VERSION.getValue())) {
+        // V1-V3：直接在 DB 检查 SOLD 并更新（无 LOCK 中间态）；orderVersion 为空按历史版本语义处理
+        if (!ProgramOrderVersion.V4_VERSION.getValue().equals(orderVersion)) {
             for (Seat seat : seatList) {
                 if (Objects.equals(seat.getSellStatus(), SellStatus.SOLD.getCode())) {
                     throw new TicketFlowFrameException(BaseCode.SEAT_SOLD);

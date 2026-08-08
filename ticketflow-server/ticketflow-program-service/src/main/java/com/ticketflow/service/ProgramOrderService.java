@@ -367,6 +367,10 @@ public class ProgramOrderService {
         orderCreateDto.setOrderVersion(orderVersion);
 
         List<Long> ticketUserIdList = programOrderCreateDto.getTicketUserIdList();
+        // 购票人数与锁定座位数必须一一对应，不一致按业务异常抛出（避免按索引取座位越界）
+        if (ticketUserIdList.size() != purchaseSeatList.size()) {
+            throw new TicketFlowFrameException(BaseCode.SEAT_NOT_EXIST);
+        }
         List<OrderTicketUserCreateDto> orderTicketUserCreateDtoList = new ArrayList<>();
         for (int i = 0; i < ticketUserIdList.size(); i++) {
             Long ticketUserId = ticketUserIdList.get(i);

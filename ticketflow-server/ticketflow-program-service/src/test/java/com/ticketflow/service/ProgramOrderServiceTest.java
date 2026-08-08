@@ -3,6 +3,7 @@ package com.ticketflow.service;
 import com.baidu.fsg.uid.UidGenerator;
 import com.ticketflow.BusinessThreadPool;
 import com.ticketflow.client.OrderClient;
+import com.ticketflow.mq.callback.FailureCallback;
 import com.ticketflow.mq.callback.SuccessCallback;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.domain.OrderCreateMq;
@@ -255,6 +256,46 @@ class ProgramOrderServiceTest {
         }
 
         @Test
+        void withoutSeatSelection_Success() {
+            ProgramOrderCreateDto dto = new ProgramOrderCreateDto();
+            dto.setProgramId(PROGRAM_ID);
+            dto.setUserId(USER_ID);
+            dto.setTicketCategoryId(TICKET_CATEGORY_ID);
+            dto.setTicketCount(2);
+            dto.setTicketUserIdList(List.of(2000L, 2001L));
+
+            when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
+                    .thenReturn(createShowTime());
+            when(ticketCategoryService.selectTicketCategoryListByProgramIdMultipleCache(eq(PROGRAM_ID), any()))
+                    .thenReturn(List.of(createTicketCategory(TICKET_CATEGORY_ID)));
+            when(seatService.selectSeatResolution(anyLong(), anyLong(), anyLong(), any()))
+                    .thenReturn(new ArrayList<>());
+            Map<String, Long> remainMap = new HashMap<>();
+            remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 100L);
+            when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
+                    .thenReturn(remainMap);
+            when(uidGenerator.getUid()).thenReturn(888L);
+
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.SUCCESS.getCode());
+            luaResult.setPurchaseSeatList(List.of(
+                    createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID),
+                    createPurchaseSeat(51L, 2001L, TICKET_CATEGORY_ID)));
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
+
+            CreateOrderTemporaryData result =
+                    programOrderService.createOrderOperateProgramCacheResolution(dto);
+
+            assertNotNull(result);
+            assertEquals(2, result.getPurchaseSeatList().size());
+            ArgumentCaptor<List<String>> keysCaptor = ArgumentCaptor.forClass(List.class);
+            verify(programCacheCreateOrderResolutionOperate).programCacheOperate(keysCaptor.capture(), any());
+            // 无选座分支：Lua keys 首位标识为 "2"
+            assertEquals("2", keysCaptor.getValue().get(0));
+        }
+
+        @Test
         void whenLuaFails_ThrowsException() {
             ProgramOrderCreateDto dto = createDtoWithSeats(1);
 
@@ -371,6 +412,44 @@ class ProgramOrderServiceTest {
             assertNotNull(result);
             verify(createOrderSend).sendMessage(anyString(), any(), any());
             verify(delayOrderCancelSend).sendMessage(any(DelayOrderCancelDto.class));
+        }
+
+        @Test
+        void whenKafkaSendFails_RollsBackCacheAndThrows() {
+            ProgramOrderCreateDto dto = createDtoWithSeats(1);
+
+            when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
+                    .thenReturn(createShowTime());
+            when(ticketCategoryService.selectTicketCategoryListByProgramIdMultipleCache(eq(PROGRAM_ID), any()))
+                    .thenReturn(List.of(createTicketCategory(TICKET_CATEGORY_ID)));
+            when(seatService.selectSeatResolution(anyLong(), anyLong(), anyLong(), any()))
+                    .thenReturn(List.of(createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID)));
+            Map<String, Long> remainMap = new HashMap<>();
+            remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 100L);
+            when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
+                    .thenReturn(remainMap);
+            when(uidGenerator.getUid()).thenReturn(888L, 12345L);
+
+            List<PurchaseSeat> purchaseSeats = List.of(createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID));
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.SUCCESS.getCode());
+            luaResult.setPurchaseSeatList(purchaseSeats);
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
+            when(programService.simpleGetProgramAndShowMultipleCache(PROGRAM_ID))
+                    .thenReturn(createProgramVo());
+
+            doAnswer(invocation -> {
+                FailureCallback failureCallback = invocation.getArgument(2);
+                failureCallback.onFailure(new RuntimeException("kafka down"));
+                return null;
+            }).when(createOrderSend).sendMessage(anyString(), any(), any());
+
+            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
+                    () -> programOrderService.createNewAsync(dto, ProgramOrderVersion.V4_VERSION.getValue()));
+
+            // Kafka 发送失败：回滚 Redis 缓存（释放已锁座位、恢复余票）
+            verify(programCacheResolutionOperate).programCacheOperate(anyList(), any());
         }
     }
 
@@ -557,6 +636,39 @@ class ProgramOrderServiceTest {
 
             // Lua 扣减成功后 RPC 失败，仅触发一次补偿回滚（无校验 Lua 回补 CANCEL）
             verify(programCacheResolutionOperate).programCacheOperate(anyList(), any());
+        }
+
+        @Test
+        void whenBuyerCountExceedsSeatCount_ThrowsSeatNotExist() {
+            ProgramOrderCreateDto dto = createDtoWithSeats(2);
+            // 购票人 2 个但 Lua 只返回 1 个座位：V1 按索引取座位应抛业务异常而非 IOOBE
+            dto.getTicketUserIdList().clear();
+            dto.getTicketUserIdList().addAll(List.of(2000L, 2001L));
+
+            when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
+                    .thenReturn(createShowTime());
+            when(ticketCategoryService.selectTicketCategoryListByProgramIdMultipleCache(eq(PROGRAM_ID), any()))
+                    .thenReturn(List.of(createTicketCategory(TICKET_CATEGORY_ID)));
+            when(seatService.selectSeatResolution(anyLong(), anyLong(), anyLong(), any()))
+                    .thenReturn(List.of(createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID)));
+            Map<String, Long> remainMap = new HashMap<>();
+            remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 100L);
+            when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
+                    .thenReturn(remainMap);
+            when(uidGenerator.getUid()).thenReturn(888L, 12345L);
+
+            List<PurchaseSeat> purchaseSeats = List.of(createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID));
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.SUCCESS.getCode());
+            luaResult.setPurchaseSeatList(purchaseSeats);
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
+            when(programService.simpleGetProgramAndShowMultipleCache(PROGRAM_ID))
+                    .thenReturn(createProgramVo());
+
+            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
+                    () -> programOrderService.create(dto, ProgramOrderVersion.V1_VERSION.getValue()));
+            assertEquals(BaseCode.SEAT_NOT_EXIST.getCode(), ex.getCode());
         }
     }
 
