@@ -323,11 +323,12 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 updateOrder.setEditTime(DateUtils.now());
                 updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
                 orderMapper.update(updateOrder,Wrappers.lambdaUpdate(Order.class).eq(Order::getOrderNumber, order.getOrderNumber()));
+                // 退款成功视图才置退款状态，失败保持数据库的取消状态，下次轮询重试退款
+                orderPayCheckVo.setOrderStatus(OrderStatus.REFUND.getCode());
+                orderPayCheckVo.setCancelOrderTime(DateUtils.now());
             }else {
                 log.error("pay服务退款失败 dto : {} response : {}",JSON.toJSONString(refundDto),JSON.toJSONString(response));
             }
-            orderPayCheckVo.setOrderStatus(OrderStatus.REFUND.getCode());
-            orderPayCheckVo.setCancelOrderTime(DateUtils.now());
             return orderPayCheckVo;
         }
         
@@ -385,12 +386,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         if (StringUtil.isEmpty(outTradeNo)) {
             return "failure";
         }
+        // 非法订单号在加锁前校验（对齐 wxNotify），避免锁内抛非业务异常
+        long orderNumber;
+        try {
+            orderNumber = Long.parseLong(outTradeNo);
+        } catch (NumberFormatException e) {
+            log.error("支付宝回调订单号格式错误 outTradeNo : {}", outTradeNo, e);
+            return ALIPAY_NOTIFY_FAILURE_RESULT;
+        }
 
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, UPDATE_ORDER_STATUS_LOCK,
                 new String[]{outTradeNo});
         lock.lock();
         try {
-            Order order = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class).eq(Order::getOrderNumber, Long.parseLong(outTradeNo)));
+            Order order = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class).eq(Order::getOrderNumber, orderNumber));
             if (Objects.isNull(order)) {
                 throw new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST);
             }
@@ -403,6 +412,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 notifyDto.setParams(params);
                 ApiResponse<NotifyVo> notifyResponse = payClient.notify(notifyDto);
                 if (!Objects.equals(notifyResponse.getCode(), BaseCode.SUCCESS.getCode())
+                        || Objects.isNull(notifyResponse.getData())
                         || !ALIPAY_NOTIFY_SUCCESS_RESULT.equals(notifyResponse.getData().getPayResult())) {
                     // 对账未确认支付（验签失败/金额不符/状态异常）：按失败应答让支付宝重试
                     log.error("支付宝回调对账失败，暂不退款 dto : {} response : {}",
@@ -435,6 +445,10 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             ApiResponse<NotifyVo> notifyResponse = payClient.notify(notifyDto);
             if (!Objects.equals(notifyResponse.getCode(), BaseCode.SUCCESS.getCode())) {
                 throw new TicketFlowFrameException(notifyResponse);
+            }
+            if (Objects.isNull(notifyResponse.getData())) {
+                log.error("支付宝回调对账返回数据为空 notifyDto : {}", JSON.toJSONString(notifyDto));
+                return ALIPAY_NOTIFY_FAILURE_RESULT;
             }
             if (ALIPAY_NOTIFY_SUCCESS_RESULT.equals(notifyResponse.getData().getPayResult())) {
                 try {
@@ -481,7 +495,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             return WX_NOTIFY_FAILURE_RESULT;
         }
         NotifyVo notifyVo = notifyResponse.getData();
-        if (!WX_NOTIFY_SUCCESS_RESULT.equals(notifyVo.getPayResult())) {
+        if (Objects.isNull(notifyVo) || !WX_NOTIFY_SUCCESS_RESULT.equals(notifyVo.getPayResult())) {
             return WX_NOTIFY_FAILURE_RESULT;
         }
         String outTradeNo = notifyVo.getOutTradeNo();
@@ -825,12 +839,13 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         if (CollectionUtil.isEmpty(userAndTicketUserListVo.getTicketUserVoList())) {
             throw new TicketFlowFrameException(BaseCode.TICKET_USER_EMPTY);
         }
-        List<TicketUserVo> filterTicketUserVoList = new ArrayList<>();
         Map<Long, TicketUserVo> ticketUserVoMap = userAndTicketUserListVo.getTicketUserVoList()
                 .stream().collect(Collectors.toMap(TicketUserVo::getId, ticketUserVo -> ticketUserVo, (v1, v2) -> v2));
-        for (OrderTicketUser orderTicketUser : orderTicketUserList) {
-            filterTicketUserVoList.add(ticketUserVoMap.get(orderTicketUser.getTicketUserId()));
-        }
+        List<TicketUserVo> filterTicketUserVoList = orderTicketUserList.stream()
+                // 购票人可能已被删除导致缺失，过滤空条目避免下游生成全空对象
+                .map(orderTicketUser -> ticketUserVoMap.get(orderTicketUser.getTicketUserId()))
+                .filter(Objects::nonNull)
+                .toList();
         UserInfoVo userInfoVo = new UserInfoVo();
         BeanUtil.copyProperties(userAndTicketUserListVo.getUserVo(),userInfoVo);
         UserAndTicketUserInfoVo userAndTicketUserInfoVo = new UserAndTicketUserInfoVo();
