@@ -1,0 +1,12 @@
+spring:
+  cloud:
+    nacos:
+      discovery:
+        enabled: false
+  redis:
+    host: localhost
+    port: 16379
+
+jasypt:
+  encryptor:
+    password: it-test-password
