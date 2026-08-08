@@ -465,12 +465,21 @@ public class ProgramOrderService {
                 BeanUtils.copyProperties(purchaseSeat, seatVo);
                 return seatVo;
             }).collect(Collectors.toList());
-            updateProgramCacheDataResolution(orderCreateMq.getProgramId(), purchaseSeatVoList, OrderStatus.CANCEL);
+            try {
+                updateProgramCacheDataResolution(orderCreateMq.getProgramId(), purchaseSeatVoList, OrderStatus.CANCEL);
+            } catch (Exception rollbackEx) {
+                // 回滚失败不能上抛：回调线程异常会跳过下方 countDown，导致调用线程在 await 处永久阻塞
+                log.error("创建订单kafka发送失败后回滚缓存异常 需人工处理 programId : {} orderNumber : {}",
+                        orderCreateMq.getProgramId(), orderCreateMq.getOrderNumber(), rollbackEx);
+            }
             createOrderMqDomain.ticketFlowFrameException = new TicketFlowFrameException(ex);
             latch.countDown();
         });
         try {
-            latch.await();
+            if (!latch.await(10, TimeUnit.SECONDS)) {
+                log.error("创建订单kafka发送消息等待超时 orderNumber : {}", orderCreateMq.getOrderNumber());
+                throw new TicketFlowFrameException(BaseCode.EXECUTE_TIME_OUT);
+            }
         } catch (InterruptedException e) {
             log.error("createOrderByMq InterruptedException", e);
             throw new TicketFlowFrameException(e);
