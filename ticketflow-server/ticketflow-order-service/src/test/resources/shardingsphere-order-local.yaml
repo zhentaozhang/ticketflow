@@ -1,0 +1,93 @@
+dataSources:
+  ds_0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:13306/ticketflow_order_0?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    maxPoolSize: 20
+    minPoolSize: 5
+  ds_1:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://127.0.0.1:13306/ticketflow_order_1?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+    maxPoolSize: 20
+    minPoolSize: 5
+
+rules:
+  - !SHARDING
+    tables:
+      d_order:
+        actualDataNodes: ds_$->{0..1}.d_order_$->{0..7}
+        databaseStrategy:
+          complex:
+            shardingColumns: order_number, user_id
+            shardingAlgorithmName: database-order-complex
+        tableStrategy:
+          complex:
+            shardingColumns: order_number, user_id
+            shardingAlgorithmName: table-order-complex
+      d_order_ticket_user:
+        actualDataNodes: ds_$->{0..1}.d_order_ticket_user_$->{0..7}
+        databaseStrategy:
+          complex:
+            shardingColumns: order_number
+            shardingAlgorithmName: database-order-complex
+        tableStrategy:
+          complex:
+            shardingColumns: order_number
+            shardingAlgorithmName: table-order-complex
+      d_order_ticket_user_record:
+        actualDataNodes: ds_$->{0..1}.d_order_ticket_user_record_$->{0..7}
+        databaseStrategy:
+          complex:
+            shardingColumns: order_number
+            shardingAlgorithmName: database-order-complex
+        tableStrategy:
+          complex:
+            shardingColumns: order_number
+            shardingAlgorithmName: table-order-complex
+      d_order_program:
+        actualDataNodes: ds_$->{0..1}.d_order_program_$->{0..1}
+        databaseStrategy:
+          complex:
+            shardingColumns: order_number
+            shardingAlgorithmName: database-order-complex-2t
+        tableStrategy:
+          complex:
+            shardingColumns: order_number
+            shardingAlgorithmName: table-order-complex-2t
+    bindingTables:
+      - d_order, d_order_ticket_user, d_order_ticket_user_record
+      - d_order_program
+    broadcastTables:
+      - undo_log
+    shardingAlgorithms:
+      database-order-complex:
+        type: CLASS_BASED
+        props:
+          strategy: complex
+          algorithmClassName: com.ticketflow.shardingsphere.DatabaseOrderComplexGeneArithmetic
+          sharding-count: 2
+          table-sharding-count: 8
+      table-order-complex:
+        type: CLASS_BASED
+        props:
+          strategy: complex
+          algorithmClassName: com.ticketflow.shardingsphere.TableOrderComplexGeneArithmetic
+          sharding-count: 8
+      database-order-complex-2t:
+        type: CLASS_BASED
+        props:
+          strategy: complex
+          algorithmClassName: com.ticketflow.shardingsphere.DatabaseOrderComplexGeneArithmetic
+          sharding-count: 2
+          table-sharding-count: 2
+      table-order-complex-2t:
+        type: CLASS_BASED
+        props:
+          strategy: complex
+          algorithmClassName: com.ticketflow.shardingsphere.TableOrderComplexGeneArithmetic
+          sharding-count: 2
