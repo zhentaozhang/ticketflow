@@ -1,19 +1,24 @@
 package com.ticketflow.service;
 
-import com.baidu.fsg.uid.UidGenerator;
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baidu.fsg.uid.UidGenerator;
 import com.ticketflow.client.PayClient;
 import com.ticketflow.client.ProgramClient;
 import com.ticketflow.client.UserClient;
 import com.ticketflow.common.ApiResponse;
+import com.ticketflow.constant.Constant;
+import com.ticketflow.core.RedisKeyManage;
+import com.ticketflow.core.SpringUtil;
 import com.ticketflow.domain.OrderCreateDomain;
 import com.ticketflow.domain.OrderCreateMq;
+import com.ticketflow.domain.SeatIdAndTicketUserIdDomain;
 import com.ticketflow.dto.*;
 import com.ticketflow.entity.Order;
 import com.ticketflow.entity.OrderProgram;
 import com.ticketflow.entity.OrderTicketUser;
 import com.ticketflow.entity.OrderTicketUserAggregate;
+import com.ticketflow.entity.OrderTicketUserRecord;
 import com.ticketflow.enums.*;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.mapper.OrderMapper;
@@ -23,29 +28,24 @@ import com.ticketflow.mapper.OrderTicketUserRecordMapper;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
 import com.ticketflow.request.CustomizeRequestWrapper;
-import com.ticketflow.servicelock.LockType;
 import com.ticketflow.service.delaysend.DelayOperateProgramDataSend;
 import com.ticketflow.service.properties.OrderProperties;
-import com.ticketflow.util.DateUtils;
 import com.ticketflow.util.ServiceLockTool;
 import com.ticketflow.vo.*;
+import jakarta.servlet.http.HttpServletRequest;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.*;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.ArgumentCaptor;
 import org.redisson.api.RLock;
-import com.ticketflow.core.SpringUtil;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
-import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
-import java.util.*;
-import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
+import java.util.List;
 
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_FAILURE_RESULT;
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_SUCCESS_RESULT;
@@ -55,1166 +55,1101 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-@ExtendWith(MockitoExtension.class)
+/**
+ * OrderService 核心订单生命周期测试：
+ * 创建（doCreate/create/createByMq）、支付（pay/getPayDto）、支付检查（payCheck）、
+ * 取消（cancel/initiateCancel）、状态流转（updateOrderRelatedData/checkOrderStatus）、
+ * 座位缓存操作（updateProgramRelatedDataResolution）、异步回调（alipayNotify/wxNotify）、
+ * MQ 创建（createMq）、查询（get/selectList/simpleList/accountOrderCount/getCache）。
+ *
+ * 说明：
+ * 1. 自引用 orderService 字段注入 mock，用于验证 payCheck/alipayNotify/wxNotify 中
+ *    orderService.updateOrderRelatedData 的调用；cancel/initiateCancel 走真实链路。
+ * 2. SpringUtil 静态容器需 @BeforeAll 初始化（createRedisKey 依赖前缀）。
+ */
 class OrderServiceTest {
 
-    @Spy
-    @InjectMocks
     private OrderService orderService;
+    private OrderService orderServiceMock;
+    private UidGenerator uidGenerator;
+    private OrderMapper orderMapper;
+    private OrderTicketUserMapper orderTicketUserMapper;
+    private OrderTicketUserService orderTicketUserService;
+    private OrderTicketUserRecordService orderTicketUserRecordService;
+    private OrderProgramCacheResolutionOperate orderProgramCacheResolutionOperate;
+    private RedisCache redisCache;
+    private PayClient payClient;
+    private UserClient userClient;
+    private OrderProperties orderProperties;
+    private ServiceLockTool serviceLockTool;
+    private ProgramClient programClient;
+    private OrderTicketUserRecordMapper orderTicketUserRecordMapper;
+    private OrderProgramMapper orderProgramMapper;
+    private DelayOperateProgramDataSend delayOperateProgramDataSend;
+    private RLock lock;
 
-    @Mock private UidGenerator uidGenerator;
-    @Mock private OrderMapper orderMapper;
-    @Mock private OrderTicketUserMapper orderTicketUserMapper;
-    @Mock private OrderTicketUserService orderTicketUserService;
-    @Mock private OrderTicketUserRecordService orderTicketUserRecordService;
-    @Mock private OrderProgramCacheResolutionOperate orderProgramCacheResolutionOperate;
-    @Mock private RedisCache redisCache;
-    @Mock private PayClient payClient;
-    @Mock private UserClient userClient;
-    @Mock private OrderProperties orderProperties;
-    @Mock private ServiceLockTool serviceLockTool;
-    @Mock private ProgramClient programClient;
-    @Mock private OrderTicketUserRecordMapper orderTicketUserRecordMapper;
-    @Mock private OrderProgramMapper orderProgramMapper;
-    @Mock private DelayOperateProgramDataSend delayOperateProgramDataSend;
+    private static final Long ORDER_NUMBER = 1001L;
+    private static final Long USER_ID = 1L;
+    private static final Long PROGRAM_ID = 10L;
+    private static final Long IDENTIFIER_ID = 99L;
+    private static final Long TICKET_CATEGORY_ID = 200L;
+    private static final Long SEAT_ID = 3000L;
+    private static final Long TICKET_USER_ID = 4000L;
 
-    private static final Long ORDER_NUMBER = 2024001L;
-    private static final Long USER_ID = 1001L;
-    private static final Long PROGRAM_ID = 501L;
-    private static final Long IDENTIFIER_ID = 999L;
+    @BeforeAll
+    static void initSpringUtil() {
+        ConfigurableApplicationContext context = mock(ConfigurableApplicationContext.class);
+        when(context.getEnvironment()).thenReturn(mock(ConfigurableEnvironment.class));
+        new SpringUtil().initialize(context);
+    }
+
+    @AfterAll
+    static void clearSpringUtil() {
+        new SpringUtil().initialize(null);
+    }
 
     @BeforeEach
     void setUp() {
-        ReflectionTestUtils.setField(orderService, "orderService", orderService);
-        mockSpringUtil();
+        orderService = new OrderService();
+        orderServiceMock = mock(OrderService.class);
+        uidGenerator = mock(UidGenerator.class);
+        orderMapper = mock(OrderMapper.class);
+        orderTicketUserMapper = mock(OrderTicketUserMapper.class);
+        orderTicketUserService = mock(OrderTicketUserService.class);
+        orderTicketUserRecordService = mock(OrderTicketUserRecordService.class);
+        orderProgramCacheResolutionOperate = mock(OrderProgramCacheResolutionOperate.class);
+        redisCache = mock(RedisCache.class);
+        payClient = mock(PayClient.class);
+        userClient = mock(UserClient.class);
+        orderProperties = new OrderProperties();
+        ReflectionTestUtils.setField(orderProperties, "orderPayNotifyUrl", "http://pay/order/alipay/notify");
+        ReflectionTestUtils.setField(orderProperties, "wxPayNotifyUrl", "http://pay/order/wx/notify");
+        ReflectionTestUtils.setField(orderProperties, "orderPayReturnUrl", "http://front/paySuccess");
+        serviceLockTool = mock(ServiceLockTool.class);
+        programClient = mock(ProgramClient.class);
+        orderTicketUserRecordMapper = mock(OrderTicketUserRecordMapper.class);
+        orderProgramMapper = mock(OrderProgramMapper.class);
+        delayOperateProgramDataSend = mock(DelayOperateProgramDataSend.class);
+        lock = mock(RLock.class);
+        when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(lock);
+
+        ReflectionTestUtils.setField(orderService, "uidGenerator", uidGenerator);
+        ReflectionTestUtils.setField(orderService, "orderMapper", orderMapper);
+        ReflectionTestUtils.setField(orderService, "orderTicketUserMapper", orderTicketUserMapper);
+        ReflectionTestUtils.setField(orderService, "orderTicketUserService", orderTicketUserService);
+        ReflectionTestUtils.setField(orderService, "orderTicketUserRecordService", orderTicketUserRecordService);
+        ReflectionTestUtils.setField(orderService, "orderProgramCacheResolutionOperate", orderProgramCacheResolutionOperate);
+        ReflectionTestUtils.setField(orderService, "redisCache", redisCache);
+        ReflectionTestUtils.setField(orderService, "payClient", payClient);
+        ReflectionTestUtils.setField(orderService, "userClient", userClient);
+        ReflectionTestUtils.setField(orderService, "orderProperties", orderProperties);
+        ReflectionTestUtils.setField(orderService, "orderService", orderServiceMock);
+        ReflectionTestUtils.setField(orderService, "serviceLockTool", serviceLockTool);
+        ReflectionTestUtils.setField(orderService, "programClient", programClient);
+        ReflectionTestUtils.setField(orderService, "orderTicketUserRecordMapper", orderTicketUserRecordMapper);
+        ReflectionTestUtils.setField(orderService, "orderProgramMapper", orderProgramMapper);
+        ReflectionTestUtils.setField(orderService, "delayOperateProgramDataSend", delayOperateProgramDataSend);
     }
 
-    private static void mockSpringUtil() {
-        ConfigurableApplicationContext mockContext = mock(ConfigurableApplicationContext.class);
-        ConfigurableEnvironment mockEnv = mock(ConfigurableEnvironment.class);
-        lenient().when(mockContext.getEnvironment()).thenReturn(mockEnv);
-        lenient().when(mockEnv.getProperty(eq("prefix.distinction.name"), anyString())).thenReturn("test");
-        ReflectionTestUtils.setField(SpringUtil.class, "configurableApplicationContext", mockContext);
+    // ==================== 创建 doCreate/create/createByMq ====================
+
+    private OrderCreateDomain buildCreateDomain() {
+        OrderCreateDomain domain = new OrderCreateDomain();
+        domain.setIdentifierId(IDENTIFIER_ID);
+        domain.setOrderNumber(ORDER_NUMBER);
+        domain.setProgramId(PROGRAM_ID);
+        domain.setProgramItemPicture("pic");
+        domain.setUserId(USER_ID);
+        domain.setProgramTitle("节目");
+        domain.setProgramPlace("场馆");
+        domain.setOrderPrice(new BigDecimal("100.00"));
+        domain.setOrderVersion(ProgramOrderVersion.V4_VERSION.getValue());
+        OrderTicketUserCreateDto ticketUserCreateDto = new OrderTicketUserCreateDto();
+        ticketUserCreateDto.setSeatId(SEAT_ID);
+        ticketUserCreateDto.setTicketCategoryId(TICKET_CATEGORY_ID);
+        ticketUserCreateDto.setTicketUserId(TICKET_USER_ID);
+        ticketUserCreateDto.setOrderPrice(new BigDecimal("100.00"));
+        domain.setOrderTicketUserCreateDtoList(List.of(ticketUserCreateDto));
+        return domain;
     }
 
-    private Order createOrder(Integer status) {
+    @Test
+    void doCreate订单已存在时抛ORDER_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(new Order());
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.doCreate(buildCreateDomain()));
+        assertEquals(BaseCode.ORDER_EXIST.getCode(), e.getCode());
+    }
+
+    @Test
+    void doCreate正常创建时插入四张表并累加订单数量() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
+        String orderNumber = orderService.doCreate(buildCreateDomain());
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+
+        ArgumentCaptor<Order> orderCaptor = ArgumentCaptor.forClass(Order.class);
+        verify(orderMapper).insert(orderCaptor.capture());
+        assertEquals(ORDER_NUMBER, orderCaptor.getValue().getOrderNumber());
+        assertEquals(PROGRAM_ID, orderCaptor.getValue().getProgramId());
+        assertEquals("电子票", orderCaptor.getValue().getDistributionMode());
+
+        ArgumentCaptor<List<OrderTicketUser>> ticketUserCaptor = ArgumentCaptor.forClass(List.class);
+        verify(orderTicketUserService).saveBatch(ticketUserCaptor.capture());
+        assertEquals(1, ticketUserCaptor.getValue().size());
+        assertEquals(SEAT_ID, ticketUserCaptor.getValue().get(0).getSeatId());
+
+        ArgumentCaptor<List<OrderTicketUserRecord>> recordCaptor = ArgumentCaptor.forClass(List.class);
+        verify(orderTicketUserRecordService).saveBatch(recordCaptor.capture());
+        assertEquals(1, recordCaptor.getValue().size());
+        assertEquals(RecordType.REDUCE.getCode(), recordCaptor.getValue().get(0).getRecordTypeCode());
+        assertEquals(IDENTIFIER_ID, recordCaptor.getValue().get(0).getIdentifierId());
+
+        ArgumentCaptor<OrderProgram> orderProgramCaptor = ArgumentCaptor.forClass(OrderProgram.class);
+        verify(orderProgramMapper).insert(orderProgramCaptor.capture());
+        assertEquals(ORDER_NUMBER, orderProgramCaptor.getValue().getOrderNumber());
+
+        verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(1L));
+    }
+
+    // ==================== 支付 pay ====================
+
+    private Order buildOrder(Integer orderStatus) {
         Order order = new Order();
         order.setId(1L);
         order.setOrderNumber(ORDER_NUMBER);
-        order.setProgramId(PROGRAM_ID);
         order.setUserId(USER_ID);
+        order.setProgramId(PROGRAM_ID);
         order.setIdentifierId(IDENTIFIER_ID);
-        order.setOrderStatus(status);
-        order.setOrderPrice(new BigDecimal("200"));
-        order.setProgramPermitChooseSeat(BusinessStatus.YES.getCode());
-        order.setOrderVersion(ProgramOrderVersion.V3_VERSION.getValue());
+        order.setOrderPrice(new BigDecimal("100.00"));
+        order.setOrderStatus(orderStatus);
+        order.setOrderVersion(ProgramOrderVersion.V4_VERSION.getValue());
         return order;
     }
 
-    private List<OrderTicketUser> createTicketUserList() {
-        OrderTicketUser tu1 = new OrderTicketUser();
-        tu1.setId(10L);
-        tu1.setOrderNumber(ORDER_NUMBER);
-        tu1.setProgramId(PROGRAM_ID);
-        tu1.setUserId(USER_ID);
-        tu1.setTicketUserId(2001L);
-        tu1.setSeatId(51L);
-        tu1.setSeatInfo("1排1列");
-        tu1.setTicketCategoryId(5L);
-        tu1.setOrderPrice(new BigDecimal("100"));
-        tu1.setOrderStatus(OrderStatus.NO_PAY.getCode());
-
-        OrderTicketUser tu2 = new OrderTicketUser();
-        tu2.setId(11L);
-        tu2.setOrderNumber(ORDER_NUMBER);
-        tu2.setProgramId(PROGRAM_ID);
-        tu2.setUserId(USER_ID);
-        tu2.setTicketUserId(2002L);
-        tu2.setSeatId(52L);
-        tu2.setSeatInfo("1排2列");
-        tu2.setTicketCategoryId(5L);
-        tu2.setOrderPrice(new BigDecimal("100"));
-        tu2.setOrderStatus(OrderStatus.NO_PAY.getCode());
-
-        return Arrays.asList(tu1, tu2);
+    private OrderPayDto buildPayDto(String channel) {
+        OrderPayDto orderPayDto = new OrderPayDto();
+        orderPayDto.setOrderNumber(ORDER_NUMBER);
+        orderPayDto.setChannel(channel);
+        orderPayDto.setPrice(new BigDecimal("100.00"));
+        return orderPayDto;
     }
 
-    private OrderTicketUserCreateDto createTicketUserDto(Long ticketUserId, Long seatId) {
-        OrderTicketUserCreateDto dto = new OrderTicketUserCreateDto();
-        dto.setOrderNumber(ORDER_NUMBER);
-        dto.setProgramId(PROGRAM_ID);
-        dto.setUserId(USER_ID);
-        dto.setTicketUserId(ticketUserId);
-        dto.setSeatId(seatId);
-        dto.setSeatInfo("1排1列");
-        dto.setTicketCategoryId(5L);
-        dto.setOrderPrice(new BigDecimal("100"));
-        dto.setCreateOrderTime(DateUtils.now());
-        return dto;
+    @Test
+    void pay订单不存在时抛ORDER_NOT_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.pay(buildPayDto(PayChannel.WX.getValue())));
+        assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), e.getCode());
     }
 
-    // ==================== P0: checkOrderStatus ====================
-
-    @Nested
-    class CheckOrderStatus {
-
-        @Test
-        void withNullOrder_ThrowsException() {
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.checkOrderStatus(null));
-            assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void withCancelledOrder_ThrowsException() {
-            Order order = createOrder(OrderStatus.CANCEL.getCode());
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.checkOrderStatus(order));
-            assertEquals(BaseCode.ORDER_CANCEL.getCode(), ex.getCode());
-        }
-
-        @Test
-        void withPaidOrder_ThrowsException() {
-            Order order = createOrder(OrderStatus.PAY.getCode());
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.checkOrderStatus(order));
-            assertEquals(BaseCode.ORDER_PAY.getCode(), ex.getCode());
-        }
-
-        @Test
-        void withRefundedOrder_ThrowsException() {
-            Order order = createOrder(OrderStatus.REFUND.getCode());
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.checkOrderStatus(order));
-            assertEquals(BaseCode.ORDER_REFUND.getCode(), ex.getCode());
-        }
-
-        @Test
-        void withUnpaidOrder_Passes() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            assertDoesNotThrow(() -> orderService.checkOrderStatus(order));
-        }
+    @Test
+    void pay订单已取消时抛ORDER_CANCEL() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.pay(buildPayDto(PayChannel.WX.getValue())));
+        assertEquals(BaseCode.ORDER_CANCEL.getCode(), e.getCode());
     }
 
-    // ==================== P0: doCreate ====================
-
-    @Nested
-    class DoCreate {
-
-        @Test
-        void whenOrderNumberExists_ThrowsException() {
-            OrderCreateDomain domain = new OrderCreateDomain();
-            domain.setOrderNumber(ORDER_NUMBER);
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(new Order());
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.doCreate(domain));
-            assertEquals(BaseCode.ORDER_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void success_CreatesOrderAndRecords() {
-            OrderTicketUserCreateDto dto1 = createTicketUserDto(2001L, 51L);
-            OrderTicketUserCreateDto dto2 = createTicketUserDto(2002L, 52L);
-
-            OrderCreateDomain domain = new OrderCreateDomain();
-            domain.setOrderNumber(ORDER_NUMBER);
-            domain.setProgramId(PROGRAM_ID);
-            domain.setUserId(USER_ID);
-            domain.setIdentifierId(IDENTIFIER_ID);
-            domain.setProgramItemPicture("pic.jpg");
-            domain.setProgramTitle("演唱会");
-            domain.setProgramPlace("北京");
-            domain.setProgramShowTime(new Date());
-            domain.setProgramPermitChooseSeat(BusinessStatus.YES.getCode());
-            domain.setOrderPrice(new BigDecimal("200"));
-            domain.setCreateOrderTime(new Date());
-            domain.setOrderVersion(ProgramOrderVersion.V3_VERSION.getValue());
-            domain.setOrderTicketUserCreateDtoList(Arrays.asList(dto1, dto2));
-
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
-            when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L, 4L, 5L);
-            when(orderTicketUserService.saveBatch(anyList())).thenReturn(true);
-            when(orderTicketUserRecordService.saveBatch(anyList())).thenReturn(true);
-
-            String result = orderService.doCreate(domain);
-
-            assertEquals(String.valueOf(ORDER_NUMBER), result);
-            verify(orderMapper).insert(any(Order.class));
-            verify(orderProgramMapper).insert(any(OrderProgram.class));
-            verify(orderTicketUserService).saveBatch(argThat(list -> ((List<?>) list).size() == 2));
-            verify(orderTicketUserRecordService).saveBatch(argThat(list -> ((List<?>) list).size() == 2));
-            verify(redisCache).incrBy(any(RedisKeyBuild.class), eq(2L));
-        }
+    @Test
+    void pay订单已支付时抛ORDER_PAY() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.PAY.getCode()));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.pay(buildPayDto(PayChannel.WX.getValue())));
+        assertEquals(BaseCode.ORDER_PAY.getCode(), e.getCode());
     }
 
-    // ==================== P0: cancel ====================
-
-    @Nested
-    class Cancel {
-
-        @Test
-        void success_DelegatesToUpdateOrderRelatedData() {
-            OrderCancelDto dto = new OrderCancelDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-
-            doNothing().when(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
-
-            boolean result = orderService.cancel(dto);
-
-            assertTrue(result);
-            verify(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
-        }
+    @Test
+    void pay订单已退款时抛ORDER_REFUND() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.REFUND.getCode()));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.pay(buildPayDto(PayChannel.WX.getValue())));
+        assertEquals(BaseCode.ORDER_REFUND.getCode(), e.getCode());
     }
 
-    // ==================== P0: initiateCancel ====================
-
-    @Nested
-    class InitiateCancel {
-
-        @Test
-        void whenOrderNotFound_ThrowsException() {
-            OrderCancelDto dto = new OrderCancelDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.initiateCancel(dto));
-            assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenOrderNotUnpaid_ThrowsException() {
-            OrderCancelDto dto = new OrderCancelDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-            Order order = createOrder(OrderStatus.PAY.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.initiateCancel(dto));
-            assertEquals(BaseCode.CAN_NOT_CANCEL.getCode(), ex.getCode());
-        }
-
-        @Test
-        void success_CallsCancel() {
-            OrderCancelDto dto = new OrderCancelDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            doReturn(true).when(orderService).cancel(dto);
-
-            boolean result = orderService.initiateCancel(dto);
-
-            assertTrue(result);
-            verify(orderService).cancel(dto);
-        }
+    @Test
+    void pay金额与订单金额不一致时抛PAY_PRICE_NOT_EQUAL_ORDER_PRICE() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        OrderPayDto orderPayDto = buildPayDto(PayChannel.WX.getValue());
+        orderPayDto.setPrice(new BigDecimal("99.00"));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.pay(orderPayDto));
+        assertEquals(BaseCode.PAY_PRICE_NOT_EQUAL_ORDER_PRICE.getCode(), e.getCode());
     }
 
-    // ==================== P0: updateOrderRelatedData ====================
-
-    @Nested
-    class UpdateOrderRelatedData {
-
-        @Test
-        void withInvalidStatus_ThrowsException() {
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.NO_PAY));
-            assertEquals(BaseCode.OPERATE_ORDER_STATUS_NOT_PERMIT.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenOrderNotFound_ThrowsException() {
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
-            assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenOrderAlreadyCancelled_ThrowsException() {
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class)))
-                    .thenReturn(createOrder(OrderStatus.CANCEL.getCode()));
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
-            assertEquals(BaseCode.ORDER_CANCEL.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenOrderAlreadyPaid_ThrowsException() {
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class)))
-                    .thenReturn(createOrder(OrderStatus.PAY.getCode()));
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL));
-            assertEquals(BaseCode.ORDER_PAY.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenOrderAlreadyRefunded_ThrowsException() {
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class)))
-                    .thenReturn(createOrder(OrderStatus.REFUND.getCode()));
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
-            assertEquals(BaseCode.ORDER_REFUND.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenNoTicketUsers_ThrowsException() {
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class)))
-                    .thenReturn(createOrder(OrderStatus.NO_PAY.getCode()));
-            when(orderTicketUserMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(new ArrayList<>());
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
-            assertEquals(BaseCode.TICKET_USER_ORDER_NOT_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void pay_Success() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            List<OrderTicketUser> ticketUsers = createTicketUserList();
-
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(orderTicketUserMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(ticketUsers);
-            when(orderMapper.update(any(Order.class), any(LambdaUpdateWrapper.class))).thenReturn(1);
-            when(orderTicketUserMapper.update(any(OrderTicketUser.class), any(LambdaUpdateWrapper.class))).thenReturn(2);
-            when(orderTicketUserRecordService.saveBatch(anyList())).thenReturn(true);
-
-            // Mock multiGetForHash - returns List<SeatVo> per ticket category
-            SeatVo seatVo1 = new SeatVo();
-            seatVo1.setId(51L);
-            seatVo1.setTicketCategoryId(5L);
-            seatVo1.setSellStatus(SellStatus.NO_SOLD.getCode());
-            seatVo1.setPrice(new BigDecimal("100"));
-            seatVo1.setRowCode(1);
-            seatVo1.setColCode(1);
-
-            SeatVo seatVo2 = new SeatVo();
-            seatVo2.setId(52L);
-            seatVo2.setTicketCategoryId(5L);
-            seatVo2.setSellStatus(SellStatus.NO_SOLD.getCode());
-            seatVo2.setPrice(new BigDecimal("100"));
-            seatVo2.setRowCode(1);
-            seatVo2.setColCode(2);
-
-            when(redisCache.multiGetForHash(any(RedisKeyBuild.class), anyList(), eq(SeatVo.class)))
-                    .thenReturn(Arrays.asList(seatVo1, seatVo2));
-
-            orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
-
-            ArgumentCaptor<Order> orderCaptor = ArgumentCaptor.forClass(Order.class);
-            verify(orderMapper).update(orderCaptor.capture(), any(LambdaUpdateWrapper.class));
-            assertEquals(OrderStatus.PAY.getCode(), orderCaptor.getValue().getOrderStatus());
-            assertNotNull(orderCaptor.getValue().getPayOrderTime());
-
-            ArgumentCaptor<OrderTicketUser> otuCaptor = ArgumentCaptor.forClass(OrderTicketUser.class);
-            verify(orderTicketUserMapper).update(otuCaptor.capture(), any(LambdaUpdateWrapper.class));
-            assertEquals(OrderStatus.PAY.getCode(), otuCaptor.getValue().getOrderStatus());
-
-            verify(orderTicketUserRecordService).saveBatch(argThat(list -> ((List<?>) list).size() == 2));
-            verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(), any(), any(), any());
-            verify(delayOperateProgramDataSend).sendMessage(anyString());
-            verify(redisCache, never()).incrBy(any(RedisKeyBuild.class), anyLong());
-        }
-
-        @Test
-        void cancel_Success() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            List<OrderTicketUser> ticketUsers = createTicketUserList();
-
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(orderTicketUserMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(ticketUsers);
-            when(orderMapper.update(any(Order.class), any(LambdaUpdateWrapper.class))).thenReturn(1);
-            when(orderTicketUserMapper.update(any(OrderTicketUser.class), any(LambdaUpdateWrapper.class))).thenReturn(2);
-            when(orderTicketUserRecordService.saveBatch(anyList())).thenReturn(true);
-
-            SeatVo seatVo1 = new SeatVo();
-            seatVo1.setId(51L);
-            seatVo1.setTicketCategoryId(5L);
-            seatVo1.setSellStatus(SellStatus.LOCK.getCode());
-            seatVo1.setPrice(new BigDecimal("100"));
-            seatVo1.setRowCode(1);
-            seatVo1.setColCode(1);
-
-            SeatVo seatVo2 = new SeatVo();
-            seatVo2.setId(52L);
-            seatVo2.setTicketCategoryId(5L);
-            seatVo2.setSellStatus(SellStatus.LOCK.getCode());
-            seatVo2.setPrice(new BigDecimal("100"));
-            seatVo2.setRowCode(1);
-            seatVo2.setColCode(2);
-
-            when(redisCache.multiGetForHash(any(RedisKeyBuild.class), anyList(), eq(SeatVo.class)))
-                    .thenReturn(Arrays.asList(seatVo1, seatVo2));
-
-            orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
-
-            ArgumentCaptor<Order> orderCaptor = ArgumentCaptor.forClass(Order.class);
-            verify(orderMapper).update(orderCaptor.capture(), any(LambdaUpdateWrapper.class));
-            assertEquals(OrderStatus.CANCEL.getCode(), orderCaptor.getValue().getOrderStatus());
-            assertNotNull(orderCaptor.getValue().getCancelOrderTime());
-
-            verify(redisCache).incrBy(any(RedisKeyBuild.class), eq(-2L));
-            verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(), any(), any(), any());
-            verify(delayOperateProgramDataSend, never()).sendMessage(anyString());
-        }
-
-        @Test
-        void cancel_V4Version_UsesFeign() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            order.setOrderVersion(ProgramOrderVersion.V4_VERSION.getValue());
-            List<OrderTicketUser> ticketUsers = createTicketUserList();
-
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(orderTicketUserMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(ticketUsers);
-            when(orderMapper.update(any(Order.class), any(LambdaUpdateWrapper.class))).thenReturn(1);
-            when(orderTicketUserMapper.update(any(OrderTicketUser.class), any(LambdaUpdateWrapper.class))).thenReturn(2);
-            when(orderTicketUserRecordService.saveBatch(anyList())).thenReturn(true);
-            when(programClient.operateProgramData(any(ProgramOperateDataDto.class)))
-                    .thenReturn(ApiResponse.ok(true));
-
-            SeatVo seatVo = new SeatVo();
-            seatVo.setId(51L);
-            seatVo.setTicketCategoryId(5L);
-            seatVo.setSellStatus(SellStatus.LOCK.getCode());
-            seatVo.setPrice(new BigDecimal("100"));
-            seatVo.setRowCode(1);
-            seatVo.setColCode(1);
-            when(redisCache.multiGetForHash(any(RedisKeyBuild.class), anyList(), eq(SeatVo.class)))
-                    .thenReturn(List.of(seatVo));
-
-            orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
-
-                        verify(programClient).operateProgramData(any(ProgramOperateDataDto.class));
-        }
+    @Test
+    void pay微信渠道时使用微信回调地址并返回支付跳转地址() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        when(payClient.commonPay(any(PayDto.class))).thenReturn(ApiResponse.ok("https://wx/pay"));
+        String result = orderService.pay(buildPayDto(PayChannel.WX.getValue()));
+        assertEquals("https://wx/pay", result);
+        ArgumentCaptor<PayDto> payDtoCaptor = ArgumentCaptor.forClass(PayDto.class);
+        verify(payClient).commonPay(payDtoCaptor.capture());
+        assertEquals(orderProperties.getWxPayNotifyUrl(), payDtoCaptor.getValue().getNotifyUrl());
+        assertEquals(String.valueOf(ORDER_NUMBER), payDtoCaptor.getValue().getOrderNumber());
     }
 
-    // ==================== P1: pay ====================
-
-    @Nested
-    class Pay {
-
-        private OrderPayDto createPayDto() {
-            OrderPayDto dto = new OrderPayDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-            dto.setPrice(new BigDecimal("200"));
-            dto.setChannel("alipay");
-            dto.setPayBillType(1);
-            dto.setSubject("演唱会门票");
-            dto.setPlatform(1);
-            return dto;
-        }
-
-        @Test
-        void whenOrderNotFound_ThrowsException() {
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.pay(createPayDto()));
-            assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenOrderCancelled_ThrowsException() {
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class)))
-                    .thenReturn(createOrder(OrderStatus.CANCEL.getCode()));
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.pay(createPayDto()));
-            assertEquals(BaseCode.ORDER_CANCEL.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenOrderPaid_ThrowsException() {
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class)))
-                    .thenReturn(createOrder(OrderStatus.PAY.getCode()));
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.pay(createPayDto()));
-            assertEquals(BaseCode.ORDER_PAY.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenOrderRefunded_ThrowsException() {
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class)))
-                    .thenReturn(createOrder(OrderStatus.REFUND.getCode()));
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.pay(createPayDto()));
-            assertEquals(BaseCode.ORDER_REFUND.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenPriceMismatch_ThrowsException() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            order.setOrderPrice(new BigDecimal("300"));
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-
-            OrderPayDto payDto = createPayDto();
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.pay(payDto));
-            assertEquals(BaseCode.PAY_PRICE_NOT_EQUAL_ORDER_PRICE.getCode(), ex.getCode());
-        }
-
-        @Test
-        void success_ReturnsPayUrl() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(orderProperties.getOrderPayNotifyUrl()).thenReturn("http://notify.url");
-            when(orderProperties.getOrderPayReturnUrl()).thenReturn("http://return.url");
-            when(payClient.commonPay(any(PayDto.class))).thenReturn(ApiResponse.ok("http://pay.url"));
-
-            String result = orderService.pay(createPayDto());
-
-            assertEquals("http://pay.url", result);
-            verify(payClient).commonPay(argThat(dto ->
-                    dto.getOrderNumber().equals(String.valueOf(ORDER_NUMBER))));
-        }
-
-        @Test
-        void whenPayClientReturnsError_ThrowsException() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(orderProperties.getOrderPayNotifyUrl()).thenReturn("http://notify.url");
-            when(orderProperties.getOrderPayReturnUrl()).thenReturn("http://return.url");
-            when(payClient.commonPay(any(PayDto.class)))
-                    .thenReturn(ApiResponse.error(BaseCode.PAY_ERROR));
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.pay(createPayDto()));
-            assertEquals(BaseCode.PAY_ERROR.getCode(), ex.getCode());
-        }
+    @Test
+    void pay非微信渠道时使用支付宝回调地址() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        when(payClient.commonPay(any(PayDto.class))).thenReturn(ApiResponse.ok("https://alipay/pay"));
+        orderService.pay(buildPayDto(PayChannel.ALIPAY.getValue()));
+        ArgumentCaptor<PayDto> payDtoCaptor = ArgumentCaptor.forClass(PayDto.class);
+        verify(payClient).commonPay(payDtoCaptor.capture());
+        assertEquals(orderProperties.getOrderPayNotifyUrl(), payDtoCaptor.getValue().getNotifyUrl());
     }
 
-    // ==================== P1: payCheck ====================
-
-    @Nested
-    class PayCheck {
-
-        private OrderPayCheckDto createCheckDto() {
-            OrderPayCheckDto dto = new OrderPayCheckDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-            dto.setPayChannelType(PayChannel.ALIPAY.getCode());
-            return dto;
-        }
-
-        @Test
-        void whenOrderNotFound_ThrowsException() {
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.payCheck(createCheckDto()));
-            assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenOrderCancelledAndRefundSuccess_ReturnsRefundStatus() {
-            Order order = createOrder(OrderStatus.CANCEL.getCode());
-            order.setOrderPrice(new BigDecimal("200"));
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refunded"));
-
-            OrderPayCheckVo result = orderService.payCheck(createCheckDto());
-
-            assertEquals(OrderStatus.REFUND.getCode(), result.getOrderStatus());
-            assertNotNull(result.getCancelOrderTime());
-            verify(payClient).refund(any(RefundDto.class));
-            verify(orderMapper).update(any(Order.class), any(LambdaUpdateWrapper.class));
-        }
-
-        @Test
-        void whenOrderCancelledAndRefundFailed_StillReturnsRefundStatus() {
-            Order order = createOrder(OrderStatus.CANCEL.getCode());
-            order.setOrderPrice(new BigDecimal("200"));
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.error("退款失败"));
-
-            OrderPayCheckVo result = orderService.payCheck(createCheckDto());
-
-            assertEquals(OrderStatus.REFUND.getCode(), result.getOrderStatus());
-            assertNotNull(result.getCancelOrderTime());
-            verify(payClient).refund(any(RefundDto.class));
-            verify(orderMapper, never()).update(any(Order.class), any(LambdaUpdateWrapper.class));
-        }
-
-        @Test
-        void whenPayBillStatusPay_UpdatesOrderToPay() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(payClient.tradeCheck(any(TradeCheckDto.class)))
-                    .thenReturn(ApiResponse.ok(createTradeCheckVo(true, PayBillStatus.PAY.getCode())));
-
-            doNothing().when(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
-
-            OrderPayCheckVo result = orderService.payCheck(createCheckDto());
-
-            assertEquals(PayBillStatus.PAY.getCode(), result.getOrderStatus());
-            assertNotNull(result.getPayOrderTime());
-            verify(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
-        }
-
-        @Test
-        void whenPayBillStatusCancel_UpdatesOrderToCancel() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(payClient.tradeCheck(any(TradeCheckDto.class)))
-                    .thenReturn(ApiResponse.ok(createTradeCheckVo(true, PayBillStatus.CANCEL.getCode())));
-
-            doNothing().when(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
-
-            OrderPayCheckVo result = orderService.payCheck(createCheckDto());
-
-            assertEquals(PayBillStatus.CANCEL.getCode(), result.getOrderStatus());
-            assertNotNull(result.getCancelOrderTime());
-            verify(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
-        }
-
-        @Test
-        void whenTradeCheckFails_ThrowsException() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(payClient.tradeCheck(any(TradeCheckDto.class)))
-                    .thenReturn(ApiResponse.error(BaseCode.PAY_TRADE_CHECK_ERROR));
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.payCheck(createCheckDto()));
-            assertEquals(BaseCode.PAY_TRADE_CHECK_ERROR.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenTradeCheckNotSuccess_ThrowsException() {
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(payClient.tradeCheck(any(TradeCheckDto.class)))
-                    .thenReturn(ApiResponse.ok(createTradeCheckVo(false, PayBillStatus.NO_PAY.getCode())));
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.payCheck(createCheckDto()));
-            assertEquals(BaseCode.PAY_TRADE_CHECK_ERROR.getCode(), ex.getCode());
-        }
-
-        private TradeCheckVo createTradeCheckVo(boolean success, Integer payBillStatus) {
-            TradeCheckVo vo = new TradeCheckVo();
-            vo.setSuccess(success);
-            vo.setPayBillStatus(payBillStatus);
-            return vo;
-        }
+    @Test
+    void pay支付服务返回失败时抛异常携带支付服务响应码() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        ApiResponse<String> failResponse = ApiResponse.error(9999, "支付失败");
+        when(payClient.commonPay(any(PayDto.class))).thenReturn(failResponse);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.pay(buildPayDto(PayChannel.WX.getValue())));
+        assertEquals(9999, e.getCode());
     }
 
-    // ==================== P1: selectList ====================
+    // ==================== 支付检查 payCheck ====================
 
-    @Nested
-    class SelectList {
-
-        @Test
-        void empty_ReturnsEmptyList() {
-            OrderListDto dto = new OrderListDto();
-            dto.setUserId(USER_ID);
-            when(orderMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(new ArrayList<>());
-
-            List<OrderListVo> result = orderService.selectList(dto);
-
-            assertTrue(result.isEmpty());
-        }
-
-        @Test
-        void success_ReturnsListWithCount() {
-            OrderListDto dto = new OrderListDto();
-            dto.setUserId(USER_ID);
-
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            when(orderMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(List.of(order));
-
-            OrderTicketUserAggregate aggregate = new OrderTicketUserAggregate();
-            aggregate.setOrderNumber(ORDER_NUMBER);
-            aggregate.setOrderTicketUserCount(2);
-            when(orderTicketUserMapper.selectOrderTicketUserAggregate(anyList()))
-                    .thenReturn(List.of(aggregate));
-
-            List<OrderListVo> result = orderService.selectList(dto);
-
-            assertEquals(1, result.size());
-            assertEquals(ORDER_NUMBER, result.get(0).getOrderNumber());
-            assertEquals(Integer.valueOf(2), result.get(0).getTicketCount());
-        }
+    private OrderPayCheckDto buildPayCheckDto(Integer payChannelType) {
+        OrderPayCheckDto orderPayCheckDto = new OrderPayCheckDto();
+        orderPayCheckDto.setOrderNumber(ORDER_NUMBER);
+        orderPayCheckDto.setPayChannelType(payChannelType);
+        return orderPayCheckDto;
     }
 
-    // ==================== P1: get ====================
-
-    @Nested
-    class Get {
-
-        @Test
-        void whenOrderNotFound_ThrowsException() {
-            OrderGetDto dto = new OrderGetDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.get(dto));
-            assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenNoTicketUsers_ThrowsException() {
-            OrderGetDto dto = new OrderGetDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class)))
-                    .thenReturn(createOrder(OrderStatus.NO_PAY.getCode()));
-            when(orderTicketUserMapper.selectList(any(LambdaQueryWrapper.class)))
-                    .thenReturn(new ArrayList<>());
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.get(dto));
-            assertEquals(BaseCode.TICKET_USER_ORDER_NOT_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void success_ReturnsOrderGetVo() {
-            OrderGetDto dto = new OrderGetDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            order.setProgramPermitChooseSeat(BusinessStatus.NO.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-
-            List<OrderTicketUser> ticketUsers = createTicketUserList();
-            when(orderTicketUserMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(ticketUsers);
-
-            UserGetAndTicketUserListVo userListVo = new UserGetAndTicketUserListVo();
-            UserVo userVo = new UserVo();
-            userVo.setId(USER_ID);
-            userListVo.setUserVo(userVo);
-
-            TicketUserVo tv1 = new TicketUserVo();
-            tv1.setId(2001L);
-            TicketUserVo tv2 = new TicketUserVo();
-            tv2.setId(2002L);
-            userListVo.setTicketUserVoList(Arrays.asList(tv1, tv2));
-
-            when(userClient.getUserAndTicketUserList(any(UserGetAndTicketUserListDto.class)))
-                    .thenReturn(ApiResponse.ok(userListVo));
-
-            OrderGetVo result = orderService.get(dto);
-
-            assertNotNull(result);
-            assertEquals(ORDER_NUMBER, result.getOrderNumber());
-            assertNotNull(result.getOrderTicketInfoVoList());
-            assertEquals(1, result.getOrderTicketInfoVoList().size());
-            assertNotNull(result.getUserAndTicketUserInfoVo());
-        }
-
-        @Test
-        void whenRpcUserDataEmpty_ThrowsException() {
-            OrderGetDto dto = new OrderGetDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class)))
-                    .thenReturn(createOrder(OrderStatus.NO_PAY.getCode()));
-            when(orderTicketUserMapper.selectList(any(LambdaQueryWrapper.class)))
-                    .thenReturn(createTicketUserList());
-            when(userClient.getUserAndTicketUserList(any(UserGetAndTicketUserListDto.class)))
-                    .thenReturn(ApiResponse.ok(null));
-
-            assertThrows(TicketFlowFrameException.class, () -> orderService.get(dto));
-        }
+    @Test
+    void payCheck订单不存在时抛ORDER_NOT_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode())));
+        assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), e.getCode());
     }
 
-    // ==================== P2: simpleList ====================
-
-    @Nested
-    class SimpleList {
-
-        @Test
-        void whenNoUserIdAndNoOrderNumber_ThrowsException() {
-            OrderSimpleListDto dto = new OrderSimpleListDto();
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.simpleList(dto));
-            assertEquals(BaseCode.USER_ID_AND_ORDER_NUMBER_NOT_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void empty_ReturnsEmptyList() {
-            OrderSimpleListDto dto = new OrderSimpleListDto();
-            dto.setOrderNumber(ORDER_NUMBER);
-            when(orderMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(new ArrayList<>());
-
-            List<OrderListVo> result = orderService.simpleList(dto);
-
-            assertTrue(result.isEmpty());
-        }
-
-        @Test
-        void success_ReturnsList() {
-            OrderSimpleListDto dto = new OrderSimpleListDto();
-            dto.setUserId(USER_ID);
-            when(orderMapper.selectList(any(LambdaQueryWrapper.class)))
-                    .thenReturn(List.of(createOrder(OrderStatus.NO_PAY.getCode())));
-
-            List<OrderListVo> result = orderService.simpleList(dto);
-
-            assertEquals(1, result.size());
-            assertEquals(USER_ID, result.get(0).getUserId());
-        }
+    @Test
+    void payCheck取消订单且支付渠道非法时抛PAY_CHANNEL_NOT_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.payCheck(buildPayCheckDto(999)));
+        assertEquals(BaseCode.PAY_CHANNEL_NOT_EXIST.getCode(), e.getCode());
     }
 
-    // ==================== P2: alipayNotify ====================
-
-    @Nested
-    class AlipayNotify {
-
-        @Test
-        void whenEmptyOutTradeNo_ReturnsFailure() throws Exception {
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.setContent("".getBytes());
-
-            String result = orderService.alipayNotify(
-                    new CustomizeRequestWrapper(mockRequest));
-
-            assertEquals("failure", result);
-        }
-
-        @Test
-        void whenOrderNotFound_ThrowsException() throws Exception {
-            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mock(RLock.class));
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.setContent("out_trade_no=999999".getBytes());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
-
-            assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.alipayNotify(new CustomizeRequestWrapper(mockRequest)));
-        }
-
-        @Test
-        void whenOrderCancelled_RefundsAndReturnsSuccess() throws Exception {
-            RLock mockLock = mock(RLock.class);
-            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
-
-            Order order = createOrder(OrderStatus.CANCEL.getCode());
-            order.setOrderPrice(new BigDecimal("200"));
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            // 先对账（回调可能早于本地账单状态流转），确认支付成功后才退款
-            NotifyVo notifyVo = new NotifyVo();
-            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
-            notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
-            when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refunded"));
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.setContent(("out_trade_no=" + ORDER_NUMBER).getBytes());
-
-            String result = orderService.alipayNotify(new CustomizeRequestWrapper(mockRequest));
-
-            assertEquals(ALIPAY_NOTIFY_SUCCESS_RESULT, result);
-            verify(payClient).notify(any(NotifyDto.class));
-            verify(payClient).refund(any(RefundDto.class));
-            verify(mockLock).lock();
-            verify(mockLock).unlock();
-        }
-
-        @Test
-        void whenOrderCancelled_RefundFails_ReturnsFailure() throws Exception {
-            RLock mockLock = mock(RLock.class);
-            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
-
-            Order order = createOrder(OrderStatus.CANCEL.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            NotifyVo notifyVo = new NotifyVo();
-            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
-            notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
-            when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.error("退款失败"));
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.setContent(("out_trade_no=" + ORDER_NUMBER).getBytes());
-
-            String result = orderService.alipayNotify(new CustomizeRequestWrapper(mockRequest));
-
-            assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
-            verify(mockLock).lock();
-            verify(mockLock).unlock();
-        }
-
-        @Test
-        void whenOrderCancelled_ReconcileFails_ReturnsFailureWithoutRefund() throws Exception {
-            RLock mockLock = mock(RLock.class);
-            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
-
-            Order order = createOrder(OrderStatus.CANCEL.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            NotifyVo notifyVo = new NotifyVo();
-            notifyVo.setPayResult(ALIPAY_NOTIFY_FAILURE_RESULT);
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.setContent(("out_trade_no=" + ORDER_NUMBER).getBytes());
-
-            String result = orderService.alipayNotify(new CustomizeRequestWrapper(mockRequest));
-
-            assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
-            verify(payClient, never()).refund(any(RefundDto.class));
-            verify(mockLock).lock();
-            verify(mockLock).unlock();
-        }
-
-        @Test
-        void whenPaySuccess_UpdatesOrderRelatedData() throws Exception {
-            RLock mockLock = mock(RLock.class);
-            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
-
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-
-            NotifyVo notifyVo = new NotifyVo();
-            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
-            notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
-
-            doNothing().when(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.setContent(("out_trade_no=" + ORDER_NUMBER).getBytes());
-
-            String result = orderService.alipayNotify(new CustomizeRequestWrapper(mockRequest));
-
-            assertEquals(ALIPAY_NOTIFY_SUCCESS_RESULT, result);
-            verify(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
-        }
+    @Test
+    void payCheck取消订单且退款成功时更新订单为退款状态() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
+        assertEquals(OrderStatus.REFUND.getCode(), vo.getOrderStatus());
+        assertNotNull(vo.getCancelOrderTime());
+        ArgumentCaptor<RefundDto> refundCaptor = ArgumentCaptor.forClass(RefundDto.class);
+        verify(payClient).refund(refundCaptor.capture());
+        assertEquals(PayChannel.ALIPAY.getValue(), refundCaptor.getValue().getChannel());
+        assertEquals(String.valueOf(ORDER_NUMBER), refundCaptor.getValue().getOrderNumber());
+        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
     }
 
-    // ==================== P2: wxNotify ====================
-
-    @Nested
-    class WxNotify {
-
-        @Test
-        void whenPaySuccess_UpdatesOrderRelatedData() throws Exception {
-            RLock mockLock = mock(RLock.class);
-            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
-
-            Order order = createOrder(OrderStatus.NO_PAY.getCode());
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-
-            NotifyVo notifyVo = new NotifyVo();
-            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
-            notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
-
-            doNothing().when(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.addHeader("Wechatpay-Signature", "sig");
-            mockRequest.addHeader("Wechatpay-Serial", "serial");
-            mockRequest.addHeader("Wechatpay-Nonce", "nonce");
-            mockRequest.addHeader("Wechatpay-Timestamp", "1234567890");
-            mockRequest.setContent("{\"resource\":{\"ciphertext\":\"xxx\"}}".getBytes(StandardCharsets.UTF_8));
-
-            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
-
-            assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
-            verify(payClient).notify(any(NotifyDto.class));
-            verify(orderService).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
-        }
-
-        @Test
-        void whenNotifyFails_ReturnsFailure() throws Exception {
-            NotifyVo notifyVo = new NotifyVo();
-            notifyVo.setPayResult(WX_NOTIFY_FAILURE_RESULT);
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.addHeader("Wechatpay-Signature", "sig");
-            mockRequest.addHeader("Wechatpay-Serial", "serial");
-            mockRequest.addHeader("Wechatpay-Nonce", "nonce");
-            mockRequest.addHeader("Wechatpay-Timestamp", "1234567890");
-            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
-
-            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
-
-            assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
-            verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
-        }
-
-        @Test
-        void whenNotifyServiceError_ReturnsFailure() throws Exception {
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.error("验签失败"));
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.addHeader("Wechatpay-Signature", "sig");
-            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
-
-            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
-
-            assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
-            verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
-        }
-
-        @Test
-        void whenOrderNotFound_ThrowsException() throws Exception {
-            RLock mockLock = mock(RLock.class);
-            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
-
-            NotifyVo notifyVo = new NotifyVo();
-            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
-            notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.addHeader("Wechatpay-Signature", "sig");
-            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
-
-            TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.wxNotify(new CustomizeRequestWrapper(mockRequest)));
-            assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), ex.getCode());
-        }
-
-        @Test
-        void whenOrderNumberInvalid_ReturnsFailure() throws Exception {
-            NotifyVo notifyVo = new NotifyVo();
-            notifyVo.setOutTradeNo("not-a-number");
-            notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.addHeader("Wechatpay-Signature", "sig");
-            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
-
-            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
-
-            assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
-            verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
-        }
-
-        @Test
-        void whenOrderCancelledAndRefundSuccess_ReturnsSuccess() throws Exception {
-            RLock mockLock = mock(RLock.class);
-            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
-
-            Order order = createOrder(OrderStatus.CANCEL.getCode());
-            order.setOrderPrice(new BigDecimal("200"));
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(orderMapper.update(any(Order.class), any(LambdaUpdateWrapper.class))).thenReturn(1);
-            when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refunded"));
-
-            NotifyVo notifyVo = new NotifyVo();
-            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
-            notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.addHeader("Wechatpay-Signature", "sig");
-            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
-
-            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
-
-            assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
-            verify(payClient).refund(any(RefundDto.class));
-            verify(orderMapper).update(any(Order.class), any(LambdaUpdateWrapper.class));
-            verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
-        }
-
-        @Test
-        void whenOrderCancelledAndRefundFails_ReturnsFailure() throws Exception {
-            RLock mockLock = mock(RLock.class);
-            when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(mockLock);
-
-            Order order = createOrder(OrderStatus.CANCEL.getCode());
-            order.setOrderPrice(new BigDecimal("200"));
-            when(orderMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(order);
-            when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.error("退款失败"));
-
-            NotifyVo notifyVo = new NotifyVo();
-            notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
-            notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
-            when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
-
-            MockHttpServletRequest mockRequest = new MockHttpServletRequest();
-            mockRequest.addHeader("Wechatpay-Signature", "sig");
-            mockRequest.setContent("{}".getBytes(StandardCharsets.UTF_8));
-
-            String result = orderService.wxNotify(new CustomizeRequestWrapper(mockRequest));
-
-            // 退款失败返回 FAIL，微信重试回调，防止退款永久丢失
-            assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
-            verify(payClient).refund(any(RefundDto.class));
-            verify(orderMapper, never()).update(any(Order.class), any(LambdaUpdateWrapper.class));
-            verify(orderService, never()).updateOrderRelatedData(anyLong(), any(OrderStatus.class));
-        }
+    @Test
+    void payCheck取消订单且退款失败时视图保持取消状态且未更新数据库() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.error(500, "退款失败"));
+        OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
+        assertEquals(OrderStatus.CANCEL.getCode(), vo.getOrderStatus());
+        verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
     }
 
-    // ==================== P2: accountOrderCount ====================
-
-    @Nested
-    class AccountOrderCount {
-
-        @Test
-        void success_ReturnsCount() {
-            AccountOrderCountDto dto = new AccountOrderCountDto();
-            dto.setUserId(USER_ID);
-            dto.setProgramId(PROGRAM_ID);
-            when(orderMapper.accountOrderCount(USER_ID, PROGRAM_ID)).thenReturn(5);
-
-            AccountOrderCountVo result = orderService.accountOrderCount(dto);
-
-            assertEquals(Integer.valueOf(5), result.getCount());
-        }
+    @Test
+    void payCheck对账服务返回失败时抛异常() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.error(8888, "对账失败"));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode())));
+        assertEquals(8888, e.getCode());
     }
 
-    // ==================== P2: createMq (V4/V41 Kafka consumer) ====================
+    @Test
+    void payCheck对账结果为空时抛PAY_BILL_NOT_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(null));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode())));
+        assertEquals(BaseCode.PAY_BILL_NOT_EXIST.getCode(), e.getCode());
+    }
 
-    @Nested
-    class CreateMq {
+    @Test
+    void payCheck对账未成功时抛PAY_TRADE_CHECK_ERROR() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(false);
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode())));
+        assertEquals(BaseCode.PAY_TRADE_CHECK_ERROR.getCode(), e.getCode());
+    }
 
-        @Test
-        void whenProgramClientFails_ThrowsExceptionAndSavesDiscardOrder() {
-            OrderTicketUserCreateDto dto1 = createTicketUserDto(2001L, 51L);
-            OrderCreateMq mq = new OrderCreateMq();
-            mq.setOrderNumber(ORDER_NUMBER);
-            mq.setProgramId(PROGRAM_ID);
-            mq.setUserId(USER_ID);
-            mq.setOrderTicketUserCreateDtoList(List.of(dto1));
+    @Test
+    void payCheck账单已支付且本地状态未支付时调用状态流转更新() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
+        assertEquals(PayBillStatus.PAY.getCode(), vo.getOrderStatus());
+        assertNotNull(vo.getPayOrderTime());
+        verify(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+    }
 
-            when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
-                    .thenReturn(ApiResponse.error("fail"));
+    @Test
+    void payCheck账单状态与本地一致时不触发状态流转() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.PAY.getCode()));
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
+        verify(orderServiceMock, never()).updateOrderRelatedData(any(), any());
+    }
 
-            assertThrows(TicketFlowFrameException.class,
-                    () -> orderService.createMq(mq));
+    // ==================== 状态流转 updateOrderRelatedData ====================
 
-            verify(redisCache).leftPushForList(any(RedisKeyBuild.class), any());
-        }
+    private List<OrderTicketUser> buildOrderTicketUserList() {
+        OrderTicketUser orderTicketUser = new OrderTicketUser();
+        orderTicketUser.setId(1L);
+        orderTicketUser.setOrderNumber(ORDER_NUMBER);
+        orderTicketUser.setTicketCategoryId(TICKET_CATEGORY_ID);
+        orderTicketUser.setSeatId(SEAT_ID);
+        orderTicketUser.setTicketUserId(TICKET_USER_ID);
+        orderTicketUser.setOrderPrice(new BigDecimal("100.00"));
+        orderTicketUser.setOrderStatus(OrderStatus.NO_PAY.getCode());
+        return List.of(orderTicketUser);
+    }
 
-        @Test
-        void success_CreatesOrder() {
-            OrderTicketUserCreateDto dto1 = createTicketUserDto(2001L, 51L);
-            OrderCreateMq mq = new OrderCreateMq();
-            mq.setOrderNumber(ORDER_NUMBER);
-            mq.setProgramId(PROGRAM_ID);
-            mq.setUserId(USER_ID);
-            mq.setProgramItemPicture("pic.jpg");
-            mq.setProgramTitle("演唱会");
-            mq.setProgramPlace("北京");
-            mq.setProgramShowTime(new Date());
-            mq.setProgramPermitChooseSeat(BusinessStatus.YES.getCode());
-            mq.setOrderPrice(new BigDecimal("100"));
-            mq.setCreateOrderTime(new Date());
-            mq.setOrderVersion(ProgramOrderVersion.V4_VERSION.getValue());
-            mq.setOrderTicketUserCreateDtoList(List.of(dto1));
+    private void stubUpdateOrderRelatedDataCommon(Integer orderStatus) {
+        stubUpdateOrderRelatedDataCommon(orderStatus, ProgramOrderVersion.V4_VERSION.getValue());
+    }
 
-            when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
-                    .thenReturn(ApiResponse.ok(true));
-            doReturn(String.valueOf(ORDER_NUMBER)).when(orderService).createByMq(mq);
+    private void stubUpdateOrderRelatedDataCommon(Integer orderStatus, Integer orderVersion) {
+        Order order = buildOrder(orderStatus);
+        order.setOrderVersion(orderVersion);
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(order);
+        when(orderTicketUserMapper.selectList(any(Wrapper.class))).thenReturn(buildOrderTicketUserList());
+        when(uidGenerator.getUid()).thenReturn(9L);
+        when(orderMapper.update(any(Order.class), any(Wrapper.class))).thenReturn(1);
+        when(orderTicketUserMapper.update(any(OrderTicketUser.class), any(Wrapper.class))).thenReturn(1);
+        when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(new SeatVo()));
+        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
+    }
 
-            String result = orderService.createMq(mq);
+    @Test
+    void updateOrderRelatedData非法状态时抛OPERATE_ORDER_STATUS_NOT_PERMIT() {
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.NO_PAY));
+        assertEquals(BaseCode.OPERATE_ORDER_STATUS_NOT_PERMIT.getCode(), e.getCode());
+    }
 
-            assertEquals(String.valueOf(ORDER_NUMBER), result);
-            verify(redisCache).set(any(RedisKeyBuild.class), eq(String.valueOf(ORDER_NUMBER)),
-                    eq(1L), eq(TimeUnit.MINUTES));
-        }
+    @Test
+    void updateOrderRelatedData订单不存在时抛ORDER_NOT_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL));
+        assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), e.getCode());
+    }
+
+    @Test
+    void updateOrderRelatedData订单已取消时抛ORDER_CANCEL() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.CANCEL.getCode());
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
+        assertEquals(BaseCode.ORDER_CANCEL.getCode(), e.getCode());
+    }
+
+    @Test
+    void updateOrderRelatedData订单已支付时抛ORDER_PAY() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.PAY.getCode());
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL));
+        assertEquals(BaseCode.ORDER_PAY.getCode(), e.getCode());
+    }
+
+    @Test
+    void updateOrderRelatedData订单已退款时抛ORDER_REFUND() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.REFUND.getCode());
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL));
+        assertEquals(BaseCode.ORDER_REFUND.getCode(), e.getCode());
+    }
+
+    @Test
+    void updateOrderRelatedData购票人订单为空时抛TICKET_USER_ORDER_NOT_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        when(orderTicketUserMapper.selectList(any(Wrapper.class))).thenReturn(new ArrayList<>());
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL));
+        assertEquals(BaseCode.TICKET_USER_ORDER_NOT_EXIST.getCode(), e.getCode());
+    }
+
+    @Test
+    void updateOrderRelatedData取消时写入增加记录并扣减账户订单数() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode(), ProgramOrderVersion.V3_VERSION.getValue());
+        orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
+
+        ArgumentCaptor<Order> updateOrderCaptor = ArgumentCaptor.forClass(Order.class);
+        verify(orderMapper).update(updateOrderCaptor.capture(), any(Wrapper.class));
+        assertEquals(OrderStatus.CANCEL.getCode(), updateOrderCaptor.getValue().getOrderStatus());
+        assertNotNull(updateOrderCaptor.getValue().getCancelOrderTime());
+
+        ArgumentCaptor<List<OrderTicketUserRecord>> recordCaptor = ArgumentCaptor.forClass(List.class);
+        verify(orderTicketUserRecordService).saveBatch(recordCaptor.capture());
+        OrderTicketUserRecord record = recordCaptor.getValue().get(0);
+        assertEquals(RecordType.INCREASE.getCode(), record.getRecordTypeCode());
+        assertEquals(IDENTIFIER_ID, record.getIdentifierId());
+        assertEquals(TICKET_USER_ID, record.getTicketUserId());
+
+        verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(-1L));
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+        verify(programClient, never()).operateProgramData(any());
+    }
+
+    @Test
+    void updateOrderRelatedData支付时写入变更记录并调用V4节目服务() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.ok(true));
+        orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+
+        ArgumentCaptor<Order> updateOrderCaptor = ArgumentCaptor.forClass(Order.class);
+        verify(orderMapper).update(updateOrderCaptor.capture(), any(Wrapper.class));
+        assertEquals(OrderStatus.PAY.getCode(), updateOrderCaptor.getValue().getOrderStatus());
+        assertNotNull(updateOrderCaptor.getValue().getPayOrderTime());
+
+        ArgumentCaptor<List<OrderTicketUserRecord>> recordCaptor = ArgumentCaptor.forClass(List.class);
+        verify(orderTicketUserRecordService).saveBatch(recordCaptor.capture());
+        assertEquals(RecordType.CHANGE_STATUS.getCode(), recordCaptor.getValue().get(0).getRecordTypeCode());
+
+        verify(redisCache, never()).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), anyLong());
+        ArgumentCaptor<ProgramOperateDataDto> operateCaptor = ArgumentCaptor.forClass(ProgramOperateDataDto.class);
+        verify(programClient).operateProgramData(operateCaptor.capture());
+        assertEquals(PROGRAM_ID, operateCaptor.getValue().getProgramId());
+        assertEquals(SellStatus.SOLD.getCode(), operateCaptor.getValue().getSellStatus());
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+    }
+
+    @Test
+    void updateOrderRelatedData更新主订单失败时抛ORDER_CANAL_ERROR() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        when(orderMapper.update(any(Order.class), any(Wrapper.class))).thenReturn(0);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL));
+        assertEquals(BaseCode.ORDER_CANAL_ERROR.getCode(), e.getCode());
+    }
+
+    @Test
+    void updateOrderRelatedData更新购票人订单失败时抛ORDER_CANAL_ERROR() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        when(orderTicketUserMapper.update(any(OrderTicketUser.class), any(Wrapper.class))).thenReturn(0);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL));
+        assertEquals(BaseCode.ORDER_CANAL_ERROR.getCode(), e.getCode());
+    }
+
+    // ==================== checkOrderStatus ====================
+
+    @Test
+    void checkOrderStatus空订单抛ORDER_NOT_EXIST() {
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class, () -> orderService.checkOrderStatus(null));
+        assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), e.getCode());
+    }
+
+    @Test
+    void checkOrderStatus已取消订单抛ORDER_CANCEL() {
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.checkOrderStatus(buildOrder(OrderStatus.CANCEL.getCode())));
+        assertEquals(BaseCode.ORDER_CANCEL.getCode(), e.getCode());
+    }
+
+    @Test
+    void checkOrderStatus已支付订单抛ORDER_PAY() {
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.checkOrderStatus(buildOrder(OrderStatus.PAY.getCode())));
+        assertEquals(BaseCode.ORDER_PAY.getCode(), e.getCode());
+    }
+
+    @Test
+    void checkOrderStatus已退款订单抛ORDER_REFUND() {
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.checkOrderStatus(buildOrder(OrderStatus.REFUND.getCode())));
+        assertEquals(BaseCode.ORDER_REFUND.getCode(), e.getCode());
+    }
+
+    @Test
+    void checkOrderStatus未支付订单通过校验() {
+        assertDoesNotThrow(() -> orderService.checkOrderStatus(buildOrder(OrderStatus.NO_PAY.getCode())));
+    }
+
+    // ==================== 座位缓存操作 updateProgramRelatedDataResolution ====================
+
+    @Test
+    void updateProgramRelatedDataResolution座位集合为空时抛LOCK_SEAT_LIST_EMPTY() {
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.updateProgramRelatedDataResolution(PROGRAM_ID, new java.util.HashMap<>(),
+                        OrderStatus.CANCEL, IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V3_VERSION.getValue()));
+        assertEquals(BaseCode.LOCK_SEAT_LIST_EMPTY.getCode(), e.getCode());
+    }
+
+    @Test
+    void updateProgramRelatedDataResolutionV3支付时走缓存逆向操作并延迟发送() {
+        SeatVo seatVo = new SeatVo();
+        seatVo.setId(SEAT_ID);
+        when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
+        java.util.Map<Long, List<Long>> seatMap = java.util.Map.of(TICKET_CATEGORY_ID, List.of(SEAT_ID));
+        orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.PAY,
+                IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V3_VERSION.getValue());
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+        verify(delayOperateProgramDataSend).sendMessage(anyString());
+        verify(programClient, never()).operateProgramData(any());
+    }
+
+    @Test
+    void updateProgramRelatedDataResolutionV4支付时走Feign更新节目数据() {
+        SeatVo seatVo = new SeatVo();
+        seatVo.setId(SEAT_ID);
+        when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.ok(true));
+        java.util.Map<Long, List<Long>> seatMap = java.util.Map.of(TICKET_CATEGORY_ID, List.of(SEAT_ID));
+        orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.PAY,
+                IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue());
+        verify(programClient).operateProgramData(any(ProgramOperateDataDto.class));
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+        verify(delayOperateProgramDataSend, never()).sendMessage(anyString());
+    }
+
+    @Test
+    void updateProgramRelatedDataResolutionV4取消时座位标记未售卖() {
+        SeatVo seatVo = new SeatVo();
+        seatVo.setId(SEAT_ID);
+        when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.ok(true));
+        java.util.Map<Long, List<Long>> seatMap = java.util.Map.of(TICKET_CATEGORY_ID, List.of(SEAT_ID));
+        orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.CANCEL,
+                IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue());
+        ArgumentCaptor<ProgramOperateDataDto> operateCaptor = ArgumentCaptor.forClass(ProgramOperateDataDto.class);
+        verify(programClient).operateProgramData(operateCaptor.capture());
+        assertEquals(SellStatus.NO_SOLD.getCode(), operateCaptor.getValue().getSellStatus());
+    }
+
+    @Test
+    void updateProgramRelatedDataResolutionV4节目服务失败时抛异常() {
+        SeatVo seatVo = new SeatVo();
+        seatVo.setId(SEAT_ID);
+        when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.error(7777, "失败"));
+        java.util.Map<Long, List<Long>> seatMap = java.util.Map.of(TICKET_CATEGORY_ID, List.of(SEAT_ID));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.CANCEL,
+                        IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue()));
+        assertEquals(7777, e.getCode());
+    }
+
+    // ==================== 取消 initiateCancel ====================
+
+    private OrderCancelDto buildCancelDto() {
+        OrderCancelDto orderCancelDto = new OrderCancelDto();
+        orderCancelDto.setOrderNumber(ORDER_NUMBER);
+        return orderCancelDto;
+    }
+
+    @Test
+    void initiateCancel订单不存在时抛ORDER_NOT_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.initiateCancel(buildCancelDto()));
+        assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), e.getCode());
+    }
+
+    @Test
+    void initiateCancel订单非未支付状态时抛CAN_NOT_CANCEL() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.PAY.getCode()));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.initiateCancel(buildCancelDto()));
+        assertEquals(BaseCode.CAN_NOT_CANCEL.getCode(), e.getCode());
+    }
+
+    @Test
+    void initiateCancel未支付订单走真实取消链路() {
+        Order order = buildOrder(OrderStatus.NO_PAY.getCode());
+        order.setOrderVersion(ProgramOrderVersion.V3_VERSION.getValue());
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(order);
+        when(orderTicketUserMapper.selectList(any(Wrapper.class))).thenReturn(buildOrderTicketUserList());
+        when(uidGenerator.getUid()).thenReturn(9L);
+        when(orderMapper.update(any(Order.class), any(Wrapper.class))).thenReturn(1);
+        when(orderTicketUserMapper.update(any(OrderTicketUser.class), any(Wrapper.class))).thenReturn(1);
+        when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(new SeatVo()));
+        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
+        assertTrue(orderService.initiateCancel(buildCancelDto()));
+        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
+    }
+
+    // ==================== 支付宝回调 alipayNotify ====================
+
+    private HttpServletRequest buildAlipayRequest(String body) {
+        CustomizeRequestWrapper request = mock(CustomizeRequestWrapper.class);
+        when(request.getRequestBody()).thenReturn(body);
+        return request;
+    }
+
+    @Test
+    void alipayNotify缺少订单号时返回failure() {
+        assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, orderService.alipayNotify(buildAlipayRequest("trade_no=xxx")));
+    }
+
+    @Test
+    void alipayNotify订单号格式非法时返回failure且不加锁() {
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=not-a-number"));
+        assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
+        verify(serviceLockTool, never()).getLock(any(), anyString(), any());
+    }
+
+    @Test
+    void alipayNotify取消订单对账数据为空时不退款返回failure() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(null));
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+        assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
+        verify(payClient, never()).refund(any(RefundDto.class));
+    }
+
+    @Test
+    void alipayNotify未取消订单对账数据为空时返回failure() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(null));
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+        assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
+        verify(orderServiceMock, never()).updateOrderRelatedData(any(), any());
+    }
+
+    @Test
+    void alipayNotify订单不存在时抛ORDER_NOT_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER)));
+        assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), e.getCode());
+    }
+
+    @Test
+    void alipayNotify取消订单对账成功且退款成功时更新为退款并返回success() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+        assertEquals(ALIPAY_NOTIFY_SUCCESS_RESULT, result);
+        verify(payClient).refund(any(RefundDto.class));
+        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
+    }
+
+    @Test
+    void alipayNotify取消订单退款失败时返回failure() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.error(500, "退款失败"));
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+        assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
+        verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
+    }
+
+    @Test
+    void alipayNotify取消订单对账失败时暂不退款返回failure() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.error(10000, "验签失败"));
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+        assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
+        verify(payClient, never()).refund(any(RefundDto.class));
+    }
+
+    @Test
+    void alipayNotify取消订单对账成功但支付未确认时返回failure() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult("wait");
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+        assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
+        verify(payClient, never()).refund(any(RefundDto.class));
+    }
+
+    @Test
+    void alipayNotify未取消订单对账成功且支付成功时触发状态流转() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+        assertEquals(ALIPAY_NOTIFY_SUCCESS_RESULT, result);
+        verify(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+    }
+
+    @Test
+    void alipayNotify对账失败时抛异常() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.error(10000, "验签失败"));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER)));
+        assertEquals(10000, e.getCode());
+    }
+
+    @Test
+    void alipayNotify未取消订单对账成功但支付未成功时返回支付结果() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult("wait");
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+        assertEquals("wait", result);
+        verify(orderServiceMock, never()).updateOrderRelatedData(any(), any());
+    }
+
+    // ==================== 微信回调 wxNotify ====================
+
+    private HttpServletRequest buildWxRequest() {
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getHeader(anyString())).thenReturn("header-value");
+        return request;
+    }
+
+    @Test
+    void wxNotify对账服务失败时返回FAIL() {
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.error(10000, "验签失败"));
+        String result = orderService.wxNotify(buildWxRequest());
+        assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+        verify(serviceLockTool, never()).getLock(any(), anyString(), any());
+    }
+
+    @Test
+    void wxNotify对账数据为空时返回FAIL() {
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(null));
+        String result = orderService.wxNotify(buildWxRequest());
+        assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+        verify(serviceLockTool, never()).getLock(any(), anyString(), any());
+    }
+
+    @Test
+    void wxNotify支付结果非成功时返回FAIL() {
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult("NOTPAY");
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        String result = orderService.wxNotify(buildWxRequest());
+        assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+    }
+
+    @Test
+    void wxNotify订单号格式非法时返回FAIL() {
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo("not-a-number");
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        String result = orderService.wxNotify(buildWxRequest());
+        assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+    }
+
+    @Test
+    void wxNotify订单不存在时抛ORDER_NOT_EXIST() {
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.wxNotify(buildWxRequest()));
+        assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), e.getCode());
+    }
+
+    @Test
+    void wxNotify取消订单退款成功时更新为退款并返回SUCCESS() {
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        String result = orderService.wxNotify(buildWxRequest());
+        assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
+        verify(payClient).refund(any(RefundDto.class));
+        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
+        verify(orderServiceMock, never()).updateOrderRelatedData(any(), any());
+    }
+
+    @Test
+    void wxNotify取消订单退款失败时返回FAIL() {
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.error(500, "退款失败"));
+        String result = orderService.wxNotify(buildWxRequest());
+        assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+        verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
+    }
+
+    @Test
+    void wxNotify未取消订单对账成功时触发支付状态流转并返回SUCCESS() {
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        String result = orderService.wxNotify(buildWxRequest());
+        assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
+        verify(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+    }
+
+    @Test
+    void wxNotify请求头与原始请求体透传给支付服务() {
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getHeader(Constant.WX_SIGNATURE_HEADER)).thenReturn("sig");
+        when(request.getHeader(Constant.WX_SERIAL_HEADER)).thenReturn("serial");
+        when(request.getHeader(Constant.WX_NONCE_HEADER)).thenReturn("nonce");
+        when(request.getHeader(Constant.WX_TIMESTAMP_HEADER)).thenReturn("ts");
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        orderService.wxNotify(request);
+        ArgumentCaptor<NotifyDto> notifyCaptor = ArgumentCaptor.forClass(NotifyDto.class);
+        verify(payClient).notify(notifyCaptor.capture());
+        assertEquals(PayChannel.WX.getValue(), notifyCaptor.getValue().getChannel());
+        assertEquals("sig", notifyCaptor.getValue().getParams().get(Constant.WX_SIGNATURE_HEADER));
+    }
+
+    // ==================== MQ 创建 createMq ====================
+
+    private OrderCreateMq buildCreateMq() {
+        OrderCreateMq orderCreateMq = new OrderCreateMq();
+        orderCreateMq.setIdentifierId(IDENTIFIER_ID);
+        orderCreateMq.setOrderNumber(ORDER_NUMBER);
+        orderCreateMq.setProgramId(PROGRAM_ID);
+        orderCreateMq.setUserId(USER_ID);
+        orderCreateMq.setOrderPrice(new BigDecimal("100.00"));
+        orderCreateMq.setOrderVersion(ProgramOrderVersion.V4_VERSION.getValue());
+        OrderTicketUserCreateDto ticketUserCreateDto = new OrderTicketUserCreateDto();
+        ticketUserCreateDto.setSeatId(SEAT_ID);
+        ticketUserCreateDto.setTicketCategoryId(TICKET_CATEGORY_ID);
+        ticketUserCreateDto.setTicketUserId(TICKET_USER_ID);
+        ticketUserCreateDto.setOrderPrice(new BigDecimal("100.00"));
+        orderCreateMq.setOrderTicketUserCreateDtoList(List.of(ticketUserCreateDto));
+        return orderCreateMq;
+    }
+
+    @Test
+    void createMq节目服务锁定失败时丢弃订单入队并抛异常() {
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.error(7777, "锁定失败"));
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.createMq(buildCreateMq()));
+        assertEquals(7777, e.getCode());
+        verify(redisCache).leftPushForList(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER, PROGRAM_ID)),
+                any(com.ticketflow.domain.DiscardOrder.class));
+    }
+
+    @Test
+    void createMq锁定成功时创建订单并写入MQ订单缓存() {
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
+        String orderNumber = orderService.createMq(buildCreateMq());
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+        verify(orderMapper).insert(any(Order.class));
+        verify(redisCache).set(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ, ORDER_NUMBER)),
+                eq(String.valueOf(ORDER_NUMBER)), eq(1L), eq(java.util.concurrent.TimeUnit.MINUTES));
+    }
+
+    // ==================== 查询 ====================
+
+    @Test
+    void get订单不存在时抛ORDER_NOT_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        OrderGetDto orderGetDto = new OrderGetDto();
+        orderGetDto.setOrderNumber(ORDER_NUMBER);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class, () -> orderService.get(orderGetDto));
+        assertEquals(BaseCode.ORDER_NOT_EXIST.getCode(), e.getCode());
+    }
+
+    @Test
+    void get购票人订单为空时抛TICKET_USER_ORDER_NOT_EXIST() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.PAY.getCode()));
+        when(orderTicketUserMapper.selectList(any(Wrapper.class))).thenReturn(new ArrayList<>());
+        OrderGetDto orderGetDto = new OrderGetDto();
+        orderGetDto.setOrderNumber(ORDER_NUMBER);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class, () -> orderService.get(orderGetDto));
+        assertEquals(BaseCode.TICKET_USER_ORDER_NOT_EXIST.getCode(), e.getCode());
+    }
+
+    @Test
+    void get正常时组装座位信息与用户购票人信息() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.PAY.getCode()));
+        OrderTicketUser ticketUser1 = new OrderTicketUser();
+        ticketUser1.setOrderNumber(ORDER_NUMBER);
+        ticketUser1.setTicketCategoryId(TICKET_CATEGORY_ID);
+        ticketUser1.setSeatId(SEAT_ID);
+        ticketUser1.setTicketUserId(TICKET_USER_ID);
+        ticketUser1.setOrderPrice(new BigDecimal("100.00"));
+        ticketUser1.setSeatInfo("A排1座");
+        OrderTicketUser ticketUser2 = new OrderTicketUser();
+        ticketUser2.setOrderNumber(ORDER_NUMBER);
+        ticketUser2.setTicketCategoryId(TICKET_CATEGORY_ID);
+        ticketUser2.setSeatId(SEAT_ID + 1);
+        ticketUser2.setTicketUserId(TICKET_USER_ID + 1);
+        ticketUser2.setOrderPrice(new BigDecimal("100.00"));
+        ticketUser2.setSeatInfo("A排2座");
+        when(orderTicketUserMapper.selectList(any(Wrapper.class))).thenReturn(List.of(ticketUser1, ticketUser2));
+
+        UserGetAndTicketUserListVo userVo = new UserGetAndTicketUserListVo();
+        UserVo userVoInfo = new UserVo();
+        userVoInfo.setId(USER_ID);
+        userVo.setUserVo(userVoInfo);
+        TicketUserVo ticketUserVo1 = new TicketUserVo();
+        ticketUserVo1.setId(TICKET_USER_ID);
+        TicketUserVo ticketUserVo2 = new TicketUserVo();
+        ticketUserVo2.setId(TICKET_USER_ID + 1);
+        userVo.setTicketUserVoList(List.of(ticketUserVo1, ticketUserVo2));
+        when(userClient.getUserAndTicketUserList(any(UserGetAndTicketUserListDto.class))).thenReturn(ApiResponse.ok(userVo));
+
+        OrderGetDto orderGetDto = new OrderGetDto();
+        orderGetDto.setOrderNumber(ORDER_NUMBER);
+        OrderGetVo vo = orderService.get(orderGetDto);
+        assertNotNull(vo.getOrderTicketInfoVoList());
+        assertEquals(1, vo.getOrderTicketInfoVoList().size());
+        OrderTicketInfoVo infoVo = vo.getOrderTicketInfoVoList().get(0);
+        assertEquals("A排1座,A排2座", infoVo.getSeatInfo());
+        assertEquals(2, infoVo.getQuantity());
+        assertEquals(new BigDecimal("200.00"), infoVo.getRelPrice());
+        assertNotNull(vo.getUserAndTicketUserInfoVo());
+        assertEquals(USER_ID, vo.getUserAndTicketUserInfoVo().getUserInfoVo().getId());
+        assertEquals(2, vo.getUserAndTicketUserInfoVo().getTicketUserInfoVoList().size());
+    }
+
+    @Test
+    void get用户服务返回失败时抛异常() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.PAY.getCode()));
+        when(orderTicketUserMapper.selectList(any(Wrapper.class))).thenReturn(buildOrderTicketUserList());
+        when(userClient.getUserAndTicketUserList(any(UserGetAndTicketUserListDto.class))).thenReturn(ApiResponse.error(5000, "用户服务失败"));
+        OrderGetDto orderGetDto = new OrderGetDto();
+        orderGetDto.setOrderNumber(ORDER_NUMBER);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class, () -> orderService.get(orderGetDto));
+        assertEquals(5000, e.getCode());
+    }
+
+    @Test
+    void get用户服务数据为空时抛RPC_RESULT_DATA_EMPTY() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.PAY.getCode()));
+        when(orderTicketUserMapper.selectList(any(Wrapper.class))).thenReturn(buildOrderTicketUserList());
+        when(userClient.getUserAndTicketUserList(any(UserGetAndTicketUserListDto.class))).thenReturn(ApiResponse.ok(null));
+        OrderGetDto orderGetDto = new OrderGetDto();
+        orderGetDto.setOrderNumber(ORDER_NUMBER);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class, () -> orderService.get(orderGetDto));
+        assertEquals(BaseCode.RPC_RESULT_DATA_EMPTY.getCode(), e.getCode());
+    }
+
+    @Test
+    void get购票人缺失时过滤空条目正常返回() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.PAY.getCode()));
+        OrderTicketUser ticketUser1 = new OrderTicketUser();
+        ticketUser1.setOrderNumber(ORDER_NUMBER);
+        ticketUser1.setTicketCategoryId(TICKET_CATEGORY_ID);
+        ticketUser1.setSeatId(SEAT_ID);
+        ticketUser1.setTicketUserId(TICKET_USER_ID);
+        ticketUser1.setOrderPrice(new BigDecimal("100.00"));
+        OrderTicketUser ticketUser2 = new OrderTicketUser();
+        ticketUser2.setOrderNumber(ORDER_NUMBER);
+        ticketUser2.setTicketCategoryId(TICKET_CATEGORY_ID);
+        ticketUser2.setSeatId(SEAT_ID + 1);
+        ticketUser2.setTicketUserId(TICKET_USER_ID + 1);
+        ticketUser2.setOrderPrice(new BigDecimal("100.00"));
+        when(orderTicketUserMapper.selectList(any(Wrapper.class))).thenReturn(List.of(ticketUser1, ticketUser2));
+
+        UserGetAndTicketUserListVo userVo = new UserGetAndTicketUserListVo();
+        UserVo userVoInfo = new UserVo();
+        userVoInfo.setId(USER_ID);
+        userVo.setUserVo(userVoInfo);
+        TicketUserVo ticketUserVo1 = new TicketUserVo();
+        ticketUserVo1.setId(TICKET_USER_ID);
+        userVo.setTicketUserVoList(List.of(ticketUserVo1));
+        when(userClient.getUserAndTicketUserList(any(UserGetAndTicketUserListDto.class))).thenReturn(ApiResponse.ok(userVo));
+
+        OrderGetDto orderGetDto = new OrderGetDto();
+        orderGetDto.setOrderNumber(ORDER_NUMBER);
+        OrderGetVo vo = orderService.get(orderGetDto);
+        assertNotNull(vo.getUserAndTicketUserInfoVo());
+        assertEquals(1, vo.getUserAndTicketUserInfoVo().getTicketUserInfoVoList().size());
+    }
+
+    @Test
+    void selectList订单列表为空时返回空列表且不查询聚合数据() {
+        OrderListDto orderListDto = new OrderListDto();
+        orderListDto.setUserId(USER_ID);
+        when(orderMapper.selectList(any(Wrapper.class))).thenReturn(new ArrayList<>());
+        List<OrderListVo> result = orderService.selectList(orderListDto);
+        assertTrue(result.isEmpty());
+        verify(orderTicketUserMapper, never()).selectOrderTicketUserAggregate(anyList());
+    }
+
+    @Test
+    void selectList正常时填充购票人数() {
+        OrderListDto orderListDto = new OrderListDto();
+        orderListDto.setUserId(USER_ID);
+        Order order = buildOrder(OrderStatus.NO_PAY.getCode());
+        when(orderMapper.selectList(any(Wrapper.class))).thenReturn(List.of(order));
+        OrderTicketUserAggregate aggregate = new OrderTicketUserAggregate();
+        aggregate.setOrderNumber(ORDER_NUMBER);
+        aggregate.setOrderTicketUserCount(2);
+        when(orderTicketUserMapper.selectOrderTicketUserAggregate(anyList())).thenReturn(List.of(aggregate));
+        List<OrderListVo> result = orderService.selectList(orderListDto);
+        assertEquals(1, result.size());
+        assertEquals(2, result.get(0).getTicketCount());
+    }
+
+    @Test
+    void simpleList参数都为空时抛USER_ID_AND_ORDER_NUMBER_NOT_EXIST() {
+        OrderSimpleListDto orderSimpleListDto = new OrderSimpleListDto();
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.simpleList(orderSimpleListDto));
+        assertEquals(BaseCode.USER_ID_AND_ORDER_NUMBER_NOT_EXIST.getCode(), e.getCode());
+    }
+
+    @Test
+    void simpleList正常查询() {
+        OrderSimpleListDto orderSimpleListDto = new OrderSimpleListDto();
+        orderSimpleListDto.setOrderNumber(ORDER_NUMBER);
+        when(orderMapper.selectList(any(Wrapper.class))).thenReturn(List.of(buildOrder(OrderStatus.NO_PAY.getCode())));
+        List<OrderListVo> result = orderService.simpleList(orderSimpleListDto);
+        assertEquals(1, result.size());
+        assertEquals(ORDER_NUMBER, result.get(0).getOrderNumber());
+    }
+
+    @Test
+    void accountOrderCount返回统计数量() {
+        AccountOrderCountDto accountOrderCountDto = new AccountOrderCountDto();
+        accountOrderCountDto.setUserId(USER_ID);
+        accountOrderCountDto.setProgramId(PROGRAM_ID);
+        when(orderMapper.accountOrderCount(USER_ID, PROGRAM_ID)).thenReturn(3);
+        AccountOrderCountVo vo = orderService.accountOrderCount(accountOrderCountDto);
+        assertEquals(3, vo.getCount());
+    }
+
+    @Test
+    void getCache返回MQ订单缓存值() {
+        OrderGetDto orderGetDto = new OrderGetDto();
+        orderGetDto.setOrderNumber(ORDER_NUMBER);
+        when(redisCache.get(any(RedisKeyBuild.class), eq(String.class))).thenReturn(String.valueOf(ORDER_NUMBER));
+        String result = orderService.getCache(orderGetDto);
+        assertEquals(String.valueOf(ORDER_NUMBER), result);
+        verify(redisCache).get(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ, ORDER_NUMBER)), eq(String.class));
     }
 }

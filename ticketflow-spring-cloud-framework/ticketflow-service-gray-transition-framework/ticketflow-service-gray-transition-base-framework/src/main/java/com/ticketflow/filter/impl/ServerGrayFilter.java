@@ -86,15 +86,17 @@ public class ServerGrayFilter extends AbstractServerFilter {
                             .filter(CollectionUtil::isNotEmpty)
                             .map(metadata -> metadata.get(GRAY_PARAMETER))
                             .orElse(GRAY_FLAG_FALSE);
-                    if (StringUtil.isEmpty(balanceGray) || Objects.isNull(map.get(balanceGray.toLowerCase()))) {
+                    if (StringUtil.isEmpty(balanceGray)) {
                         balanceGray = GRAY_FLAG_FALSE;
                     }
-                    map.put(balanceGray,balanceGray);
+                    map.put(balanceGray.toLowerCase(), balanceGray);
                 }
                 if(Objects.isNull(map.get(GRAY_FLAG_TRUE))) {
                     result = true;
                 }
             }
+        }catch (TicketFlowFrameException e) {
+            throw e;
         }catch (Exception e) {
             result = false;
             log.error("CustomAwarePredicate#apply error",e);
