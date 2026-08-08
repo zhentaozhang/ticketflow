@@ -64,9 +64,6 @@ public class OrderTaskService {
     private OrderTicketUserRecordMapper orderTicketUserRecordMapper;
     
     @Autowired
-    private OrderTicketUserRecordService orderTicketUserRecordService;
-    
-    @Autowired
     private ProgramClient programClient;
     
     @Autowired
@@ -202,6 +199,17 @@ public class OrderTaskService {
                 throw new TicketFlowFrameException(programApiResponse);
             }
             List<TicketCategoryDetailVo> ticketCategoryDetailVoList = programApiResponse.getData();
+            if (CollectionUtil.isEmpty(ticketCategoryDetailVoList)) {
+                throw new TicketFlowFrameException(BaseCode.RPC_RESULT_DATA_EMPTY);
+            }
+            // 校验节目服务返回的票档必须覆盖所有补偿涉及的票档，缺失说明数据不一致，宁可失败报警也不写入错误补偿数据
+            Set<Long> returnedCategoryIds = ticketCategoryDetailVoList.stream()
+                    .map(TicketCategoryDetailVo::getId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+            if (!returnedCategoryIds.containsAll(ticketCategoryIdSet)) {
+                throw new TicketFlowFrameException(BaseCode.RPC_RESULT_DATA_EMPTY);
+            }
             
             // 1.3 构建票档余票数量Map
             Map<Long, Long> ticketCategoryRemainNumberMap = ticketCategoryDetailVoList.stream()

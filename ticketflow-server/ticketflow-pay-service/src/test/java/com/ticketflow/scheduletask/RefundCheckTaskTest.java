@@ -75,6 +75,39 @@ class RefundCheckTaskTest {
         return payBill;
     }
 
+    private RefundBill confirmedBill() {
+        RefundBill bill = new RefundBill();
+        bill.setId(1L);
+        bill.setPayBillId(100L);
+        bill.setOutOrderNo("20260804000000000001");
+        bill.setOutRefundNo("1000");
+        bill.setRefundAmount(new BigDecimal("100.00"));
+        bill.setRefundStatus(2);
+        return bill;
+    }
+
+    private RefundBill confirmed60() {
+        RefundBill bill = new RefundBill();
+        bill.setId(2L);
+        bill.setPayBillId(100L);
+        bill.setOutOrderNo("20260804000000000001");
+        bill.setOutRefundNo("2000");
+        bill.setRefundAmount(new BigDecimal("60.00"));
+        bill.setRefundStatus(2);
+        return bill;
+    }
+
+    private RefundBill processing40() {
+        RefundBill bill = new RefundBill();
+        bill.setId(3L);
+        bill.setPayBillId(100L);
+        bill.setOutOrderNo("20260804000000000001");
+        bill.setOutRefundNo("3000");
+        bill.setRefundAmount(new BigDecimal("40.00"));
+        bill.setRefundStatus(1);
+        return bill;
+    }
+
     @Test
     void 无处理中退款单_不查渠道() {
         when(refundBillMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(List.of());
@@ -86,7 +119,9 @@ class RefundCheckTaskTest {
 
     @Test
     void 渠道确认成功且累计达标_翻转账单为已退款() {
-        when(refundBillMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(List.of(processingBill()));
+        when(refundBillMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(processingBill()))
+                .thenReturn(List.of(confirmedBill()));
         when(payBillMapper.selectById(100L)).thenReturn(payBill());
         when(payStrategyHandler.queryRefund(anyString(), anyString()))
                 .thenReturn(new RefundResult(true, "SUCCESS", "SUCCESS", 2));
@@ -139,6 +174,23 @@ class RefundCheckTaskTest {
 
         refundCheckTask.processPendingRefunds();
 
+        verify(refundBillMapper).updateById(any(RefundBill.class));
+        verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+    }
+
+    @Test
+    void 渠道确认成功但已确认累计含在途未达全额_不翻转账单() {
+        when(refundBillMapper.selectList(any(LambdaQueryWrapper.class)))
+                .thenReturn(List.of(processingBill()))
+                .thenReturn(List.of(confirmed60(), processing40()));
+        when(payBillMapper.selectById(100L)).thenReturn(payBill());
+        when(payStrategyHandler.queryRefund(anyString(), anyString()))
+                .thenReturn(new RefundResult(true, "SUCCESS", "SUCCESS", 2));
+
+        refundCheckTask.processPendingRefunds();
+
+        // 本次确认 60，存量含在途 40：已确认累计 60 < 100，不翻转账单
+        // （在途单可能失败，账单保持 PAY 可继续退，避免少退）
         verify(refundBillMapper).updateById(any(RefundBill.class));
         verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
     }

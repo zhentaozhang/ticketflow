@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * 退款状态确认定时任务（默认每5分钟）。
@@ -104,14 +105,18 @@ public class RefundCheckTask {
             updateRefundBill.setRefundTime(DateUtils.now());
             refundBillMapper.updateById(updateRefundBill);
             // 累计已退金额只统计处理中/已成功的退款单，排除退款失败终态单
-            BigDecimal refundedAmount = refundBillMapper.selectList(
+            // 已确认到账累计（不含处理中单）：在途单最终可能失败，
+            // 按含在途累计判断会导致在途单失败后账单已置 REFUND 无法继续退款，造成少退
+            BigDecimal confirmedRefundedAmount = refundBillMapper.selectList(
                             Wrappers.lambdaQuery(RefundBill.class)
                                     .eq(RefundBill::getOutOrderNo, payBill.getOutOrderNo())
                                     .eq(RefundBill::getStatus, 1)
                                     .in(RefundBill::getRefundStatus, REFUND_STATUS_PROCESSING, REFUND_STATUS_SUCCESS))
-                    .stream().map(RefundBill::getRefundAmount)
+                    .stream()
+                    .filter(item -> Objects.equals(item.getRefundStatus(), REFUND_STATUS_SUCCESS))
+                    .map(RefundBill::getRefundAmount)
                     .reduce(BigDecimal.ZERO, BigDecimal::add);
-            if (refundedAmount.compareTo(payBill.getPayAmount()) >= 0) {
+            if (confirmedRefundedAmount.compareTo(payBill.getPayAmount()) >= 0) {
                 PayBill updatePayBill = new PayBill();
                 updatePayBill.setPayBillStatus(PayBillStatus.REFUND.getCode());
                 payBillMapper.update(updatePayBill, Wrappers.lambdaUpdate(PayBill.class)
