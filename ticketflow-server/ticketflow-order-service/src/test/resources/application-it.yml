@@ -3,9 +3,10 @@ spring:
     nacos:
       discovery:
         enabled: false
-  redis:
-    host: localhost
-    port: 16379
+  data:
+    redis:
+      host: localhost
+      port: 16379
 
 jasypt:
   encryptor:
