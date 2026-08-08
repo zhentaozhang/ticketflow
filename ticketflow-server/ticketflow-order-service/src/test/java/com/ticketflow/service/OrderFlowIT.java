@@ -55,7 +55,7 @@ class OrderFlowIT {
             .withPassword("root");
 
     static {
-        // shardingsphere-order-local.yaml（src/test/resources）静态指向 13306，故固定宿主端口
+        // shardingsphere-order-it.yaml（src/test/resources）静态指向 13306，故固定宿主端口
         mysql.setPortBindings(List.of(MYSQL_FIXED_PORT + ":3306"));
     }
 
@@ -68,6 +68,10 @@ class OrderFlowIT {
 
     @DynamicPropertySource
     static void dynamicProps(DynamicPropertyRegistry registry) {
+        // application.yml 中 ${spring.profiles.active} 占位符会展开为 local（property 值），
+        // 导致默认加载 local yaml（3306/本地开发），必须显式指向 it yaml（13306/testcontainers）
+        registry.add("spring.datasource.url",
+                () -> "jdbc:shardingsphere:classpath:shardingsphere-order-it.yaml");
         // Boot 3.x 前缀 spring.data.redis.*（Redisson 与 RedisTemplate 均读取）
         registry.add("spring.data.redis.host", redis::getHost);
         registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
