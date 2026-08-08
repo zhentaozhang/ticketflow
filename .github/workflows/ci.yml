@@ -40,4 +40,4 @@ jobs:
           cache: maven
 
       - name: Run integration tests
-        run: mvn -B verify -pl ticketflow-server/ticketflow-order-service -am
+        run: mvn -B verify -pl ticketflow-server/ticketflow-order-service,ticketflow-server/ticketflow-program-service -am
