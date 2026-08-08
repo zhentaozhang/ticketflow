@@ -524,6 +524,7 @@ class ProgramOrderServiceTest {
             when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
                     .thenReturn(remainMap);
             when(uidGenerator.getUid()).thenReturn(888L, 12345L);
+            when(uidGenerator.getOrderNumber(USER_ID)).thenReturn(20240999L);
 
             List<PurchaseSeat> purchaseSeats = Arrays.asList(
                     createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID),
@@ -543,6 +544,38 @@ class ProgramOrderServiceTest {
 
             assertEquals("2024001", result);
             verify(delayOrderCancelSend).sendMessage(any(DelayOrderCancelDto.class));
+
+            // 参数组装：主单字段、总价、逐购票人座位与票价信息
+            ArgumentCaptor<OrderCreateDto> orderCaptor = ArgumentCaptor.forClass(OrderCreateDto.class);
+            verify(orderClient).create(orderCaptor.capture());
+            OrderCreateDto captured = orderCaptor.getValue();
+            assertEquals(20240999L, captured.getOrderNumber());
+            assertEquals(PROGRAM_ID, captured.getProgramId());
+            assertEquals(USER_ID, captured.getUserId());
+            assertEquals("颜人中「MOMENT\u207F」演唱会-北京站", captured.getProgramTitle());
+            assertEquals("华熙LIVE", captured.getProgramPlace());
+            assertEquals("https://picsum.photos/seed/yanrenzhong/800/400", captured.getProgramItemPicture());
+            assertEquals(1, captured.getProgramPermitChooseSeat());
+            assertEquals(new BigDecimal("200"), captured.getOrderPrice());
+            assertEquals(ProgramOrderVersion.V1_VERSION.getValue(), captured.getOrderVersion());
+            assertEquals(2, captured.getOrderTicketUserCreateDtoList().size());
+
+            OrderTicketUserCreateDto firstTicketUser = captured.getOrderTicketUserCreateDtoList().get(0);
+            assertEquals(20240999L, firstTicketUser.getOrderNumber());
+            assertEquals(PROGRAM_ID, firstTicketUser.getProgramId());
+            assertEquals(USER_ID, firstTicketUser.getUserId());
+            assertEquals(2000L, firstTicketUser.getTicketUserId());
+            assertEquals(50L, firstTicketUser.getSeatId());
+            assertEquals("1排50列", firstTicketUser.getSeatInfo());
+            assertEquals(TICKET_CATEGORY_ID, firstTicketUser.getTicketCategoryId());
+            assertEquals(new BigDecimal("100"), firstTicketUser.getOrderPrice());
+
+            OrderTicketUserCreateDto secondTicketUser = captured.getOrderTicketUserCreateDtoList().get(1);
+            assertEquals(2001L, secondTicketUser.getTicketUserId());
+            assertEquals(51L, secondTicketUser.getSeatId());
+            assertEquals("1排51列", secondTicketUser.getSeatInfo());
+            assertEquals(TICKET_CATEGORY_ID, secondTicketUser.getTicketCategoryId());
+            assertEquals(new BigDecimal("100"), secondTicketUser.getOrderPrice());
         }
 
         @Test
