@@ -49,7 +49,17 @@ except:
 
 # HTTP 请求指标 (Spring Boot 3.x Micrometer)；sum 汇总所有端点（否则 result[0] 常命中 /actuator）
 query_and_append "sum(rate(http_server_requests_seconds_count{application='program-service'}[${RATE_WINDOW}]))" "program_service_qps"
-query_and_append "sum(rate(http_server_requests_seconds_count{application='order-service'}[${RATE_WINDOW}]))" "order_service_qps"
+# v4 走 mq 异步路径，order-service 无 http 流量，qps 恒为 0，对比不公平 → 标注 N/A 不参与对比
+if [[ "$VERSION" == v4-* ]]; then
+  if [ "$FIRST" = true ]; then
+    FIRST=false
+  else
+    echo "," >> "$OUTPUT_FILE"
+  fi
+  echo "  \"order_service_qps\": \"N/A (mq 异步路径)\"" >> "$OUTPUT_FILE"
+else
+  query_and_append "sum(rate(http_server_requests_seconds_count{application='order-service'}[${RATE_WINDOW}]))" "order_service_qps"
+fi
 
 # JVM 指标
 query_and_append "rate(jvm_gc_pause_seconds_sum[${RATE_WINDOW}])" "gc_pause_seconds_total"
