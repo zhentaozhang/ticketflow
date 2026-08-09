@@ -12,6 +12,11 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESULT_DIR="$PROJECT_DIR/results"
 mkdir -p "$RESULT_DIR"
 
+# 从版本标签（如 v4-c30-d20）解析压测时长，rate 窗口覆盖整个压测期（含 ramp）
+DURATION=$(echo "$VERSION" | sed -n 's/.*-d\([0-9]*\).*/\1/p')
+[ -z "$DURATION" ] && DURATION=30
+RATE_WINDOW=$((DURATION + 30))s
+
 OUTPUT_FILE="$RESULT_DIR/metrics-${VERSION}-${TIMESTAMP}.json"
 PROMETHEUS="http://127.0.0.1:9090"
 
@@ -42,12 +47,12 @@ except:
   echo "  \"$LABEL\": \"$RESULT\"" >> "$OUTPUT_FILE"
 }
 
-# HTTP 请求指标 (Spring Boot 3.x Micrometer)
-query_and_append "rate(http_server_requests_seconds_count{application='program-service'}[30s])" "program_service_qps"
-query_and_append "rate(http_server_requests_seconds_count{application='order-service'}[30s])" "order_service_qps"
+# HTTP 请求指标 (Spring Boot 3.x Micrometer)；sum 汇总所有端点（否则 result[0] 常命中 /actuator）
+query_and_append "sum(rate(http_server_requests_seconds_count{application='program-service'}[${RATE_WINDOW}]))" "program_service_qps"
+query_and_append "sum(rate(http_server_requests_seconds_count{application='order-service'}[${RATE_WINDOW}]))" "order_service_qps"
 
 # JVM 指标
-query_and_append "rate(jvm_gc_pause_seconds_sum[30s])" "gc_pause_seconds_total"
+query_and_append "rate(jvm_gc_pause_seconds_sum[${RATE_WINDOW}])" "gc_pause_seconds_total"
 query_and_append "jvm_memory_used_bytes{area='heap'}" "heap_used_bytes"
 query_and_append "jvm_threads_live_threads" "live_threads"
 

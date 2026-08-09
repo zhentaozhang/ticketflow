@@ -1,8 +1,12 @@
 -- =============================================
 -- 压测专用测试数据
 -- 在 docker MySQL 中通过 docker exec 执行（绕过 ShardingSphere）
--- 目标：创建一个专用压测节目 + 票档 + 100个用户
+-- 目标：创建一个专用压测节目 + 票档 + 5000个用户 + 120000个座位
 -- =============================================
+
+-- MySQL 8.0 递归 CTE 默认迭代上限 1000；生成 5000 用户需 1250 次迭代，必须调大
+-- （SET SESSION 在同一连接内生效；docker exec 单连接执行本文件，全部语句均受用）
+SET SESSION cte_max_recursion_depth = 20000;
 
 -- ========== 节目数据 ==========
 -- program_id=9999 → id%2=1 → ds_1 (ticketflow_program_1)
@@ -58,7 +62,7 @@ VALUES
 -- ========== 用户数据 ==========
 -- d_user 分片: id % 2 → ds, (id/2) % 2 → table
 -- d_ticket_user 分片: user_id % 2 → ds, (user_id/2) % 2 → table
--- 用 MySQL 8.0 的递归 CTE 生成 100 个用户
+-- 用 MySQL 8.0 的递归 CTE 生成 5000 个用户（1-5000，各分片 1250 个）
 
 -- 5. 插入用户（均匀分布到 4 个分片）
 -- ticketflow_user_0.d_user_0  ← id%2=0, (id/2)%2=0  → id=4,8,12,...
@@ -67,22 +71,22 @@ VALUES
 -- ticketflow_user_1.d_user_1  ← id%2=1, (id/2)%2=1  → id=3,7,11,...
 
 INSERT IGNORE INTO `ticketflow_user_0`.`d_user_0` (`id`, `name`, `mobile`, `password`, `create_time`, `edit_time`, `status`)
-WITH RECURSIVE seq(n) AS (SELECT 4 UNION ALL SELECT n+4 FROM seq WHERE n < 100)
+WITH RECURSIVE seq(n) AS (SELECT 4 UNION ALL SELECT n+4 FROM seq WHERE n < 5000)
 SELECT n, CONCAT('benchmark_user_', n), CONCAT('1380000', LPAD(n, 4, '0')),
        'e10adc3949ba59abbe56e057f20f883e', NOW(), NOW(), 1 FROM seq;
 
 INSERT IGNORE INTO `ticketflow_user_0`.`d_user_1` (`id`, `name`, `mobile`, `password`, `create_time`, `edit_time`, `status`)
-WITH RECURSIVE seq(n) AS (SELECT 2 UNION ALL SELECT n+4 FROM seq WHERE n < 100)
+WITH RECURSIVE seq(n) AS (SELECT 2 UNION ALL SELECT n+4 FROM seq WHERE n < 4998)
 SELECT n, CONCAT('benchmark_user_', n), CONCAT('1380000', LPAD(n, 4, '0')),
        'e10adc3949ba59abbe56e057f20f883e', NOW(), NOW(), 1 FROM seq;
 
 INSERT IGNORE INTO `ticketflow_user_1`.`d_user_0` (`id`, `name`, `mobile`, `password`, `create_time`, `edit_time`, `status`)
-WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+4 FROM seq WHERE n < 100)
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+4 FROM seq WHERE n < 4997)
 SELECT n, CONCAT('benchmark_user_', n), CONCAT('1380000', LPAD(n, 4, '0')),
        'e10adc3949ba59abbe56e057f20f883e', NOW(), NOW(), 1 FROM seq;
 
 INSERT IGNORE INTO `ticketflow_user_1`.`d_user_1` (`id`, `name`, `mobile`, `password`, `create_time`, `edit_time`, `status`)
-WITH RECURSIVE seq(n) AS (SELECT 3 UNION ALL SELECT n+4 FROM seq WHERE n < 100)
+WITH RECURSIVE seq(n) AS (SELECT 3 UNION ALL SELECT n+4 FROM seq WHERE n < 4999)
 SELECT n, CONCAT('benchmark_user_', n), CONCAT('1380000', LPAD(n, 4, '0')),
        'e10adc3949ba59abbe56e057f20f883e', NOW(), NOW(), 1 FROM seq;
 
@@ -102,3 +106,53 @@ FROM `ticketflow_user_1`.`d_user_0` WHERE name LIKE 'benchmark%';
 INSERT IGNORE INTO `ticketflow_user_1`.`d_ticket_user_1` (`id`, `user_id`, `rel_name`, `id_type`, `id_number`, `create_time`, `edit_time`, `status`)
 SELECT id, id, name, 1, CONCAT('11010119900101', LPAD(id, 4, '0')), NOW(), NOW(), 1
 FROM `ticketflow_user_1`.`d_user_1` WHERE name LIKE 'benchmark%';
+
+
+-- ========== 座位数据 ==========
+-- d_seat 分片: program_id%2=1 → ds_1, (program_id/2)%2=1 → d_seat_1（program 9999 → ticketflow_program_1.d_seat_1）
+-- 数量 = 票档余票数（901-905 各 20000 = 200排×100列；906-907 各 10000 = 100排×100列；总计 120000）
+-- matchAdjacentSeats 要求同排(row_code 相同)且列连续(col_code 差 1) → 列号必须连续 1-100
+-- 幂等：无业务唯一键，INSERT IGNORE 无效 → 先删后插
+DELETE FROM `ticketflow_program_1`.`d_seat_1` WHERE program_id = 9999;
+
+INSERT INTO `ticketflow_program_1`.`d_seat_1`
+  (`program_id`, `ticket_category_id`, `row_code`, `col_code`, `seat_type`, `price`, `sell_status`, `create_time`, `edit_time`, `status`)
+WITH RECURSIVE seat_rows(r) AS (SELECT 1 UNION ALL SELECT r+1 FROM seat_rows WHERE r < 200),
+     seat_cols(c) AS (SELECT 1 UNION ALL SELECT c+1 FROM seat_cols WHERE c < 100)
+SELECT 9999, 901, r, c, 1, 199, 1, NOW(), NOW(), 1 FROM seat_rows CROSS JOIN seat_cols;
+
+INSERT INTO `ticketflow_program_1`.`d_seat_1`
+  (`program_id`, `ticket_category_id`, `row_code`, `col_code`, `seat_type`, `price`, `sell_status`, `create_time`, `edit_time`, `status`)
+WITH RECURSIVE seat_rows(r) AS (SELECT 1 UNION ALL SELECT r+1 FROM seat_rows WHERE r < 200),
+     seat_cols(c) AS (SELECT 1 UNION ALL SELECT c+1 FROM seat_cols WHERE c < 100)
+SELECT 9999, 902, r, c, 1, 399, 1, NOW(), NOW(), 1 FROM seat_rows CROSS JOIN seat_cols;
+
+INSERT INTO `ticketflow_program_1`.`d_seat_1`
+  (`program_id`, `ticket_category_id`, `row_code`, `col_code`, `seat_type`, `price`, `sell_status`, `create_time`, `edit_time`, `status`)
+WITH RECURSIVE seat_rows(r) AS (SELECT 1 UNION ALL SELECT r+1 FROM seat_rows WHERE r < 200),
+     seat_cols(c) AS (SELECT 1 UNION ALL SELECT c+1 FROM seat_cols WHERE c < 100)
+SELECT 9999, 903, r, c, 1, 599, 1, NOW(), NOW(), 1 FROM seat_rows CROSS JOIN seat_cols;
+
+INSERT INTO `ticketflow_program_1`.`d_seat_1`
+  (`program_id`, `ticket_category_id`, `row_code`, `col_code`, `seat_type`, `price`, `sell_status`, `create_time`, `edit_time`, `status`)
+WITH RECURSIVE seat_rows(r) AS (SELECT 1 UNION ALL SELECT r+1 FROM seat_rows WHERE r < 200),
+     seat_cols(c) AS (SELECT 1 UNION ALL SELECT c+1 FROM seat_cols WHERE c < 100)
+SELECT 9999, 904, r, c, 1, 899, 1, NOW(), NOW(), 1 FROM seat_rows CROSS JOIN seat_cols;
+
+INSERT INTO `ticketflow_program_1`.`d_seat_1`
+  (`program_id`, `ticket_category_id`, `row_code`, `col_code`, `seat_type`, `price`, `sell_status`, `create_time`, `edit_time`, `status`)
+WITH RECURSIVE seat_rows(r) AS (SELECT 1 UNION ALL SELECT r+1 FROM seat_rows WHERE r < 200),
+     seat_cols(c) AS (SELECT 1 UNION ALL SELECT c+1 FROM seat_cols WHERE c < 100)
+SELECT 9999, 905, r, c, 1, 1299, 1, NOW(), NOW(), 1 FROM seat_rows CROSS JOIN seat_cols;
+
+INSERT INTO `ticketflow_program_1`.`d_seat_1`
+  (`program_id`, `ticket_category_id`, `row_code`, `col_code`, `seat_type`, `price`, `sell_status`, `create_time`, `edit_time`, `status`)
+WITH RECURSIVE seat_rows(r) AS (SELECT 1 UNION ALL SELECT r+1 FROM seat_rows WHERE r < 100),
+     seat_cols(c) AS (SELECT 1 UNION ALL SELECT c+1 FROM seat_cols WHERE c < 100)
+SELECT 9999, 906, r, c, 1, 1999, 1, NOW(), NOW(), 1 FROM seat_rows CROSS JOIN seat_cols;
+
+INSERT INTO `ticketflow_program_1`.`d_seat_1`
+  (`program_id`, `ticket_category_id`, `row_code`, `col_code`, `seat_type`, `price`, `sell_status`, `create_time`, `edit_time`, `status`)
+WITH RECURSIVE seat_rows(r) AS (SELECT 1 UNION ALL SELECT r+1 FROM seat_rows WHERE r < 100),
+     seat_cols(c) AS (SELECT 1 UNION ALL SELECT c+1 FROM seat_cols WHERE c < 100)
+SELECT 9999, 907, r, c, 1, 2999, 1, NOW(), NOW(), 1 FROM seat_rows CROSS JOIN seat_cols;
