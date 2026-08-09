@@ -19,7 +19,7 @@ object CreateOrderScenario {
       .feed(userFeeder)
       .exec { session => session.set("round", 0) }
       .during(duration.seconds) {
-        // 计算本轮座位（round 先自增后使用：第 1 轮 round=0）
+        // 计算本轮座位（先取 round 使用，再自增存回：第 1 轮 round=0）
         exec { session =>
           val userIndex = session("userIndex").validate[Int].toOption.getOrElse(0)
           val round = session("round").validate[Int].toOption.getOrElse(0)
