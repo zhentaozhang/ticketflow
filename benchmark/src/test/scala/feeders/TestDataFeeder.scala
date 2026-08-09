@@ -31,6 +31,6 @@ object TestDataFeeder {
   val userFeeder: Iterator[Map[String, String]] = Iterator.from(0).map { i =>
     val id = i % userCount + userStart
     // ticketUserIdList 服务端类型为 List<Long>，格式为 [id]
-    Map("userId" -> id.toString, "ticketUserJson" -> s"""[$id]""")
+    Map("userId" -> id.toString, "ticketUserJson" -> s"""[$id]""", "userIndex" -> i.toString)
   }
 }
