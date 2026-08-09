@@ -41,7 +41,7 @@ with open('$CSV_DIR/test-data.csv', 'w', newline='') as f:
     w.writerow(['programId', 'ticketCategoryId', 'userId'])
     for cat in [901, 902, 903, 904, 905, 906, 907]:
         for _ in range(2000):
-            w.writerow([9999, cat, random.randint(1, 100)])
+            w.writerow([9999, cat, random.randint(1, 5000)])
 "
     echo "CSV 生成完成"
   fi
@@ -55,7 +55,7 @@ with open('$CSV_DIR/test-data.csv', 'w', newline='') as f:
     for cat in [901, 902, 903, 904, 905, 906, 907]:
         for _ in range(2000):
             import random
-            w.writerow([9999, cat, random.randint(1, 100)])
+            w.writerow([9999, cat, random.randint(1, 5000)])
 "
   echo "CSV 生成完成"
 fi
@@ -98,5 +98,6 @@ echo ""
 echo "=== 数据准备全部完成 ==="
 echo "节目: 9999 (【压测专用】群星演唱会)"
 echo "票档: 901-907 (共 120000 张)"
-echo "用户: 100 个 (ID 1-100)"
+echo "座位: 120000 个 (与票档余票一致)"
+echo "用户: 5000 个 (ID 1-5000)"
 echo ""

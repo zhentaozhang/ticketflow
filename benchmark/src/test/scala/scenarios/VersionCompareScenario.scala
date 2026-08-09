@@ -16,17 +16,21 @@ object VersionCompareScenario {
       .feed(userFeeder)
       .exec(
         http(s"order_${v}")
-          .post(s"/program/order/create/${v}")
-          .body(StringBody(
-            """{
-              "programId": "${programId}",
-              "userId": ${userId},
-              "ticketCategoryId": ${ticketCategoryId},
-              "ticketCount": 1,
-              "ticketUserIdList": ${ticketUserJson}
-            }"""
-          )).asJson
-          .check(status.in(200, 500))
+          .post(pathPrefix + s"/program/order/create/$v")
+          // Gatling 3.9+ StringBody 不解析 EL 模板 → 用 session 函数显式构造 body
+          .body(StringBody { session =>
+            for {
+              programId <- session("programId").validate[String]
+              userId <- session("userId").validate[String]
+              ticketCategoryId <- session("ticketCategoryId").validate[String]
+              ticketUserJson <- session("ticketUserJson").validate[String]
+            } yield "{\"programId\": " + programId + ", \"userId\": " + userId +
+              ", \"ticketCategoryId\": " + ticketCategoryId + ", \"ticketCount\": 1, " +
+              "\"ticketUserIdList\": " + ticketUserJson + "}"
+          }).asJson
+          .check(status.is(200))
+          .check(jsonPath("$.code").saveAs("respCode"))
+          .check(jsonPath("$.code").is("0"))
       )
       .inject(
         rampUsers(20).during(5),

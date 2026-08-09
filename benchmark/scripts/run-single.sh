@@ -5,6 +5,7 @@
 # 示例: bash scripts/run-single.sh v4 100 30
 # =============================================
 set -e
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -43,6 +44,7 @@ mvn -f "$PROJECT_DIR/pom.xml" gatling:test \
   -DappVersion="$VERSION" \
   -DtargetQps="$CONCURRENCY" \
   -Dduration="$DURATION" \
+  -DresultsDir="$PROJECT_DIR/results" \
   -Dgatling.resultsDirectory="$PROJECT_DIR/results" 2>&1 | tee "$PROJECT_DIR/results/gatling-${VERSION}-${TIMESTAMP}.log"
 
 # 4. 采集指标
