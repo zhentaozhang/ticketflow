@@ -13,7 +13,7 @@ echo " 时间: $(date '+%Y-%m-%d %H:%M')"
 echo "=============================================="
 
 # 对比参数
-CONCURRENCIES="50 100 200"
+CONCURRENCIES="30 60 120"
 DURATION=20
 
 for version in v1 v2 v3 v4; do
@@ -44,18 +44,7 @@ echo " 版本对比完成!"
 echo " 结果目录: benchmark/results/"
 echo "=============================================="
 
-# 打印汇总
+# 聚合对比报告
 echo ""
-echo "=== 结果汇总 ==="
-for f in "$SCRIPT_DIR/../results"/metrics-*.json; do
-  if [ -f "$f" ]; then
-    echo "--- $(basename "$f") ---"
-    python3 -c "
-import json
-with open('$f') as fp:
-    d = json.load(fp)
-for k, v in d.items():
-    print(f'  {k}: {v}')
-" 2>/dev/null
-  fi
-done
+echo "=== 聚合对比报告 ==="
+bash "$SCRIPT_DIR/compare-report.sh"

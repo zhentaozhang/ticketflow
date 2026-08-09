@@ -38,3 +38,6 @@ ticketflow-study-plan.md
 
 ### Generated benchmark outputs ###
 benchmark/results/
+
+### Benchmark dynamic data ###
+benchmark/src/test/resources/data/seats-*.csv
