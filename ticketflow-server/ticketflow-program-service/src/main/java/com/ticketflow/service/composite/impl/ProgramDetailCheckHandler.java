@@ -1,7 +1,6 @@
 package com.ticketflow.service.composite.impl;
 
 
-import com.ticketflow.dto.ProgramGetDto;
 import com.ticketflow.dto.ProgramOrderCreateDto;
 import com.ticketflow.enums.BaseCode;
 import com.ticketflow.enums.BusinessStatus;
@@ -37,9 +36,13 @@ public class ProgramDetailCheckHandler extends AbstractProgramCheckHandler {
      */
     @Override
     protected void execute(final ProgramOrderCreateDto programOrderCreateDto) {
-        ProgramGetDto programGetDto = new ProgramGetDto();
-        programGetDto.setId(programOrderCreateDto.getProgramId());
-        ProgramVo programVo = programService.detailV2(programGetDto);
+        // 轻量两级缓存查询（本地 Caffeine → Redis），替代完整 detailV2：
+        // 下单校验只需 permitChooseSeat / perOrderLimitPurchaseCount，
+        // 避免每次下单走完整 getDetailV2 多级缓存链 + RBloomFilter，降低每单 Redis 命令数。
+        ProgramVo programVo = programService.simpleGetByIdMultipleCache(programOrderCreateDto.getProgramId());
+        if (Objects.isNull(programVo)) {
+            throw new TicketFlowFrameException(BaseCode.PROGRAM_NOT_EXIST);
+        }
         if (programVo.getPermitChooseSeat().equals(BusinessStatus.NO.getCode())) {
             if (Objects.nonNull(programOrderCreateDto.getSeatDtoList())) {
                 throw new TicketFlowFrameException(BaseCode.PROGRAM_NOT_ALLOW_CHOOSE_SEAT);

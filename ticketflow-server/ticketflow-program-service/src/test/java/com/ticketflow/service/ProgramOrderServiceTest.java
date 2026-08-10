@@ -43,6 +43,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -64,6 +66,7 @@ class ProgramOrderServiceTest {
     @BeforeEach
     void setUp() {
         mockSpringUtil();
+        mockSeatCacheExistsCheck(redisCache);
     }
 
     private static void mockSpringUtil() {
@@ -72,6 +75,16 @@ class ProgramOrderServiceTest {
         lenient().when(mockContext.getEnvironment()).thenReturn(mockEnv);
         lenient().when(mockEnv.getProperty(eq("prefix.distinction.name"), anyString())).thenReturn("test");
         ReflectionTestUtils.setField(SpringUtil.class, "configurableApplicationContext", mockContext);
+    }
+
+    /**
+     * mock 座位三区缓存存在性检查的 Lua 执行（hasSeatResolutionCache 走 getInstance().execute）。
+     * 默认返回 0（缓存未预热），保持与旧 hasKey 默认 false 一致：走 selectSeatResolution 预热分支。
+     */
+    private static void mockSeatCacheExistsCheck(com.ticketflow.redis.RedisCache redisCache) {
+        RedisTemplate redisTemplate = mock(RedisTemplate.class);
+        lenient().when(redisCache.getInstance()).thenReturn(redisTemplate);
+        lenient().when(redisTemplate.execute(any(RedisScript.class), anyList())).thenReturn(0L);
     }
 
     @Mock private OrderClient orderClient;

@@ -180,6 +180,38 @@ v1/v2/v3 同步路径 120 QPS 全部崩（12-36%）。版本排序 v4 > v3 > v2 
 2. 消费端 DB 单条事务是落库差上限（批量 Feign 帮助有限，需 DB 批量 insert）
 3. 无锁化需 Redis 集群配套；单机下锁对 Redis 有保护作用
 
+## V4 单机优化（2026-08-10 profiling 驱动）
+
+### profiling 结论（120 QPS + jstack 采样）
+- 主瓶颈 = **本地锁竞争**：476 个 http-nio 线程阻塞在 `localLockExecute` tryLock，仅 7 个锁内执行
+- 根因 = **单机 Redis 命令总量饱和**：每单 ~20-30 Redis 命令（2×detailV2 + 锁内 @ServiceLock 读锁
+  + @RepeatExecuteLimit 防重 + 缓存查询），120 QPS → 每秒 2400-3600 命令 ≈ 单机 Redis 单线程上限
+  → Redis 命令排队 → 锁内变慢 → 锁持有拉长 → 锁竞争加剧（恶性循环）
+- detailV2（含 RBloomFilter + 多级缓存链）在校验链被调 **2 次**（ProgramDetailCheckHandler +
+  ProgramUserExistCheckHandler）
+
+### 已实施优化（A/B 于 V5=V4 拷贝）
+| # | 优化 | 效果 |
+|---|------|------|
+| O1 | 校验链 detailV2 去重：ProgramUserExistCheckHandler 去掉重复 detailV2（节目存在由 BloomFilter + ProgramDetailCheckHandler 保证） | 每单省 ~10 Redis 命令 |
+| O2 | ProgramDetailCheckHandler 的 detailV2 → simpleGetByIdMultipleCache（两级缓存轻量，只需 permitChooseSeat/perOrderLimitPurchaseCount） | 省 RBloomFilter + getDetailV2 链 |
+| O3 | 锁内余票缓存已预热时跳过 getRedisRemainNumberResolution（其带 @ServiceLock(Read) 分布式读锁，返回值未使用） | 锁内省 1 次 Redisson 读锁 |
+
+### 实测（60s 开环 120 QPS）
+- 优化前：70005 锁失败 15-457 个/轮，成功率波动
+- 优化后：**0 锁失败、100% 成功**（锁内余票跳过消除锁竞争失败）
+- p50 波动 1.3-4s（同机压测噪声大；单机 Redis 仍饱和）
+
+### 发现的独立问题（非本次优化引入）
+- 消费端 `operate/program/data` / `operateSeatLockAndTicketCategoryRemainNumber` 在
+  **seatIdList 为空时生成 `id IN ()`** → ShardingSphere SQL 解析异常。长时间高压（120s）下被放大，
+  大量消费失败。需防御性处理空列表（后续排期）。
+
+### 测量局限
+- 压测机 = 被测机（同机），p50/成功率波动大（60s vs 120s 窗口差异显著），
+  精确 A/B 需分离压测机；单机 Redis 为物理瓶颈，120 QPS 已接近上限。
+
+
 
 ### Phase 2：四版本同协议对比
 - v1/v2/v3/v4 × 多票档均匀分布（模拟真实混票）

@@ -39,6 +39,8 @@ import com.ticketflow.vo.TicketCategoryVo;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -267,9 +269,13 @@ public class ProgramOrderService {
                 seatService.selectSeatResolution(programOrderCreateDto.getProgramId(), ticketCategoryId,
                         DateUtils.countBetweenSecond(DateUtils.now(), programShowTime.getShowTime()), TimeUnit.SECONDS);
             }
-            //从缓存中查询余票数量，如果缓存不存在，则从数据库查询后再放入缓存
-            ticketCategoryService.getRedisRemainNumberResolution(
-                    programOrderCreateDto.getProgramId(), ticketCategoryId);
+            //余票缓存已预热时跳过：getRedisRemainNumberResolution 带 @ServiceLock(Read) 分布式读锁，
+            //锁内每次调用会获取 Redisson 读锁拉长锁持有时间；返回值此处未使用，仅需确保缓存存在。
+            if (!redisCache.hasKey(RedisKeyBuild.createRedisKey(
+                    RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programOrderCreateDto.getProgramId(), ticketCategoryId))) {
+                ticketCategoryService.getRedisRemainNumberResolution(
+                        programOrderCreateDto.getProgramId(), ticketCategoryId);
+            }
         }
         Long programId = programOrderCreateDto.getProgramId();
         List<SeatDto> seatDtoList = programOrderCreateDto.getSeatDtoList();
@@ -400,6 +406,8 @@ public class ProgramOrderService {
      * 判断指定票档的座位三区缓存（未售/锁定/已售）是否已预热。
      * 预热时 putHash 创建 hash key；扣减只移动 field 不删除 key，reset 才删除。
      * 因此任一区 hash 存在即可视为已预热，无需全量拉取验证。
+     * 必须三区联合判断：仅查 no_sold 会在 no_sold 扣空（hash 自动删除）但 lock 仍有
+     * 座位时误判未预热，触发 DB 回写导致已锁座位复活（超卖）。
      */
     private boolean hasSeatResolutionCache(Long programId, Long ticketCategoryId) {
         return Boolean.TRUE.equals(redisCache.hasKey(RedisKeyBuild.createRedisKey(
