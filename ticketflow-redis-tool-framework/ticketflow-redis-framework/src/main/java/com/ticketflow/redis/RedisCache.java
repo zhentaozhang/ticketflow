@@ -357,6 +357,17 @@ public interface RedisCache {
     Long lenForList(RedisKeyBuild redisKeyBuild);
 
 
+    /**
+     * 从列表中移除与 value 匹配的元素（LREM）
+     *
+     * @param redisKeyBuild 缓存key
+     * @param value         要移除的元素
+     * @param count         count &gt; 0 从头移除最多 count 个；count &lt; 0 从尾移除最多 |count| 个；count = 0 移除全部匹配
+     * @return 移除的元素个数
+     */
+    Long removeForList(RedisKeyBuild redisKeyBuild, Object value, long count);
+
+
     /** --------------------set相关操作-------------------------- */
 
 

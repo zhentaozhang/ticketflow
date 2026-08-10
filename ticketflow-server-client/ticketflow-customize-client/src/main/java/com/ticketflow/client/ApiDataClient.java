@@ -21,8 +21,10 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * 实现延迟消息的幂等处理
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "customize-service")
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "customize-service",
+        contextId = "apiDataClient")
 //                ↑ Nacos 服务名  ↑ order-service 消息幂等记录用
+//                显式 contextId（固定字符串）→ feign.client.config.apiDataClient.* 超时配置与前缀解耦
 public interface ApiDataClient {
 
     /**

@@ -20,6 +20,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.util.Objects;
+import java.util.concurrent.RejectedExecutionException;
+
 import static com.ticketflow.constant.ProgramOrderConstant.DELAY_ORDER_CANCEL_TIME;
 import static com.ticketflow.constant.ProgramOrderConstant.DELAY_ORDER_CANCEL_TIME_UNIT;
 import static com.ticketflow.constant.ProgramOrderConstant.DELAY_ORDER_CANCEL_TOPIC;
@@ -65,48 +68,78 @@ public class DelayOrderCancelSend {
         if (!delayOrderCancel){
             return;
         }
-        BusinessThreadPool.execute(() -> {
-            Long messageTraceId = uidGenerator.getUid();
-            Long messageId = uidGenerator.getUid();
-            
-            DelayOrderCancelMessageModule delayOrderCancelMessageModule = new DelayOrderCancelMessageModule();
-            delayOrderCancelMessageModule.setMessageTraceId(messageTraceId);
-            delayOrderCancelMessageModule.setMessageId(messageId);
-            delayOrderCancelMessageModule.setProgramId(delayOrderCancelDto.getProgramId());
-            delayOrderCancelMessageModule.setOrderNumber(delayOrderCancelDto.getOrderNumber());
-            
-            String messageContent = JSON.toJSONString(delayOrderCancelMessageModule);
-            // 第一步：插入消息发送日志（记录消息追踪信息，后续对账使用）
-            InsertMessageProducerRecordDto insertMessageProducerRecordDto = new InsertMessageProducerRecordDto();
-            insertMessageProducerRecordDto.setMessageType(MessageType.DELAY_ORDER_CANCEL.getCode());
-            insertMessageProducerRecordDto.setMessageTraceId(messageTraceId);
-            insertMessageProducerRecordDto.setMessageBusinessesId(delayOrderCancelMessageModule.getProgramId());
-            insertMessageProducerRecordDto.setMessageId(messageId);
-            insertMessageProducerRecordDto.setMessageTopic(SpringUtil.getPrefixDistinctionName() + "-" + DELAY_ORDER_CANCEL_TOPIC);
-            insertMessageProducerRecordDto.setMessageContent(messageContent);
+        try {
+            BusinessThreadPool.execute(() -> doSendMessage(delayOrderCancelDto));
+        } catch (RejectedExecutionException e) {
+            // 线程池饱和时降级同步发送：延迟取消消息丢失 = 订单永不被自动取消，不能吞掉
+            log.error("延迟订单取消消息线程池饱和，降级同步发送 orderNumber : {}", delayOrderCancelDto.getOrderNumber(), e);
+            doSendMessage(delayOrderCancelDto);
+        }
+    }
+
+    /**
+     * 延迟订单取消消息发送逻辑（异步线程或线程池饱和降级时同步执行）。
+     * 消息日志失败不阻断延迟消息发送：RDelayedQueue 在 2 分钟后到期消费，
+     * 届时 api-data 大概率已恢复，取消逻辑照常执行
+     */
+    void doSendMessage(DelayOrderCancelDto delayOrderCancelDto){
+        Long messageTraceId = uidGenerator.getUid();
+        Long messageId = uidGenerator.getUid();
+
+        DelayOrderCancelMessageModule delayOrderCancelMessageModule = new DelayOrderCancelMessageModule();
+        delayOrderCancelMessageModule.setMessageTraceId(messageTraceId);
+        delayOrderCancelMessageModule.setMessageId(messageId);
+        delayOrderCancelMessageModule.setProgramId(delayOrderCancelDto.getProgramId());
+        delayOrderCancelMessageModule.setOrderNumber(delayOrderCancelDto.getOrderNumber());
+
+        String messageContent = JSON.toJSONString(delayOrderCancelMessageModule);
+        // 第一步：插入消息发送日志（记录消息追踪信息，后续对账使用）
+        InsertMessageProducerRecordDto insertMessageProducerRecordDto = new InsertMessageProducerRecordDto();
+        insertMessageProducerRecordDto.setMessageType(MessageType.DELAY_ORDER_CANCEL.getCode());
+        insertMessageProducerRecordDto.setMessageTraceId(messageTraceId);
+        insertMessageProducerRecordDto.setMessageBusinessesId(delayOrderCancelMessageModule.getProgramId());
+        insertMessageProducerRecordDto.setMessageId(messageId);
+        insertMessageProducerRecordDto.setMessageTopic(SpringUtil.getPrefixDistinctionName() + "-" + DELAY_ORDER_CANCEL_TOPIC);
+        insertMessageProducerRecordDto.setMessageContent(messageContent);
+        MessageProducerRecordVo messageProducerRecordVo = null;
+        try {
             ApiResponse<MessageProducerRecordVo> insertMessageProducerRecordApiResponse = apiDataClient.insertMessageProducerRecord(insertMessageProducerRecordDto);
             if (!insertMessageProducerRecordApiResponse.getCode().equals(BaseCode.SUCCESS.getCode())){
                 log.error("添加记录消息发送日志失败，参数 : {}", JSON.toJSONString(insertMessageProducerRecordDto));
-                return;
+            }else {
+                messageProducerRecordVo = insertMessageProducerRecordApiResponse.getData();
             }
-            MessageProducerRecordVo messageProducerRecordVo = insertMessageProducerRecordApiResponse.getData();
-            
-            UpdateMessageProducerRecordDto updateMessageProducerRecordDto = new UpdateMessageProducerRecordDto();
+        }catch (Exception e) {
+            log.error("添加记录消息发送日志异常，参数 : {}", JSON.toJSONString(insertMessageProducerRecordDto), e);
+        }
+
+        UpdateMessageProducerRecordDto updateMessageProducerRecordDto = null;
+        if (Objects.nonNull(messageProducerRecordVo)) {
+            updateMessageProducerRecordDto = new UpdateMessageProducerRecordDto();
             updateMessageProducerRecordDto.setId(messageProducerRecordVo.getId());
-            
-            // 第二步：发送到延迟队列（Redisson RDelayedQueue），成功后更新发送状态，失败则记录异常
-            try {
-                log.info("延迟订单取消消息进行发送 消息体 : {}",messageContent);
-                delayQueueContext.sendMessage(SpringUtil.getPrefixDistinctionName() + "-" + DELAY_ORDER_CANCEL_TOPIC,
-                        messageContent, DELAY_ORDER_CANCEL_TIME, DELAY_ORDER_CANCEL_TIME_UNIT);
+        }
+        // 第二步：发送到延迟队列（Redisson RDelayedQueue），成功后更新发送状态，失败则记录异常
+        try {
+            log.info("延迟订单取消消息进行发送 消息体 : {}",messageContent);
+            delayQueueContext.sendMessage(SpringUtil.getPrefixDistinctionName() + "-" + DELAY_ORDER_CANCEL_TOPIC,
+                    messageContent, DELAY_ORDER_CANCEL_TIME, DELAY_ORDER_CANCEL_TIME_UNIT);
+            if (Objects.nonNull(updateMessageProducerRecordDto)) {
                 updateMessageProducerRecordDto.setMessageSendStatus(MessageSendStatus.SEND_SUCCESS.getCode());
-            }catch (Exception e) {
-                log.error("send message error message : {}",messageContent,e);
+            }
+        }catch (Exception e) {
+            log.error("send message error message : {}",messageContent,e);
+            if (Objects.nonNull(updateMessageProducerRecordDto)) {
                 updateMessageProducerRecordDto.setMessageSendStatus(MessageSendStatus.SEND_FAIL.getCode());
                 updateMessageProducerRecordDto.setMessageSendException(e.getMessage());
             }
-            // 第三步：更新消息发送日志状态
-            apiDataClient.updateMessageProducerRecord(updateMessageProducerRecordDto);
-        });
+        }
+        // 第三步：更新消息发送日志状态
+        if (Objects.nonNull(updateMessageProducerRecordDto)) {
+            try {
+                apiDataClient.updateMessageProducerRecord(updateMessageProducerRecordDto);
+            }catch (Exception e) {
+                log.error("更新消息发送日志状态失败 id : {}", updateMessageProducerRecordDto.getId(), e);
+            }
+        }
     }
 }

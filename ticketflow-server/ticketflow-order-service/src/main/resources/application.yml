@@ -92,6 +92,26 @@ feign:
       min-request-size: 512
     response:
       enabled: true
+  client:
+    config:
+      # UserClient 超时（contextId 固定，与前缀解耦）。
+      # user-service 购票人查询为本地 DB 简单查询，3s/5s 兜底慢与挂，避免默认 60s read-timeout 拖垮下单线程
+      userClient:
+        connect-timeout: 3000
+        read-timeout: 5000
+      # programClient：锁座/扣余量/释放为下单核心链路，每单必调，
+      # read 10s 容忍高并发排队，避免默认 60s read-timeout 拖垮下单线程
+      programClient:
+        connect-timeout: 3000
+        read-timeout: 10000
+      # payClient：支付发起/查询，3s/5s 兜底
+      payClient:
+        connect-timeout: 3000
+        read-timeout: 5000
+      # apiDataClient：消息幂等记录（下单/延迟取消链路上的辅助调用），3s/5s 兜底
+      apiDataClient:
+        connect-timeout: 3000
+        read-timeout: 5000
 management:
   metrics:
     tags:

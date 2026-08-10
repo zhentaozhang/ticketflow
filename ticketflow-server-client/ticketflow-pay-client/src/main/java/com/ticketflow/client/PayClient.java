@@ -18,8 +18,10 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * order-service 通过此接口发起支付、查询支付状态、退款和接收回调
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "pay-service")
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "pay-service",
+        contextId = "payClient")
 //                ↑ Nacos 服务名  ↑ order-service 支付流程调用
+//                显式 contextId（固定字符串）→ feign.client.config.payClient.* 超时配置与前缀解耦
 public interface PayClient {
     /**
      * 发起支付（返回支付链接/二维码ID）

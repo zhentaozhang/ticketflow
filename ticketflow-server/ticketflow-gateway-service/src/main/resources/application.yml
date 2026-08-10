@@ -81,6 +81,12 @@ feign:
       min-request-size: 512
     response:
       enabled: true
+  client:
+    config:
+      # baseDataClient：渠道/地区基础数据查询，3s/5s 兜底
+      baseDataClient:
+        connect-timeout: 3000
+        read-timeout: 5000
 management:
   metrics:
     tags:

@@ -19,8 +19,10 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * gateway 通过此接口查询渠道配置、Token TTL、地区数据
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "base-data-service")
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "base-data-service",
+        contextId = "baseDataClient")
 //                ↑ 服务名 = ticketflow-base-data-service  ↑ 被 gateway 和 program-service 使用
+//                显式 contextId（固定字符串）→ feign.client.config.baseDataClient.* 超时配置与前缀解耦
 public interface BaseDataClient {
     /**
      * 根据code查询渠道配置（RSA公钥、Token密钥等）

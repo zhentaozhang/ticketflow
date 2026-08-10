@@ -14,6 +14,7 @@ import com.ticketflow.util.DateUtils;
 import com.ticketflow.vo.ProgramRecordTaskVo;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.Date;
@@ -38,7 +39,8 @@ public class ReconciliationTask {
     @Autowired
     private ProgramClient programClient;
 
-    //@Scheduled(cron = "0 0/3 * * * ? ")
+    //对账任务每3分钟执行一次：补偿 DB 有单 Redis 无流水的记录，并回滚 DISCARD_ORDER 丢弃订单的 Redis 扣减
+    @Scheduled(cron = "0 0/3 * * * ? ")
     public void reconciliationTask(){
         BusinessThreadPool.execute( () -> {
             try {
@@ -65,6 +67,7 @@ public class ReconciliationTask {
                 }
                 for (Long programId : programIdSet) {
                     orderTaskService.reconciliationTask(programId);
+                    orderTaskService.discardOrderCompensation(programId);
                 }
                 //修改对账记录任务集合为已处理
                 ProgramRecordTaskUpdateDto programRecordTaskUpdateDto = new ProgramRecordTaskUpdateDto();

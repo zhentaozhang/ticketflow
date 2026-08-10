@@ -54,6 +54,12 @@ feign:
       min-request-size: 512
     response:
       enabled: true
+  client:
+    config:
+      # apiDataClient：消息幂等记录辅助调用，3s/5s 兜底
+      apiDataClient:
+        connect-timeout: 3000
+        read-timeout: 5000
 management:
   metrics:
     tags:

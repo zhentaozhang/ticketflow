@@ -166,6 +166,29 @@ class RedisCacheImplTest {
         verify(listOperations).rightPush(TEST_KEY, "{\"id\":1}", "{\"id\":2}");
     }
 
+    @Test
+    void removeForList_stringValue_passedThroughWithCount() {
+        RedisKeyBuild keyBuild = RedisKeyBuild.createRedisKey(RedisKeyManage.ALL_RULE_HASH);
+        when(listOperations.remove(TEST_KEY, 1L, "value")).thenReturn(1L);
+
+        Long result = redisCache.removeForList(keyBuild, "value", 1L);
+
+        assertEquals(1L, result);
+        verify(listOperations).remove(TEST_KEY, 1L, "value");
+    }
+
+    @Test
+    void removeForList_objectValue_serializedToJson() {
+        RedisKeyBuild keyBuild = RedisKeyBuild.createRedisKey(RedisKeyManage.ALL_RULE_HASH);
+        TestCacheDto value = new TestCacheDto(2L);
+        when(listOperations.remove(eq(TEST_KEY), eq(0L), any(String.class))).thenReturn(1L);
+
+        Long result = redisCache.removeForList(keyBuild, value, 0L);
+
+        assertEquals(1L, result);
+        verify(listOperations).remove(TEST_KEY, 0L, "{\"id\":2}");
+    }
+
     static class TestCacheDto {
         private Long id;
 

@@ -62,20 +62,25 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
         // 幂等检查：通过 ApiDataClient 查询消息消费记录 → 已成功消费则跳过
         MessageIdDto messageIdDto = new MessageIdDto();
         messageIdDto.setMessageId(messageId);
-        ApiResponse<MessageConsumerRecordVo> apiResponse = apiDataClient.getMessageConsumerByMessageId(messageIdDto);
-        if (!apiResponse.getCode().equals(BaseCode.SUCCESS.getCode())) {
-            log.error("查询消息消费记录失败 messageId : {}",messageId);
-            return;
+        MessageConsumerRecordVo existMessageConsumerRecordVo = null;
+        try {
+            ApiResponse<MessageConsumerRecordVo> apiResponse = apiDataClient.getMessageConsumerByMessageId(messageIdDto);
+            if (!apiResponse.getCode().equals(BaseCode.SUCCESS.getCode())) {
+                log.error("查询消息消费记录失败 messageId : {}", messageId);
+            }else {
+                existMessageConsumerRecordVo = apiResponse.getData();
+            }
+        }catch (Exception e) {
+            // api-data 故障时不阻断取消：cancel 为本地事务+Redis，重复消费安全由幂等注解保障
+            log.error("查询消息消费记录异常 messageId : {}", messageId, e);
         }
-        
-        MessageConsumerRecordVo existMessageConsumerRecordVo = apiResponse.getData();
-        
+
         if (Objects.nonNull(existMessageConsumerRecordVo) &&
                 existMessageConsumerRecordVo.getMessageConsumerStatus().equals(MessageConsumerStatus.CONSUMER_SUCCESS.getCode())) {
             return;
         }
         Long messageConsumerRecordId = null;
-        Integer messageConsumerCount;
+        Integer messageConsumerCount = null;
         // 首次消费 → 创建消费记录；重试 → 复用已有记录，消费次数+1
         if (Objects.isNull(existMessageConsumerRecordVo)) {
             InsertMessageConsumerRecordDto insertMessageConsumerRecordDto = new InsertMessageConsumerRecordDto();
@@ -85,22 +90,30 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
             insertMessageConsumerRecordDto.setMessageBusinessesId(programId);
             insertMessageConsumerRecordDto.setMessageTopic(SpringUtil.getPrefixDistinctionName() + "-" + DELAY_ORDER_CANCEL_TOPIC);
             insertMessageConsumerRecordDto.setMessageContent(content);
-            ApiResponse<MessageConsumerRecordVo> insertApiResponse = apiDataClient.insertMessageConsumerRecord(insertMessageConsumerRecordDto);
-            if (!insertApiResponse.getCode().equals(BaseCode.SUCCESS.getCode())) {
-                log.error("添加消息消费记录失败 insertMessageConsumerRecordDto : {}", JSON.toJSONString(insertMessageConsumerRecordDto));
-                return;
+            try {
+                ApiResponse<MessageConsumerRecordVo> insertApiResponse = apiDataClient.insertMessageConsumerRecord(insertMessageConsumerRecordDto);
+                if (!insertApiResponse.getCode().equals(BaseCode.SUCCESS.getCode())) {
+                    log.error("添加消息消费记录失败 insertMessageConsumerRecordDto : {}", JSON.toJSONString(insertMessageConsumerRecordDto));
+                }else {
+                    MessageConsumerRecordVo saveMessageConsumerRecordVo = insertApiResponse.getData();
+                    messageConsumerRecordId = saveMessageConsumerRecordVo.getId();
+                    messageConsumerCount = saveMessageConsumerRecordVo.getMessageConsumerCount();
+                }
+            }catch (Exception e) {
+                // api-data 故障时不阻断取消：消费记录缺失时由消息对账层重投，cancel 幂等保证安全
+                log.error("添加消息消费记录异常 insertMessageConsumerRecordDto : {}", JSON.toJSONString(insertMessageConsumerRecordDto), e);
             }
-            MessageConsumerRecordVo saveMessageConsumerRecordVo = insertApiResponse.getData();
-            messageConsumerRecordId = saveMessageConsumerRecordVo.getId();
-            messageConsumerCount = saveMessageConsumerRecordVo.getMessageConsumerCount();
         }else {
             messageConsumerRecordId = existMessageConsumerRecordVo.getId();
             messageConsumerCount = existMessageConsumerRecordVo.getMessageConsumerCount() + 1;
         }
-        UpdateMessageConsumerRecordDto updateMessageConsumerRecordDto = new UpdateMessageConsumerRecordDto();
-        updateMessageConsumerRecordDto.setId(messageConsumerRecordId);
-        updateMessageConsumerRecordDto.setMessageConsumerCount(messageConsumerCount);
-        updateMessageConsumerRecordDto.setConsumerTime(DateUtils.now());
+        UpdateMessageConsumerRecordDto updateMessageConsumerRecordDto = null;
+        if (Objects.nonNull(messageConsumerRecordId)) {
+            updateMessageConsumerRecordDto = new UpdateMessageConsumerRecordDto();
+            updateMessageConsumerRecordDto.setId(messageConsumerRecordId);
+            updateMessageConsumerRecordDto.setMessageConsumerCount(messageConsumerCount);
+            updateMessageConsumerRecordDto.setConsumerTime(DateUtils.now());
+        }
         
         try {
             OrderCancelDto orderCancelDto = new OrderCancelDto();
@@ -108,20 +121,34 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
             boolean cancel = orderService.cancel(orderCancelDto);
             if (cancel) {
                 log.info("延迟订单取消成功 orderCancelDto : {}",content);
-                updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
+                if (Objects.nonNull(updateMessageConsumerRecordDto)) {
+                    updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
+                }
             }else {
                 log.error("延迟订单取消失败 orderCancelDto : {}",content);
-                updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_FAIL.getCode());
-                updateMessageConsumerRecordDto.setMessageConsumerException("订单取消失败");
+                if (Objects.nonNull(updateMessageConsumerRecordDto)) {
+                    updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_FAIL.getCode());
+                    updateMessageConsumerRecordDto.setMessageConsumerException("订单取消失败");
+                }
             }
         } catch (TicketFlowFrameException e) {
             // TicketFlowFrameException 表示程序层已处理（如订单已支付/已取消），视为消费成功
-            updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
+            if (Objects.nonNull(updateMessageConsumerRecordDto)) {
+                updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
+            }
         } catch (Exception e) {
-            updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_FAIL.getCode());
-            updateMessageConsumerRecordDto.setMessageConsumerException(e.getMessage());
+            if (Objects.nonNull(updateMessageConsumerRecordDto)) {
+                updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_FAIL.getCode());
+                updateMessageConsumerRecordDto.setMessageConsumerException(e.getMessage());
+            }
         }
-        apiDataClient.updateMessageConsumerRecord(updateMessageConsumerRecordDto);
+        if (Objects.nonNull(updateMessageConsumerRecordDto)) {
+            try {
+                apiDataClient.updateMessageConsumerRecord(updateMessageConsumerRecordDto);
+            }catch (Exception e) {
+                log.error("更新消息消费记录失败 id : {}", updateMessageConsumerRecordDto.getId(), e);
+            }
+        }
     }
     
     @Override

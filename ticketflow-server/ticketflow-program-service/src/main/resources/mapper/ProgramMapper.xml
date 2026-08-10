@@ -49,7 +49,8 @@
                 from
                 d_program dp
                 where
-                dp.program_status = 1
+                dp.status = 1
+                and dp.program_status = 1
                 <if test='programListDto.areaId == null'>
                     and dp.prime = 1
                 </if>
