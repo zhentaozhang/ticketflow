@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.ticketflow.client.ProgramClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
+import com.ticketflow.domain.DiscardOrder;
 import com.ticketflow.domain.ProgramRecord;
 import com.ticketflow.domain.ReconciliationTaskData;
 import com.ticketflow.domain.SeatRecord;
@@ -77,7 +78,10 @@ public class OrderTaskService {
     
     @Autowired
     private OrderProgramMapper orderProgramMapper;
-    
+
+    @Autowired
+    private OrderService orderService;
+
     // ==================== 对账任务入口 ====================
     
     /**
@@ -126,6 +130,44 @@ public class OrderTaskService {
         result.setProgramId(programId);
         result.setAddRedisRecordData(addedRecords);
         return result;
+    }
+
+    /**
+     * DISCARD_ORDER 补偿：回滚因建单失败被丢弃订单在 Redis 中已扣减的座位与余票。
+     * <p>
+     * 覆盖场景：consumer 建单失败（Feign 扣减失败 / DB 建单异常）时只写 DISCARD_ORDER 留痕，
+     * Redis 侧（producer Lua 已扣）无回滚。该方法按节目读取丢弃记录逐条回滚。
+     * <p>
+     * 幂等：rollbackProgramSeatByDiscard 内置双重安全约束
+     * （订单已存在跳过、座位不在锁定集合跳过），重复执行无害；
+     * 回滚成功（含终态跳过）后移除当条记录（LREM），
+     * 失败保留由下轮对账重试兜底。
+     *
+     * @param programId 节目 id
+     */
+    public void discardOrderCompensation(Long programId) {
+        RedisKeyBuild discardOrderKey = RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER, programId);
+        Long length = redisCache.lenForList(discardOrderKey);
+        if (length == null || length <= 0) {
+            return;
+        }
+        List<DiscardOrder> discardOrderList = redisCache.rangeForList(discardOrderKey, 0, length - 1, DiscardOrder.class);
+        if (CollectionUtil.isEmpty(discardOrderList)) {
+            return;
+        }
+        for (DiscardOrder discardOrder : discardOrderList) {
+            if (Objects.isNull(discardOrder) || Objects.isNull(discardOrder.getOrderCreateMq())) {
+                continue;
+            }
+            try {
+                orderService.rollbackProgramSeatByDiscard(discardOrder.getOrderCreateMq());
+                // 回滚成功（含订单已存在/座位已释放等终态跳过）后移除记录，避免 DISCARD_ORDER 无限增长
+                redisCache.removeForList(discardOrderKey, discardOrder, 1);
+            } catch (Exception e) {
+                log.error("DISCARD_ORDER 补偿回滚失败 节目id : {} 订单号 : {}",
+                        programId, discardOrder.getOrderCreateMq().getOrderNumber(), e);
+            }
+        }
     }
     
     // ==================== 查找需要补偿的记录 ====================

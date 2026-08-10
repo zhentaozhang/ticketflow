@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -69,6 +70,18 @@ public class ProgramUserExistCheckHandler extends AbstractProgramCheckHandler {
             ApiResponse<List<TicketUserVo>> apiResponse = userClient.list(ticketUserListDto);
             if (Objects.equals(apiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
                 ticketUserVoList = apiResponse.getData();
+                //RPC 结果写回缓存（TTL 与登录态对齐），避免非高热节目每单一次同步 RPC；
+                //只写非空结果，避免缓存"无购票人"导致新增购票人后 TTL 内校验失败
+                List<TicketUserVo> finalTicketUserVoList = ticketUserVoList;
+                if (CollectionUtil.isNotEmpty(finalTicketUserVoList)) {
+                    try {
+                        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.TICKET_USER_LIST,
+                                        programOrderCreateDto.getUserId()), finalTicketUserVoList,
+                                tokenExpireManager.getTokenExpireTime() + 1, TimeUnit.MINUTES);
+                    } catch (Exception e) {
+                        log.error("购票人列表写回缓存失败 userId : {}", programOrderCreateDto.getUserId(), e);
+                    }
+                }
             }else {
                 log.error("user client rpc getUserAndTicketUserList select response : {}", JSON.toJSONString(apiResponse));
                 throw new TicketFlowFrameException(apiResponse);

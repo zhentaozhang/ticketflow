@@ -48,7 +48,7 @@ import static com.ticketflow.core.DistributedLockConstants.TICKET_CATEGORY_LOCK;
  * 票档服务核心逻辑。
  *   缓存查询：Caffeine（按 programId）+ Redis（最新余票数）
  *   余票更新：下单时 HINCRBY 扣减，取消/支付后 Lua 脚本原子恢复
- *   管理端：票档新增（缓存双删）、批量禁用
+ *   管理端：票档新增、批量禁用
  */
 @Slf4j
 @Service

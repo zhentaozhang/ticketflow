@@ -69,7 +69,7 @@ import static com.ticketflow.core.DistributedLockConstants.REGISTER_USER_LOCK;
 /**
  * 用户服务核心逻辑。
  * 注册（组合验证链 → 分布式锁 → 雪花ID → 入库）、
- * 登录（JWT + Redis TTL）、用户信息查询（走缓存，更新时双删）
+ * 登录（JWT + Redis TTL，登出时删除缓存）、用户信息查询（直接查库）
  */
 @Slf4j
 @Service

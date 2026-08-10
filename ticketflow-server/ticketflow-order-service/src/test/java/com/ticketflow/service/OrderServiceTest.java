@@ -1,5 +1,8 @@
 package com.ticketflow.service;
 
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baidu.fsg.uid.UidGenerator;
@@ -650,6 +653,76 @@ class OrderServiceTest {
         assertEquals(7777, e.getCode());
     }
 
+    // ==================== 丢弃订单座位回滚 rollbackProgramSeatByDiscard ====================
+
+    private OrderCreateMq buildRollbackMq() {
+        OrderCreateMq orderCreateMq = new OrderCreateMq();
+        orderCreateMq.setIdentifierId(IDENTIFIER_ID);
+        orderCreateMq.setOrderNumber(ORDER_NUMBER);
+        orderCreateMq.setProgramId(PROGRAM_ID);
+        orderCreateMq.setUserId(USER_ID);
+        orderCreateMq.setOrderVersion(ProgramOrderVersion.V4_VERSION.getValue());
+        OrderTicketUserCreateDto ticketUserCreateDto = new OrderTicketUserCreateDto();
+        ticketUserCreateDto.setSeatId(SEAT_ID);
+        ticketUserCreateDto.setTicketCategoryId(TICKET_CATEGORY_ID);
+        ticketUserCreateDto.setTicketUserId(TICKET_USER_ID);
+        orderCreateMq.setOrderTicketUserCreateDtoList(List.of(ticketUserCreateDto));
+        return orderCreateMq;
+    }
+
+    @Test
+    void rollbackProgramSeatByDiscard订单已存在时不回滚座位() {
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(1L);
+        orderService.rollbackProgramSeatByDiscard(buildRollbackMq());
+        verify(orderProgramCacheResolutionOperate, never()).programCacheReverseOperate(anyList(), any(Object[].class));
+    }
+
+    @Test
+    void rollbackProgramSeatByDiscard座位在锁定时释放并恢复余票() {
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(0L);
+        SeatVo seatVo = new SeatVo();
+        seatVo.setId(SEAT_ID);
+        seatVo.setTicketCategoryId(TICKET_CATEGORY_ID);
+        seatVo.setSellStatus(SellStatus.LOCK.getCode());
+        when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
+
+        orderService.rollbackProgramSeatByDiscard(buildRollbackMq());
+
+        ArgumentCaptor<List> keysCaptor = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<Object[]> dataCaptor = ArgumentCaptor.forClass(Object[].class);
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(keysCaptor.capture(), dataCaptor.capture());
+        List<String> keys = keysCaptor.getValue();
+        assertEquals(String.valueOf(OrderStatus.CANCEL.getCode()), keys.get(0));
+        assertEquals(String.valueOf(PROGRAM_ID), keys.get(1));
+        assertEquals(RecordType.INCREASE.getValue(), keys.get(4));
+
+        Object[] data = dataCaptor.getValue();
+        JSONArray unLockSeatJsonArray = JSON.parseArray(String.valueOf(data[0]));
+        assertEquals(SEAT_ID, unLockSeatJsonArray.getJSONObject(0).getJSONArray("unLockSeatIdList").getLong(0));
+
+        JSONArray addSeatDataJsonArray = JSON.parseArray(String.valueOf(data[1]));
+        JSONObject seatDataList = addSeatDataJsonArray.getJSONObject(0);
+        assertTrue(seatDataList.getString("seatHashKeyAdd").contains("no_sold"));
+        JSONObject addSeatJson = JSON.parseObject(seatDataList.getJSONArray("seatDataList").getString(1));
+        assertEquals(SellStatus.NO_SOLD.getCode(), addSeatJson.getInteger("sellStatus"));
+
+        JSONArray ticketCategoryJsonArray = JSON.parseArray(String.valueOf(data[2]));
+        assertEquals(TICKET_CATEGORY_ID, ticketCategoryJsonArray.getJSONObject(0).getLong("ticketCategoryId"));
+        assertEquals(1, ticketCategoryJsonArray.getJSONObject(0).getInteger("count"));
+
+        JSONArray seatUserJsonArray = JSON.parseArray(String.valueOf(data[3]));
+        assertEquals(SEAT_ID, seatUserJsonArray.getJSONObject(0).getLong("seatId"));
+        assertEquals(TICKET_USER_ID, seatUserJsonArray.getJSONObject(0).getLong("ticketUserId"));
+    }
+
+    @Test
+    void rollbackProgramSeatByDiscard座位不在锁定时跳过回滚() {
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(0L);
+        when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of());
+        orderService.rollbackProgramSeatByDiscard(buildRollbackMq());
+        verify(orderProgramCacheResolutionOperate, never()).programCacheReverseOperate(anyList(), any(Object[].class));
+    }
+
     // ==================== 取消 initiateCancel ====================
 
     private OrderCancelDto buildCancelDto() {
@@ -946,14 +1019,77 @@ class OrderServiceTest {
     }
 
     @Test
-    void createMq节目服务锁定失败时丢弃订单入队并抛异常() {
+    void createMq节目服务锁定失败时抛异常且不写丢弃记录() {
         when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
                 .thenReturn(ApiResponse.error(7777, "锁定失败"));
         TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
                 () -> orderService.createMq(buildCreateMq()));
         assertEquals(7777, e.getCode());
-        verify(redisCache).leftPushForList(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER, PROGRAM_ID)),
-                any(com.ticketflow.domain.DiscardOrder.class));
+        // 丢弃记录统一由 CreateOrderConsumer 外层 catch 写入，createMq 内不再重复写入
+        verify(redisCache, never()).leftPushForList(any(RedisKeyBuild.class), any());
+        verify(programClient, never()).operateProgramData(any());
+    }
+
+    @Test
+    void createMq建单失败时反向恢复DB扣减并抛出原异常() {
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(0L);
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        doThrow(new RuntimeException("建单失败")).when(orderMapper).insert(any(Order.class));
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.ok(true));
+
+        RuntimeException e = assertThrows(RuntimeException.class, () -> orderService.createMq(buildCreateMq()));
+        assertEquals("建单失败", e.getMessage());
+
+        ArgumentCaptor<ProgramOperateDataDto> captor = ArgumentCaptor.forClass(ProgramOperateDataDto.class);
+        verify(programClient).operateProgramData(captor.capture());
+        assertEquals(SellStatus.NO_SOLD.getCode(), captor.getValue().getSellStatus());
+        assertEquals(List.of(SEAT_ID), captor.getValue().getSeatIdList());
+        assertEquals(ProgramOrderVersion.V4_VERSION.getValue(), captor.getValue().getOrderVersion());
+        assertEquals(TICKET_CATEGORY_ID, captor.getValue().getTicketCategoryCountDtoList().get(0).getTicketCategoryId());
+    }
+
+    @Test
+    void createMq建单失败且订单已存在时跳过反向恢复避免释放已建订单座位() {
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(1L);
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        doThrow(new RuntimeException("建单失败")).when(orderMapper).insert(any(Order.class));
+
+        RuntimeException e = assertThrows(RuntimeException.class, () -> orderService.createMq(buildCreateMq()));
+        assertEquals("建单失败", e.getMessage());
+        // 订单已存在（消息重放等），不执行反向恢复，避免释放已建订单的座位导致超卖
+        verify(programClient, never()).operateProgramData(any(ProgramOperateDataDto.class));
+    }
+
+    @Test
+    void createMq建单失败且反向恢复返回失败时不掩盖原异常() {
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(0L);
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        doThrow(new RuntimeException("建单失败")).when(orderMapper).insert(any(Order.class));
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class)))
+                .thenReturn(ApiResponse.error(8888, "反向恢复失败"));
+
+        RuntimeException e = assertThrows(RuntimeException.class, () -> orderService.createMq(buildCreateMq()));
+        assertEquals("建单失败", e.getMessage());
+        verify(programClient).operateProgramData(any(ProgramOperateDataDto.class));
+    }
+
+    @Test
+    void createMq建单失败且反向恢复抛异常时不掩盖原异常() {
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(0L);
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        doThrow(new RuntimeException("建单失败")).when(orderMapper).insert(any(Order.class));
+        doThrow(new RuntimeException("反向异常")).when(programClient).operateProgramData(any(ProgramOperateDataDto.class));
+
+        RuntimeException e = assertThrows(RuntimeException.class, () -> orderService.createMq(buildCreateMq()));
+        assertEquals("建单失败", e.getMessage());
     }
 
     @Test

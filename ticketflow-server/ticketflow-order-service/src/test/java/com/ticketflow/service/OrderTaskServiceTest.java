@@ -5,14 +5,18 @@ import com.ticketflow.client.ProgramClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.core.SpringUtil;
+import com.ticketflow.domain.DiscardOrder;
+import com.ticketflow.domain.OrderCreateMq;
 import com.ticketflow.domain.ProgramRecord;
 import com.ticketflow.domain.ReconciliationTaskData;
 import com.ticketflow.domain.SeatRecord;
 import com.ticketflow.domain.TicketCategoryRecord;
+import com.ticketflow.dto.OrderTicketUserCreateDto;
 import com.ticketflow.dto.TicketCategoryListDto;
 import com.ticketflow.entity.OrderProgram;
 import com.ticketflow.entity.OrderTicketUserRecord;
 import com.ticketflow.enums.BaseCode;
+import com.ticketflow.enums.DiscardOrderReason;
 import com.ticketflow.enums.HandleStatus;
 import com.ticketflow.enums.RecordType;
 import com.ticketflow.enums.ReconciliationStatus;
@@ -58,6 +62,7 @@ class OrderTaskServiceTest {
 
     private OrderTaskService orderTaskService;
     private RedisCache redisCache;
+    private OrderService orderService;
     private OrderTicketUserRecordMapper orderTicketUserRecordMapper;
     private ProgramClient programClient;
     private ProgramRecordHandler programRecordHandler;
@@ -88,6 +93,7 @@ class OrderTaskServiceTest {
     void setUp() {
         orderTaskService = new OrderTaskService();
         redisCache = mock(RedisCache.class);
+        orderService = mock(OrderService.class);
         orderTicketUserRecordMapper = mock(OrderTicketUserRecordMapper.class);
         programClient = mock(ProgramClient.class);
         programRecordHandler = mock(ProgramRecordHandler.class);
@@ -96,6 +102,7 @@ class OrderTaskServiceTest {
         orderProgramMapper = mock(OrderProgramMapper.class);
 
         ReflectionTestUtils.setField(orderTaskService, "redisCache", redisCache);
+        ReflectionTestUtils.setField(orderTaskService, "orderService", orderService);
         ReflectionTestUtils.setField(orderTaskService, "orderTicketUserRecordMapper", orderTicketUserRecordMapper);
         ReflectionTestUtils.setField(orderTaskService, "programClient", programClient);
         ReflectionTestUtils.setField(orderTaskService, "programRecordHandler", programRecordHandler);
@@ -159,6 +166,20 @@ class OrderTaskServiceTest {
 
     private String buildRedisRecordJson(String recordType, Long... seatIds) {
         return JSON.toJSONString(buildProgramRecord(recordType, seatIds));
+    }
+
+    private OrderCreateMq buildDiscardOrderMq(Long orderNumber) {
+        OrderCreateMq mq = new OrderCreateMq();
+        mq.setOrderNumber(orderNumber);
+        mq.setProgramId(PROGRAM_ID);
+        mq.setUserId(USER_ID);
+        mq.setIdentifierId(IDENTIFIER_ID);
+        OrderTicketUserCreateDto ticketUser = new OrderTicketUserCreateDto();
+        ticketUser.setTicketCategoryId(TICKET_CATEGORY_ID);
+        ticketUser.setSeatId(SEAT_ID);
+        ticketUser.setTicketUserId(USER_ID + 1000);
+        mq.setOrderTicketUserCreateDtoList(List.of(ticketUser));
+        return mq;
     }
 
     private String redisKey(String recordType) {
@@ -458,5 +479,57 @@ class OrderTaskServiceTest {
         orderTaskService.restoreSingleOrder(programRecords, new HashMap<>());
         assertEquals(RecordType.REDUCE.getValue(), programRecords.get(0).getRecordType());
         assertEquals(RecordType.INCREASE.getValue(), programRecords.get(1).getRecordType());
+    }
+
+    // ==================== DISCARD_ORDER 补偿 discardOrderCompensation ====================
+
+    @Test
+    void discardOrderCompensation有丢弃记录时逐条回滚() {
+        OrderCreateMq mq1 = buildDiscardOrderMq(1001L);
+        OrderCreateMq mq2 = buildDiscardOrderMq(1002L);
+        when(redisCache.lenForList(any())).thenReturn(2L);
+        when(redisCache.rangeForList(any(), anyLong(), anyLong(), eq(DiscardOrder.class)))
+                .thenReturn(List.of(new DiscardOrder(mq1, DiscardOrderReason.CREATE_ORDER_FAIL.getCode(), "建单失败"),
+                        new DiscardOrder(mq2, DiscardOrderReason.MODIFY_PROGRAM_REMAIN_NUMBER_SEAT_FAIL.getCode())));
+
+        orderTaskService.discardOrderCompensation(PROGRAM_ID);
+
+        verify(orderService).rollbackProgramSeatByDiscard(mq1);
+        verify(orderService).rollbackProgramSeatByDiscard(mq2);
+    }
+
+    @Test
+    void discardOrderCompensation无记录时不回滚() {
+        when(redisCache.lenForList(any())).thenReturn(0L);
+
+        orderTaskService.discardOrderCompensation(PROGRAM_ID);
+
+        verify(orderService, never()).rollbackProgramSeatByDiscard(any());
+    }
+
+    @Test
+    void discardOrderCompensation单条回滚失败不中断后续() {
+        OrderCreateMq mq1 = buildDiscardOrderMq(1001L);
+        OrderCreateMq mq2 = buildDiscardOrderMq(1002L);
+        when(redisCache.lenForList(any())).thenReturn(2L);
+        when(redisCache.rangeForList(any(), anyLong(), anyLong(), eq(DiscardOrder.class)))
+                .thenReturn(List.of(new DiscardOrder(mq1, DiscardOrderReason.CREATE_ORDER_FAIL.getCode(), "建单失败"),
+                        new DiscardOrder(mq2, DiscardOrderReason.CREATE_ORDER_FAIL.getCode(), "建单失败")));
+        doThrow(new RuntimeException("回滚失败")).when(orderService).rollbackProgramSeatByDiscard(mq1);
+
+        orderTaskService.discardOrderCompensation(PROGRAM_ID);
+
+        verify(orderService).rollbackProgramSeatByDiscard(mq2);
+    }
+
+    @Test
+    void discardOrderCompensation空消息体跳过() {
+        when(redisCache.lenForList(any())).thenReturn(1L);
+        when(redisCache.rangeForList(any(), anyLong(), anyLong(), eq(DiscardOrder.class)))
+                .thenReturn(List.of(new DiscardOrder()));
+
+        orderTaskService.discardOrderCompensation(PROGRAM_ID);
+
+        verify(orderService, never()).rollbackProgramSeatByDiscard(any());
     }
 }

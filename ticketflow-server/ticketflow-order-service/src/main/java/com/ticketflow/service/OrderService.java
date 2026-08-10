@@ -15,7 +15,6 @@ import com.ticketflow.client.ProgramClient;
 import com.ticketflow.client.UserClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
-import com.ticketflow.domain.DiscardOrder;
 import com.ticketflow.domain.OrderCreateDomain;
 import com.ticketflow.domain.OrderCreateMq;
 import com.ticketflow.domain.SeatIdAndTicketUserIdDomain;
@@ -43,7 +42,6 @@ import com.ticketflow.entity.OrderTicketUserAggregate;
 import com.ticketflow.entity.OrderTicketUserRecord;
 import com.ticketflow.enums.BaseCode;
 import com.ticketflow.enums.BusinessStatus;
-import com.ticketflow.enums.DiscardOrderReason;
 import com.ticketflow.enums.OrderStatus;
 import com.ticketflow.enums.PayBillStatus;
 import com.ticketflow.enums.PayChannel;
@@ -885,19 +883,138 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         reduceRemainNumberDto.setTicketCategoryCountDtoList(ticketCountList);
         ApiResponse<Boolean> programApiResponse = programClient.operateSeatLockAndTicketCategoryRemainNumber(reduceRemainNumberDto);
         if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
-            //将因为修改节目服务余票和座位失败，导致丢弃的订单放入redis中
-            redisCache.leftPushForList(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER,
-                    orderCreateMq.getProgramId()),new DiscardOrder(orderCreateMq, DiscardOrderReason.MODIFY_PROGRAM_REMAIN_NUMBER_SEAT_FAIL.getCode()));
+            //丢弃记录统一由 CreateOrderConsumer 外层 catch 写入，此处不再重复写入
             throw new TicketFlowFrameException(programApiResponse);
         }
-        //真正地创建订单
-        String orderNumber = createByMq(orderCreateMq);
+        String orderNumber;
+        try {
+            //真正地创建订单
+            orderNumber = createByMq(orderCreateMq);
+        } catch (Exception e) {
+            //Feign 已扣减 DB（座位 LOCK + 余票扣减）但本地建单失败（事务回滚，订单不存在）：
+            //远程扣减不受本地事务回滚影响，需显式反向恢复 DB
+            rollbackProgramDataByCreateFail(orderCreateMq, reduceRemainNumberDto);
+            throw e;
+        }
         redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ,orderNumber),orderNumber,1, TimeUnit.MINUTES);
         return orderNumber;
+    }
+
+    /**
+     * 建单失败后的 DB 反向恢复。
+     * 反向恢复是补偿式操作，失败仅记日志不掩盖原建单异常，
+     * 残留漂移由 DISCARD_ORDER 记录观测兜底。
+     */
+    private void rollbackProgramDataByCreateFail(OrderCreateMq orderCreateMq, ReduceRemainNumberDto reduceRemainNumberDto) {
+        try {
+            // 订单已存在（消息重放等）不执行反向恢复，避免释放已建订单的座位
+            Long orderCount = orderMapper.selectCount(Wrappers.lambdaQuery(Order.class)
+                    .eq(Order::getOrderNumber, orderCreateMq.getOrderNumber()));
+            if (orderCount > 0) {
+                log.info("建单失败反向恢复跳过 订单已存在 订单号 : {}", orderCreateMq.getOrderNumber());
+                return;
+            }
+            ProgramOperateDataDto programOperateDataDto = new ProgramOperateDataDto();
+            programOperateDataDto.setProgramId(orderCreateMq.getProgramId());
+            programOperateDataDto.setSeatIdList(reduceRemainNumberDto.getSeatIdList());
+            programOperateDataDto.setTicketCategoryCountDtoList(reduceRemainNumberDto.getTicketCategoryCountDtoList());
+            programOperateDataDto.setSellStatus(SellStatus.NO_SOLD.getCode());
+            programOperateDataDto.setOrderVersion(orderCreateMq.getOrderVersion());
+            ApiResponse<Boolean> programApiResponse = programClient.operateProgramData(programOperateDataDto);
+            if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
+                log.error("建单失败反向恢复DB失败 订单号 : {} 响应 : {}", orderCreateMq.getOrderNumber(), JSON.toJSONString(programApiResponse));
+            }
+        } catch (Exception e) {
+            log.error("建单失败反向恢复DB异常 订单号 : {}", orderCreateMq.getOrderNumber(), e);
+        }
     }
     
     public String getCache(OrderGetDto orderGetDto) {
         return redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ,orderGetDto.getOrderNumber()),String.class);
+    }
+    
+    /**
+     * 丢弃订单（消息延迟超时被 CreateOrderConsumer 丢弃）的 Redis 座位回滚。
+     * 订单从未入库，DB 座位/余票从未扣减，因此只回滚 Redis 缓存：
+     *   座位 LOCK → NO_SOLD，余票恢复，写入 INCREASE 流水。
+     * 安全约束：
+     *   1. 订单已存在（如消息重放）不执行回滚，避免释放已建订单的座位
+     *   2. 座位已不在锁定集合（如缓存重建后复活）自动跳过，避免余票虚增
+     */
+    public void rollbackProgramSeatByDiscard(OrderCreateMq orderCreateMq){
+        // 订单已存在（消息重放等）不执行回滚，避免释放已建订单的座位
+        Long orderCount = orderMapper.selectCount(Wrappers.lambdaQuery(Order.class)
+                .eq(Order::getOrderNumber, orderCreateMq.getOrderNumber()));
+        if (orderCount > 0) {
+            log.info("丢弃订单回滚跳过 订单已存在 订单号 : {}", orderCreateMq.getOrderNumber());
+            return;
+        }
+        List<OrderTicketUserCreateDto> orderTicketUserCreateDtoList = orderCreateMq.getOrderTicketUserCreateDtoList();
+        Map<Long, List<Long>> seatMap = orderTicketUserCreateDtoList.stream().collect(Collectors.groupingBy(
+                OrderTicketUserCreateDto::getTicketCategoryId,
+                Collectors.mapping(OrderTicketUserCreateDto::getSeatId, Collectors.toList())));
+        // 只回滚仍在锁定集合中的座位；缓存重建后已复活的座位跳过，避免余票虚增
+        Map<Long, List<SeatVo>> seatVoMap = new HashMap<>(seatMap.size());
+        seatMap.forEach((k,v) -> {
+            List<SeatVo> seatVoList = redisCache.multiGetForHash(
+                    RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH,
+                            orderCreateMq.getProgramId(), k),
+                    v.stream().map(String::valueOf).collect(Collectors.toList()), SeatVo.class);
+            if (CollectionUtil.isNotEmpty(seatVoList)) {
+                seatVoMap.put(k, seatVoList);
+            }
+        });
+        if (CollectionUtil.isEmpty(seatVoMap)) {
+            log.info("丢弃订单回滚跳过 座位已不在锁定状态 订单号 : {}", orderCreateMq.getOrderNumber());
+            return;
+        }
+        JSONArray unLockSeatIdjsonArray = new JSONArray();
+        JSONArray addSeatDatajsonArray = new JSONArray();
+        JSONArray jsonArray = new JSONArray();
+        seatVoMap.forEach((k,v) -> {
+            JSONObject unLockSeatIdjsonObject = new JSONObject();
+            unLockSeatIdjsonObject.put("programSeatLockHashKey", RedisKeyBuild.createRedisKey(
+                    RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH, orderCreateMq.getProgramId(), k).getRelKey());
+            unLockSeatIdjsonObject.put("unLockSeatIdList", v.stream()
+                    .map(SeatVo::getId).map(String::valueOf).collect(Collectors.toList()));
+            unLockSeatIdjsonArray.add(unLockSeatIdjsonObject);
+            JSONObject seatDatajsonObject = new JSONObject();
+            seatDatajsonObject.put("seatHashKeyAdd", RedisKeyBuild.createRedisKey(
+                    RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH, orderCreateMq.getProgramId(), k).getRelKey());
+            List<String> seatDataList = new ArrayList<>();
+            for (SeatVo seatVo : v) {
+                seatVo.setSellStatus(SellStatus.NO_SOLD.getCode());
+                seatDataList.add(String.valueOf(seatVo.getId()));
+                seatDataList.add(JSON.toJSONString(seatVo));
+            }
+            seatDatajsonObject.put("seatDataList", seatDataList);
+            addSeatDatajsonArray.add(seatDatajsonObject);
+            JSONObject jsonObject = new JSONObject();
+            jsonObject.put("programTicketRemainNumberHashKey", RedisKeyBuild.createRedisKey(
+                    RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, orderCreateMq.getProgramId(), k).getRelKey());
+            jsonObject.put("ticketCategoryId", String.valueOf(k));
+            jsonObject.put("count", v.size());
+            jsonArray.add(jsonObject);
+        });
+        List<SeatIdAndTicketUserIdDomain> seatIdAndTicketUserIdDomainList = new ArrayList<>();
+        for (OrderTicketUserCreateDto orderTicketUserCreateDto : orderTicketUserCreateDtoList) {
+            seatIdAndTicketUserIdDomainList.add(new SeatIdAndTicketUserIdDomain(orderTicketUserCreateDto.getSeatId(),
+                    orderTicketUserCreateDto.getTicketUserId()));
+        }
+        List<String> keys = new ArrayList<>();
+        keys.add(String.valueOf(OrderStatus.CANCEL.getCode()));
+        keys.add(String.valueOf(orderCreateMq.getProgramId()));
+        keys.add(RedisKeyBuild.getRedisKey(RedisKeyManage.PROGRAM_RECORD));
+        String recordType = RecordType.INCREASE.getValue();
+        keys.add(recordType + GLIDE_LINE + orderCreateMq.getIdentifierId() + GLIDE_LINE + orderCreateMq.getUserId());
+        keys.add(recordType);
+        Object[] data = new String[4];
+        data[0] = JSON.toJSONString(unLockSeatIdjsonArray);
+        data[1] = JSON.toJSONString(addSeatDatajsonArray);
+        data[2] = JSON.toJSONString(jsonArray);
+        data[3] = JSON.toJSONString(seatIdAndTicketUserIdDomainList);
+        orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
+        log.info("丢弃订单回滚Redis座位完成 订单号 : {}", orderCreateMq.getOrderNumber());
     }
     
     @RepeatExecuteLimit(name = CANCEL_PROGRAM_ORDER,keys = {"#orderCancelDto.orderNumber"})

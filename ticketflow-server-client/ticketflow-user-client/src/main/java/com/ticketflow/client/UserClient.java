@@ -18,8 +18,10 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * 下游服务通过此接口查询用户基础信息和购票人列表
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "user-service")
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "user-service",
+        contextId = "userClient")
 //                ↑ Nacos 注册名 = ticketflow-user-service  ↑ order-service 下单时查购票人用
+//                显式 contextId（固定字符串）→ feign.client.config.userClient.* 超时配置与前缀解耦
 public interface UserClient {
 
     /**

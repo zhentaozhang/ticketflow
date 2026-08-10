@@ -301,6 +301,15 @@ public class RedisCacheImpl implements RedisCache {
     }
 
     @Override
+    public Long removeForList(RedisKeyBuild redisKeyBuild, Object value, long count) {
+        CacheUtil.checkNotBlank(redisKeyBuild);
+        CacheUtil.checkNotEmpty(value);
+        String key = redisKeyBuild.getRelKey();
+        String jsonValue = value instanceof String ? (String) value : JSON.toJSONString(value);
+        return redisTemplate.opsForList().remove(key, count, jsonValue);
+    }
+
+    @Override
     public void del(RedisKeyBuild redisKeyBuild) {
         CacheUtil.checkNotBlank(redisKeyBuild);
         String key = redisKeyBuild.getRelKey();

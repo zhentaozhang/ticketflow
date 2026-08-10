@@ -47,7 +47,7 @@ import static com.ticketflow.core.DistributedLockConstants.PROGRAM_SHOW_TIME_LOC
 
 /**
  * 节目演出时间服务。
- * 管理每场节目的日期时间、缓存双删策略，
+ * 管理每场节目的日期时间，多级缓存查询（Caffeine → Redis → 库回填），
  * 被 ProgramService 在查询和创建节目时调用
  */
 @Service

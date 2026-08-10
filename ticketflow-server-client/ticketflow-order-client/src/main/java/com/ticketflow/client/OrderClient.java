@@ -15,8 +15,10 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * program-service 和 gateway 通过此接口创建订单、查询账户下单数量
  */
 @Component
-@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"order-service")
+@FeignClient(value = SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"order-service",
+        contextId = "orderClient")
 //                ↑ Nacos 服务名  ↑ program-service 下单时调用
+//                显式 contextId（固定字符串）→ feign.client.config.orderClient.* 超时配置与前缀解耦
 public interface OrderClient {
     
     /** 创建订单（program-service → order-service） */
