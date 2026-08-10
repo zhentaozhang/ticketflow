@@ -9,6 +9,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 
 
@@ -43,14 +44,27 @@ def main():
     stats = load_json(args.stats)
     with open(args.failure) as f:
         failure_raw = json.load(f)
-    failure_counts = dict(failure_raw)
 
-    # simulation.log KO 计数（Gatling 3.11 为 TAB 分隔，KO 是独立字段：
-    # REQUEST\t\tcreate_order_v1\t...\tKO\tjsonPath(...)）
+    # 失败分类以 simulation.log 为准（Gatling 3.11 TAB 分隔，KO 行 message 含业务码）：
+    # 全量压测实测 OrderResultCounter 有结构性丢失——用户 END 时飞行中的请求计入 stats，
+    # 但其后的 record exec 不再执行（每轮缺 ≤ 并发数条），导致 failure-*.json 不闭合。
+    # simulation.log 由 Gatling 引擎写入，KO 计数与 stats.ko 完全一致，100% 闭合。
+    # 无业务码的 KO（超时/连接错误）归 protocol_no_json。
+    biz_codes = {}
+    no_json = 0
     ko_count = 0
     if os.path.exists(args.sim_log):
         with open(args.sim_log, errors="replace") as f:
-            ko_count = sum(1 for line in f if "\tKO\t" in line)
+            for line in f:
+                if "\tKO\t" not in line:
+                    continue
+                ko_count += 1
+                m = re.search(r"but actually found (-?\d+)", line)
+                if m:
+                    code = m.group(1)
+                    biz_codes[code] = biz_codes.get(code, 0) + 1
+                else:
+                    no_json += 1
 
     # stats.json 结构（Gatling 3.11.5 实测）：stats.stats 是 dict（GROUP 节点，单请求场景即全部），
     # 计数在 numberOfRequests.{total,ok,ko}，百分位在 percentiles1/3.{total,ok,ko}
@@ -61,10 +75,10 @@ def main():
     p50 = req.get("percentiles1", {}).get("ok")
     p95 = req.get("percentiles3", {}).get("ok")
 
-    no_json = int(failure_counts.pop("NO_JSON", 0))
-    # "0" 是成功计数（respCode 0），pop 出后 business 桶只含真失败
-    success_count = int(failure_counts.pop("0", 0))
-    business_failures = sum(failure_counts.values())
+    # 成功计数以 stats.ok 为准（同上了 in-flight 丢失，counter 的 "0" 仅作参考）
+    success_count = ok
+    business_failures = sum(biz_codes.values())
+    counter_ref = {k: v for k, v in failure_raw.items() if k not in ("0", "NO_JSON")}
 
     # 对账：业务失败 + NO_JSON 应 ≈ KO 总数（HTTP 层）
     reconciled = business_failures + no_json
@@ -83,8 +97,9 @@ def main():
             "p95_ms": p95,
         },
         "failures": {
-            "business": failure_counts,
+            "business": biz_codes,
             "protocol_no_json": no_json,
+            "counter_ref": counter_ref,
             "sim_log_ko": ko_count,
             "reconciled": reconciled,
             "reconcile_gap": gap,
