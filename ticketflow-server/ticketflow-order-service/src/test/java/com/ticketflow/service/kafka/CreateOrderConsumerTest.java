@@ -106,14 +106,15 @@ class CreateOrderConsumerTest {
     @Test
     void 超时消息丢弃前回滚Redis座位并写入丢弃记录() {
         OrderCreateMq orderCreateMq = buildOrderCreateMq(new Date(System.currentTimeMillis() - 61000L));
-        createOrderConsumer.consumerOrderMessage(buildConsumerRecord(orderCreateMq));
+        createOrderConsumer.consumerOrderMessage(List.of(buildConsumerRecord(orderCreateMq)));
 
         ArgumentCaptor<OrderCreateMq> rollbackCaptor = ArgumentCaptor.forClass(OrderCreateMq.class);
         verify(orderService).rollbackProgramSeatByDiscard(rollbackCaptor.capture());
         assertEquals(ORDER_NUMBER, rollbackCaptor.getValue().getOrderNumber());
         assertEquals(PROGRAM_ID, rollbackCaptor.getValue().getProgramId());
 
-        verify(orderService, never()).createMq(any());
+        // 超时消息不进入批量建单
+        verify(orderService, never()).createMqBatch(anyList());
 
         ArgumentCaptor<DiscardOrder> discardCaptor = ArgumentCaptor.forClass(DiscardOrder.class);
         verify(redisCache).leftPushForList(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER, PROGRAM_ID)),
@@ -123,13 +124,30 @@ class CreateOrderConsumerTest {
     }
 
     @Test
-    void 未超时消息不触发回滚直接建单() {
+    void 未超时消息不触发回滚直接批量建单() {
         OrderCreateMq orderCreateMq = buildOrderCreateMq(new Date(System.currentTimeMillis() - 1000L));
-        createOrderConsumer.consumerOrderMessage(buildConsumerRecord(orderCreateMq));
+        when(orderService.createMqBatch(anyList())).thenReturn(List.of());
 
-        verify(orderService).createMq(orderCreateMq);
+        createOrderConsumer.consumerOrderMessage(List.of(buildConsumerRecord(orderCreateMq)));
+
+        verify(orderService).createMqBatch(argThat(list -> list.size() == 1
+                && ((OrderCreateMq) list.get(0)).getOrderNumber().equals(ORDER_NUMBER)));
         verify(orderService, never()).rollbackProgramSeatByDiscard(any());
         verify(redisCache, never()).leftPushForList(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER, PROGRAM_ID)), any());
+    }
+
+    @Test
+    void 批量建单失败订单写入丢弃记录() {
+        OrderCreateMq orderCreateMq = buildOrderCreateMq(new Date(System.currentTimeMillis() - 1000L));
+        when(orderService.createMqBatch(anyList())).thenReturn(List.of(orderCreateMq));
+
+        createOrderConsumer.consumerOrderMessage(List.of(buildConsumerRecord(orderCreateMq)));
+
+        ArgumentCaptor<DiscardOrder> discardCaptor = ArgumentCaptor.forClass(DiscardOrder.class);
+        verify(redisCache).leftPushForList(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER, PROGRAM_ID)),
+                discardCaptor.capture());
+        assertEquals(ORDER_NUMBER, discardCaptor.getValue().getOrderCreateMq().getOrderNumber());
+        assertEquals(DiscardOrderReason.CREATE_ORDER_FAIL.getCode(), discardCaptor.getValue().getDiscardOrderReason());
     }
 
     @Test
@@ -137,11 +155,11 @@ class CreateOrderConsumerTest {
         OrderCreateMq orderCreateMq = buildOrderCreateMq(new Date(System.currentTimeMillis() - 61000L));
         doThrow(new RuntimeException("回滚失败")).when(orderService).rollbackProgramSeatByDiscard(any());
 
-        createOrderConsumer.consumerOrderMessage(buildConsumerRecord(orderCreateMq));
+        createOrderConsumer.consumerOrderMessage(List.of(buildConsumerRecord(orderCreateMq)));
 
         verify(orderService).rollbackProgramSeatByDiscard(any());
         verify(redisCache).leftPushForList(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER, PROGRAM_ID)),
                 any(DiscardOrder.class));
-        verify(orderService, never()).createMq(any());
+        verify(orderService, never()).createMqBatch(anyList());
     }
 }

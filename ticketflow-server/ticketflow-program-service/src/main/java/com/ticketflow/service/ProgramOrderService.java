@@ -74,7 +74,7 @@ public class ProgramOrderService {
     /**
      * 不选座自动匹配：候选座位被并发订单抢占时的最大重试次数（超出后抛抢占错误码）
      */
-    private static final int AUTO_MATCH_RETRY_TIMES = 1;
+    private static final int AUTO_MATCH_RETRY_TIMES = 3;
 
     @Autowired
     private OrderClient orderClient;
@@ -242,6 +242,20 @@ public class ProgramOrderService {
                                           CreateOrderTemporaryData createOrderTemporaryData,
                                           Integer orderVersion) {
         return doCreateV2(programOrderCreateDto, createOrderTemporaryData, orderVersion);
+    }
+
+    /**
+     * V5 全异步创建路径（fire-and-forget，无应用层锁）。
+     * Lua 原子扣减 → 提交 Kafka（不等待发送确认）立即返回订单号；
+     * 请求线程不阻塞在 Kafka 发送，并发安全由 Lua 原子性 + 消息对账兜底。
+     *
+     * @param programOrderCreateDto 订单创建参数
+     * @param orderVersion           订单版本号
+     * @return 订单编号（Kafka 中预生成）
+     */
+    public String createNewAsyncFireAndForget(ProgramOrderCreateDto programOrderCreateDto, Integer orderVersion) {
+        CreateOrderTemporaryData createOrderTemporaryData = createOrderOperateProgramCacheResolution(programOrderCreateDto);
+        return doCreateV2Async(programOrderCreateDto, createOrderTemporaryData, orderVersion);
     }
 
     /**
@@ -459,6 +473,35 @@ public class ProgramOrderService {
     }
 
     /**
+     * 异步创建订单路径（fire-and-forget，V5）。
+     * 构建参数 → 提交 Kafka（不等待确认）→ 投递延迟取消队列，立即返回订单号。
+     */
+    private String doCreateV2Async(ProgramOrderCreateDto programOrderCreateDto,
+                                   CreateOrderTemporaryData createOrderTemporaryData,
+                                   Integer orderVersion) {
+        OrderCreateDto orderCreateDto = buildCreateOrderParamV2(programOrderCreateDto.getProgramId(),
+                programOrderCreateDto.getUserId(), createOrderTemporaryData.getPurchaseSeatList(), orderVersion);
+        OrderCreateMq orderCreateMq = new OrderCreateMq();
+        BeanUtils.copyProperties(orderCreateDto, orderCreateMq);
+        orderCreateMq.setIdentifierId(createOrderTemporaryData.getIdentifierId());
+        //插入节目记录任务
+        try {
+            BusinessThreadPool.execute(() -> createProgramRecordTask(orderCreateMq.getProgramId()));
+        } catch (RejectedExecutionException e) {
+            log.error("节目对账记录任务提交失败，降级同步插入 programId : {}", orderCreateMq.getProgramId(), e);
+            createProgramRecordTask(orderCreateMq.getProgramId());
+        }
+        //创建订单（fire-and-forget：不等待 Kafka 发送确认）
+        String orderNumber = createOrderByMqAsync(orderCreateMq, createOrderTemporaryData.getPurchaseSeatList());
+        DelayOrderCancelDto delayOrderCancelDto = new DelayOrderCancelDto();
+        delayOrderCancelDto.setProgramId(orderCreateDto.getProgramId());
+        delayOrderCancelDto.setOrderNumber(orderCreateDto.getOrderNumber());
+        delayOrderCancelSend.sendMessage(delayOrderCancelDto);
+
+        return orderNumber;
+    }
+
+    /**
      * 创建节目记录任务（异步执行）。
      * 供 ReconciliationTask 对账使用，记录订单变更痕迹。
      *
@@ -618,6 +661,31 @@ public class ProgramOrderService {
             throw createOrderMqDomain.ticketFlowFrameException;
         }
         return createOrderMqDomain.orderNumber;
+    }
+
+    /**
+     * 通过 Kafka 发送建单消息（fire-and-forget，V5 路径）。
+     * 提交后立即返回预生成的订单号，不等待发送确认——请求线程不被 Kafka RTT 占用。
+     * 发送失败时异步回调回滚 Redis 缓存；最终一致性由消息对账（ReconciliationTask）兜底。
+     */
+    private String createOrderByMqAsync(OrderCreateMq orderCreateMq, List<PurchaseSeat> purchaseSeatList) {
+        createOrderSend.sendMessage(JSON.toJSONString(orderCreateMq), sendResult -> {
+            log.info("创建订单kafka发送消息成功 topic : {}", sendResult.getRecordMetadata().topic());
+        }, ex -> {
+            log.error("创建订单kafka发送消息失败 error", ex);
+            List<SeatVo> purchaseSeatVoList = purchaseSeatList.stream().map(purchaseSeat -> {
+                SeatVo seatVo = new SeatVo();
+                BeanUtils.copyProperties(purchaseSeat, seatVo);
+                return seatVo;
+            }).collect(Collectors.toList());
+            try {
+                updateProgramCacheDataResolution(orderCreateMq.getProgramId(), purchaseSeatVoList, OrderStatus.CANCEL);
+            } catch (Exception rollbackEx) {
+                log.error("创建订单kafka发送失败后回滚缓存异常 需人工处理 programId : {} orderNumber : {}",
+                        orderCreateMq.getProgramId(), orderCreateMq.getOrderNumber(), rollbackEx);
+            }
+        });
+        return String.valueOf(orderCreateMq.getOrderNumber());
     }
 
     /**

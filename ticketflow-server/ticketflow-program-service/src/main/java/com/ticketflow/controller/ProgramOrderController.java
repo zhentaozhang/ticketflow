@@ -72,4 +72,11 @@ public class ProgramOrderController {
         return ApiResponse.ok(programOrderContext.get(ProgramOrderVersion.V41_VERSION.getVersion())
                 .createOrder(programOrderCreateDto));
     }
+    
+    @Operation(summary  = "购票V5")
+    @PostMapping(value = "/create/v5")
+    public ApiResponse<String> createV5(@Valid @RequestBody ProgramOrderCreateDto programOrderCreateDto) {
+        return ApiResponse.ok(programOrderContext.get(ProgramOrderVersion.V5_VERSION.getVersion())
+                .createOrder(programOrderCreateDto));
+    }
 }

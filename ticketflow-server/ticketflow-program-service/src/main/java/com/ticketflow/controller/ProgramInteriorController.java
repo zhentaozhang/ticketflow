@@ -12,6 +12,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
+
 /**
  * 节目内部 RPC API——仅限服务间 Feign 调用，查询节目/座位/票档数据
  */
@@ -27,6 +29,12 @@ public class ProgramInteriorController {
     @PostMapping(value = "/reduce/remain/number")
     public ApiResponse<Boolean> operateSeatLockAndTicketCategoryRemainNumber(@Valid @RequestBody ReduceRemainNumberDto reduceRemainNumberDto) {
         return ApiResponse.ok(programService.operateSeatLockAndTicketCategoryRemainNumber(reduceRemainNumberDto));
+    }
+    
+    @Operation(summary  = "扣减库存相关操作(批量)")
+    @PostMapping(value = "/reduce/remain/number/batch")
+    public ApiResponse<List<Boolean>> operateSeatLockAndTicketCategoryRemainNumberBatch(@Valid @RequestBody List<ReduceRemainNumberDto> reduceRemainNumberDtoList) {
+        return ApiResponse.ok(programService.operateSeatLockAndTicketCategoryRemainNumberBatch(reduceRemainNumberDtoList));
     }
     
     @Operation(summary  = "订单支付成功或者取消订单后对节目服务库的相关操作")

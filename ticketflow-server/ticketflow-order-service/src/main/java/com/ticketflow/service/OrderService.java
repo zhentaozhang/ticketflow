@@ -866,21 +866,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     @RepeatExecuteLimit(name = CREATE_PROGRAM_ORDER_MQ, keys = {"#orderCreateMq.orderNumber"}, durationTime = 60)
     @Transactional(rollbackFor = Exception.class)
     public String createMq(OrderCreateMq orderCreateMq){
-        List<OrderTicketUserCreateDto> orderTicketUserCreateDtoList = orderCreateMq.getOrderTicketUserCreateDtoList();
-        //使用 Stream API 按 ticketCategoryId 分组并计数
-        Map<Long, Long> countMap = orderTicketUserCreateDtoList.stream()
-                .collect(Collectors.groupingBy(OrderTicketUserCreateDto::getTicketCategoryId, Collectors.counting()));
-        
-        //将统计结果转换为列表，存入 TicketCountDto 对象中
-        List<TicketCategoryCountDto> ticketCountList = countMap.entrySet().stream()
-                .map(entry -> new TicketCategoryCountDto(entry.getKey(), entry.getValue()))
-                .toList();
+        ReduceRemainNumberDto reduceRemainNumberDto = buildReduceRemainNumberDto(orderCreateMq);
         //修改节目服务中的座位状态和扣减库存
-        ReduceRemainNumberDto reduceRemainNumberDto = new ReduceRemainNumberDto();
-        reduceRemainNumberDto.setProgramId(orderCreateMq.getProgramId());
-        reduceRemainNumberDto.setSellStatus(SellStatus.LOCK.getCode());
-        reduceRemainNumberDto.setSeatIdList(orderTicketUserCreateDtoList.stream().map(OrderTicketUserCreateDto::getSeatId).collect(Collectors.toList()));
-        reduceRemainNumberDto.setTicketCategoryCountDtoList(ticketCountList);
         ApiResponse<Boolean> programApiResponse = programClient.operateSeatLockAndTicketCategoryRemainNumber(reduceRemainNumberDto);
         if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
             //丢弃记录统一由 CreateOrderConsumer 外层 catch 写入，此处不再重复写入
@@ -898,6 +885,61 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         }
         redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ,orderNumber),orderNumber,1, TimeUnit.MINUTES);
         return orderNumber;
+    }
+
+    /**
+     * 批量创建订单（V5 消费端批量建单）。
+     * 批量 Feign 扣减 DB 座位/余票（一次 RPC 减少往返），逐单 DB 建单（createByMq，独立事务）。
+     * 返回建单失败的订单列表，由调用方（CreateOrderConsumer）写入 DISCARD_ORDER 供对账补偿。
+     */
+    public List<OrderCreateMq> createMqBatch(List<OrderCreateMq> orderCreateMqList) {
+        List<OrderCreateMq> failedMqList = new ArrayList<>();
+        if (CollectionUtil.isEmpty(orderCreateMqList)) {
+            return failedMqList;
+        }
+        // 1. 批量 Feign 扣减 DB 座位/余票（一次 RPC）
+        List<ReduceRemainNumberDto> reduceDtoList = orderCreateMqList.stream().map(this::buildReduceRemainNumberDto).toList();
+        ApiResponse<List<Boolean>> batchApiResponse = programClient.operateSeatLockAndTicketCategoryRemainNumberBatch(reduceDtoList);
+        boolean batchDeductOk = Objects.equals(batchApiResponse.getCode(), BaseCode.SUCCESS.getCode())
+                && batchApiResponse.getData() != null
+                && batchApiResponse.getData().size() == orderCreateMqList.size();
+        // 2. 逐单 DB 建单；Feign 失败或建单失败的订单进失败列表
+        for (int i = 0; i < orderCreateMqList.size(); i++) {
+            OrderCreateMq orderCreateMq = orderCreateMqList.get(i);
+            if (!batchDeductOk || !Boolean.TRUE.equals(batchApiResponse.getData().get(i))) {
+                failedMqList.add(orderCreateMq);
+                continue;
+            }
+            try {
+                String orderNumber = createByMq(orderCreateMq);
+                redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ, orderNumber), orderNumber, 1, TimeUnit.MINUTES);
+            } catch (Exception e) {
+                // DB 建单失败：Feign 已扣减 DB，显式反向恢复后进失败列表
+                rollbackProgramDataByCreateFail(orderCreateMq, reduceDtoList.get(i));
+                failedMqList.add(orderCreateMq);
+            }
+        }
+        return failedMqList;
+    }
+
+    /**
+     * 从建单消息构建节目侧扣减参数（Feign 入参）。
+     */
+    private ReduceRemainNumberDto buildReduceRemainNumberDto(OrderCreateMq orderCreateMq) {
+        List<OrderTicketUserCreateDto> orderTicketUserCreateDtoList = orderCreateMq.getOrderTicketUserCreateDtoList();
+        //使用 Stream API 按 ticketCategoryId 分组并计数
+        Map<Long, Long> countMap = orderTicketUserCreateDtoList.stream()
+                .collect(Collectors.groupingBy(OrderTicketUserCreateDto::getTicketCategoryId, Collectors.counting()));
+        //将统计结果转换为列表，存入 TicketCountDto 对象中
+        List<TicketCategoryCountDto> ticketCountList = countMap.entrySet().stream()
+                .map(entry -> new TicketCategoryCountDto(entry.getKey(), entry.getValue()))
+                .toList();
+        ReduceRemainNumberDto reduceRemainNumberDto = new ReduceRemainNumberDto();
+        reduceRemainNumberDto.setProgramId(orderCreateMq.getProgramId());
+        reduceRemainNumberDto.setSellStatus(SellStatus.LOCK.getCode());
+        reduceRemainNumberDto.setSeatIdList(orderTicketUserCreateDtoList.stream().map(OrderTicketUserCreateDto::getSeatId).collect(Collectors.toList()));
+        reduceRemainNumberDto.setTicketCategoryCountDtoList(ticketCountList);
+        return reduceRemainNumberDto;
     }
 
     /**

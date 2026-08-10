@@ -34,6 +34,13 @@ public interface ProgramClient {
     ApiResponse<Boolean> operateSeatLockAndTicketCategoryRemainNumber(ReduceRemainNumberDto reduceRemainNumberDto);
 
     /**
+     * 锁座 + 扣减票档余量（批量，V5 消费端批量建单）
+     * 一次 RPC 处理多单，返回逐单是否成功
+     */
+    @PostMapping("/program/interior/reduce/remain/number/batch")
+    ApiResponse<List<Boolean>> operateSeatLockAndTicketCategoryRemainNumberBatch(List<ReduceRemainNumberDto> reduceRemainNumberDtoList);
+
+    /**
      * 查询票档集合（价格+余量）
      */
     @PostMapping(value = "/ticket/category/select/list")

@@ -20,15 +20,15 @@ import java.util.concurrent.TimeUnit;
 
 public class BusinessThreadPool {
     private static final ThreadPoolExecutor execute = new ThreadPoolExecutor(
-            /* corePoolSize = CPU + 1（IO 密集型场景预留） */
-            Runtime.getRuntime().availableProcessors() + 1,
-            /* maxPoolSize = CPU × 5 */
-            Runtime.getRuntime().availableProcessors() * 5,
+            /* corePoolSize = CPU × 2（高并发下单路径频繁提交异步任务） */
+            Runtime.getRuntime().availableProcessors() * 2,
+            /* maxPoolSize = CPU × 10 */
+            Runtime.getRuntime().availableProcessors() * 10,
             /* keepAliveTime = 60s */
             60,
             TimeUnit.SECONDS,
-            /* workQueue = 600，有界防 OOM */
-            new ArrayBlockingQueue<>(600),
+            /* workQueue = 2000，有界防 OOM */
+            new ArrayBlockingQueue<>(2000),
             new BusinessNameThreadFactory(),
             new ThreadPoolRejectedExecutionHandler.BusinessAbortPolicy());
 

@@ -76,6 +76,7 @@ spring:
     bootstrap-servers: 127.0.0.1:9092
     producer:
       retries: 3
+      acks: all
       batch-size: 32768
       linger-ms: 5
       compression-type: snappy
