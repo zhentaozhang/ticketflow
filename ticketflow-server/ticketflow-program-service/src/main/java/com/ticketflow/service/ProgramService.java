@@ -761,6 +761,10 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     public Boolean operateSeatLockAndTicketCategoryRemainNumber(ReduceRemainNumberDto reduceRemainNumberDto) {
         List<TicketCategoryCountDto> ticketCategoryCountDtoList = reduceRemainNumberDto.getTicketCategoryCountDtoList();
         List<Long> seatIdList = reduceRemainNumberDto.getSeatIdList();
+        // 空座位列表直接抛业务异常，避免生成 "id IN ()" 触发 ShardingSphere SQL 解析异常
+        if (CollectionUtil.isEmpty(seatIdList)) {
+            throw new TicketFlowFrameException(BaseCode.SEAT_NOT_EXIST);
+        }
 
         // MyBatis Plus LambdaQueryWrapper：用面向对象方式拼 WHERE 条件，避免写死字符串字段名
         // 相当于：SELECT * FROM d_seat WHERE program_id = ? AND id IN (?, ?, ?)
@@ -819,6 +823,10 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     @Transactional(rollbackFor = Exception.class)
     public Boolean operateProgramData(ProgramOperateDataDto programOperateDataDto) {
         List<Long> seatIdList = programOperateDataDto.getSeatIdList();
+        // 空座位列表直接抛业务异常，避免生成 "id IN ()" 触发 ShardingSphere SQL 解析异常
+        if (CollectionUtil.isEmpty(seatIdList)) {
+            throw new TicketFlowFrameException(BaseCode.SEAT_NOT_EXIST);
+        }
         LambdaQueryWrapper<Seat> seatLambdaQueryWrapper =
                 Wrappers.lambdaQuery(Seat.class)
                         .eq(Seat::getProgramId, programOperateDataDto.getProgramId())
