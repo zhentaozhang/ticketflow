@@ -30,11 +30,11 @@ for version in v1 v2 v3 v4; do
     sleep 5
   done
   
-  # 版本间冷却 + 缓存重置
+  # 版本间冷却 + 数据预热（DB 重置 + 缓存预热）
   echo "版本 $version 完成，冷却 10 秒..."
-  curl -sf -X POST http://127.0.0.1:6086/program/reset/execute \
+  curl -sf -X POST http://127.0.0.1:6086/program/data/preheat \
     -H "Content-Type: application/json" \
-    -d '{"programId": 9999}' > /dev/null || true
+    -d '{"id": 9999}' > /dev/null || true
   sleep 10
 done
 

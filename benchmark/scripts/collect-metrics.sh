@@ -70,6 +70,20 @@ query_and_append "jvm_threads_live_threads" "live_threads"
 query_and_append "hikaricp_connections_active{pool='HikariPool-1'}" "hikari_active_connections"
 query_and_append "hikaricp_connections_pending{pool='HikariPool-1'}" "hikari_pending_threads"
 
+# Kafka consumer lag（create_order_data 消费组；v4 异步链路是否积压/消费成瓶颈）
+KAFKA_LAG=$(docker exec ticketflow-kafka /opt/bitnami/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --describe --group create_order_data 2>/dev/null \
+  | awk 'NR>1 && NF>=6 {lag+=$6} END {print lag+0}')
+if [ -z "$KAFKA_LAG" ]; then
+  KAFKA_LAG="N/A"
+fi
+if [ "$FIRST" = true ]; then
+  FIRST=false
+else
+  echo "," >> "$OUTPUT_FILE"
+fi
+echo "  \"kafka_consumer_lag\": \"$KAFKA_LAG\"" >> "$OUTPUT_FILE"
+
 echo "" >> "$OUTPUT_FILE"
 echo "}" >> "$OUTPUT_FILE"
 

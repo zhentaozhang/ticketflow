@@ -18,6 +18,8 @@ def parse_args():
     p.add_argument("--label", required=True)
     p.add_argument("--version", required=True)
     p.add_argument("--concurrency", type=int, required=True)
+    p.add_argument("--rate", type=int, default=0)
+    p.add_argument("--mode", default="closed")
     p.add_argument("--duration", type=int, required=True)
     p.add_argument("--stats", required=True)
     p.add_argument("--failure", required=True)
@@ -86,7 +88,9 @@ def main():
 
     result = {
         "version": args.version,
+        "mode": args.mode,
         "concurrency": args.concurrency,
+        "rate": args.rate,
         "duration": args.duration,
         "gatling": {
             "total": total,

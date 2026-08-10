@@ -5,6 +5,7 @@ import io.gatling.http.Predef._
 import scala.concurrent.duration._
 import config.TicketFlowProtocol._
 import scenarios.CreateOrderScenario
+import scenarios.OpenLoopOrderScenario
 import scenarios.OrderResultCounter
 
 class OrderBenchmark extends Simulation {
@@ -14,18 +15,31 @@ class OrderBenchmark extends Simulation {
   val concurrency = sys.props.get("concurrency").map(_.toInt).getOrElse(30)
   val duration = sys.props.get("duration").map(_.toInt).getOrElse(20)
   val resultsDir = sys.props.getOrElse("resultsDir", "results")
+  // closed=闭环真并发（默认）；openloop=开环到达率（constantUsersPerSec）
+  val mode = sys.props.getOrElse("mode", "closed")
+  val rate = sys.props.get("rate").map(_.toInt).getOrElse(concurrency)
 
-  println(s">>> Benchmark: version=$version, concurrency=$concurrency, duration=${duration}s")
+  println(s">>> Benchmark: version=$version, mode=$mode, concurrency=$concurrency, rate=$rate, duration=${duration}s")
 
-  setUp(
+  val pop = if (mode == "openloop") {
+    // 开环：constantUsersPerSec 恒定到达率，每用户只下单一次
+    OpenLoopOrderScenario(version)
+      .inject(constantUsersPerSec(rate).during(duration.seconds))
+      .protocols(httpProtocol)
+  } else {
     CreateOrderScenario(version, concurrency, duration)
       .inject(
         rampUsers(concurrency).during(10.seconds)
       )
       .protocols(httpProtocol)
-  )
+  }
+
+  setUp(pop)
 
   after {
-    OrderResultCounter.dump(s"${version}-c${concurrency}-d${duration}", resultsDir)
+    val label =
+      if (mode == "openloop") s"${version}-r${rate}-d${duration}"
+      else s"${version}-c${concurrency}-d${duration}"
+    OrderResultCounter.dump(label, resultsDir)
   }
 }

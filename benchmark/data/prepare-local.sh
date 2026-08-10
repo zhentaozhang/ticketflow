@@ -84,10 +84,10 @@ curl -sf -X POST http://127.0.0.1:6086/program/detail \
   -H "Content-Type: application/json" \
   -d '{"id":9999}' > /dev/null && echo "节目详情已预热"
 
-# 调用数据预热接口
+# 调用数据预热接口（ProgramDataPreheatDto 字段为 programId）
 curl -sf -X POST http://127.0.0.1:6086/program/data/preheat \
   -H "Content-Type: application/json" \
-  -d '{"id":9999}' > /dev/null && echo "数据预热完成"
+  -d '{"programId":9999}' > /dev/null && echo "数据预热完成"
 
 # 重置 BloomFilter 加载节目数据
 curl -sf -X POST http://127.0.0.1:6086/program/reset/execute \
