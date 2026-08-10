@@ -65,9 +65,9 @@ import static com.ticketflow.constant.Constant.GLIDE_LINE;
  * 订单持久化(DB) → 支付回调 → 座位最终状态更新(Lua)
  * <p>
  * 对外暴露 3 条路径：
- * create()  — V1/V2/V21 同步路径
- * createNew() — V3/V31 同步路径（BaseProgramOrder 托管）
- * createNewAsync() — V4/V41 Kafka 异步路径
+ * create()  — V1/V2 同步路径
+ * createNew() — V3 同步路径（BaseProgramOrder 托管）
+ * createNewAsync() — V4 Kafka 异步路径
  */
 @Slf4j
 @Service
@@ -186,7 +186,7 @@ public class ProgramOrderService {
     }
 
     /**
-     * V1/V2/V21 同步入口（兼容保留）。
+     * V1/V2 同步入口（兼容保留）。
      * 委托 {@link #createNew} 执行：Lua 原子校验余票与座位 → RPC 调 order-service 建单。
      * <p>
      * 历史上 V1/V2 走"Java 非原子校验 + 无校验 Lua 扣减"，跨版本并发存在超卖窗口，

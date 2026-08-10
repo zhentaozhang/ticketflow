@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
  * 节目下单基础逻辑（本地锁模板）。
  * 按 ticketCategoryId 加本地锁（ReentrantLock per ticketCategoryId），
  * 回调中是否叠加分布式锁由策略实现决定；并发安全的最终底线是带校验的 Lua。
- * 被 V2/V3/V31/V4/V41 策略实现类调用
+ * 被 V2/V3/V4 策略实现类调用
  */
 @Slf4j
 @Component

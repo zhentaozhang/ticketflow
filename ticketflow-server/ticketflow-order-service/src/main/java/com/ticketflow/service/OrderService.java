@@ -655,7 +655,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
      *   data[2] = jsonArray                —— 调整余票数量（cancel 加回 / pay 扣减）
      *   data[3] = seatIdAndTicketUserIdDomainList —— 购票人关联记录
      * V4 路径额外走 Feign 调用 operateProgramData 更新 DB（DB 状态统一切换）。
-     * @param orderVersion 见 ProgramOrderVersion：V1=1, V2=2, V21=21, V3=3, V31=31, V4=4, V41=41
+     * @param orderVersion 见 ProgramOrderVersion：V1=1, V2=2, V3=3, V4=4
      */
     public void updateProgramRelatedDataResolution(Long programId,Map<Long,List<Long>> seatMap, OrderStatus orderStatus,Long identifierId, Long userId,
                                                    List<SeatIdAndTicketUserIdDomain> seatIdAndTicketUserIdDomainList,

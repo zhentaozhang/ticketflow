@@ -15,7 +15,7 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * Kafka 异步订单创建生产者。
- * V4/V41 策略使用的消息通道——ProgramOrderV41Strategy 调用 createNewAsync()
+ * V4 策略使用的消息通道——ProgramOrderV4Strategy 调用 createNewAsync()
  * 发送到此 Kafka topic，由消费端异步处理订单持久化。
  *
  * 支持异步回调（SuccessCallback / FailureCallback）用于记录消息发送日志

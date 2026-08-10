@@ -29,7 +29,7 @@ import static com.ticketflow.constant.ProgramOrderConstant.DELAY_ORDER_CANCEL_TO
 
 /**
  * 延迟订单取消消息发送器。
- * 订单创建成功后（V1/V2/V3/V21/V31 同步路径），发送一条延迟队列消息，
+ * 订单创建成功后（V1/V2/V3 同步路径），发送一条延迟队列消息，
  * 在 DELAY_ORDER_CANCEL_TIME 后触发订单取消。
  *
  * 发送流程：生成唯一 messageId → 插入消息发送日志 → push 到延迟队列 →
