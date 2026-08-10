@@ -41,3 +41,7 @@ benchmark/results/
 
 ### Benchmark dynamic data ###
 benchmark/src/test/resources/data/seats-*.csv
+
+### Python 编译缓存 ###
+__pycache__/
+*.pyc
