@@ -7,20 +7,22 @@ import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.initialize.impl.composite.CompositeContainer;
 import com.ticketflow.repeatexecutelimit.annotion.RepeatExecuteLimit;
 import com.ticketflow.service.ProgramOrderService;
+import com.ticketflow.service.domain.CreateOrderTemporaryData;
+import com.ticketflow.service.strategy.BaseProgramOrder;
 import com.ticketflow.service.strategy.ProgramOrderStrategy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import static com.ticketflow.core.DistributedLockConstants.PROGRAM_ORDER_CREATE_V5;
+
 /**
- * V5 订单创建策略——无锁 + fire-and-forget 异步提交。
+ * V5 订单创建策略——V4 的独立注册变体（基线拷贝）。
  *
- * 与 V4 的差异：
- * - 去掉应用层本地锁（并发安全由 Lua 原子扣减兜底，消除 70005 锁竞争失败）
- * - Kafka 发送不等待确认（fire-and-forget，立即返回订单号），
- *   请求线程不被 Kafka RTT 占用，吞吐拐点最高
- * 最终一致性由消息对账（ReconciliationTask）+ 延迟取消队列兜底。
- **/
+ * 与 V4 采用相同的编排：复合校验 → BaseProgramOrder 本地锁（按 ticketCategoryId）→
+ * 锁内 Lua 原子扣减 → 锁外 createNewAsyncAfterLock() 发 Kafka 异步建单。
+ * 用于后续单机优化的对照基线。
+ */
 @Slf4j
 @Component
 public class ProgramOrderV5Strategy implements ProgramOrderStrategy {
@@ -29,11 +31,14 @@ public class ProgramOrderV5Strategy implements ProgramOrderStrategy {
     private ProgramOrderService programOrderService;
 
     @Autowired
+    private BaseProgramOrder baseProgramOrder;
+
+    @Autowired
     private CompositeContainer compositeContainer;
 
     /**
-     * 创建订单（V5 无锁 fire-and-forget 版本）
-     * 校验链 → Lua 原子扣减（无锁）→ 提交 Kafka（不等待确认）立即返回订单号
+     * 创建订单（V5 异步版本，V4 基线拷贝）
+     * 锁内仅执行 Lua 原子扣减（余票/座位），锁外再发送 Kafka 建单消息。
      *
      * @param programOrderCreateDto 订单创建参数
      * @return 订单编号
@@ -44,7 +49,11 @@ public class ProgramOrderV5Strategy implements ProgramOrderStrategy {
     @Override
     public String createOrder(ProgramOrderCreateDto programOrderCreateDto) {
         compositeContainer.execute(CompositeCheckType.PROGRAM_ORDER_CREATE_CHECK.getValue(), programOrderCreateDto);
-        return programOrderService.createNewAsyncFireAndForget(programOrderCreateDto, ProgramOrderVersion.V5_VERSION.getValue());
+        CreateOrderTemporaryData createOrderTemporaryData = baseProgramOrder.localLockExecute(
+                PROGRAM_ORDER_CREATE_V5, programOrderCreateDto,
+                () -> programOrderService.createOrderOperateProgramCacheResolution(programOrderCreateDto));
+        return programOrderService.createNewAsyncAfterLock(programOrderCreateDto, createOrderTemporaryData,
+                ProgramOrderVersion.V5_VERSION.getValue());
     }
 
     /**

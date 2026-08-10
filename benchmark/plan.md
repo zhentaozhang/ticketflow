@@ -162,43 +162,24 @@ v1/v2/v3 同步路径 120 QPS 全部崩（12-36%）。版本排序 v4 > v3 > v2 
 - **遗留**：120+ QPS 尾部消息仍可能因 MESSAGE_DELAY_TIME 超时丢弃，
   属业务防超卖设计（延迟取消/座位回滚），由 DISCARD_ORDER + 对账任务补偿
 
-## V5（v2 设计，2026-08-10 实测）
+## V5（基线拷贝，2026-08-10）
 
-### 设计
-V5 = 无锁原子扣减 + fire-and-forget 异步提交 + 批量消费：
-- 去掉应用层锁（Lua 原子兜底并发安全）
-- Kafka 发送不等待 ack（请求线程不被 Kafka RTT 占用）
-- 消费端 batch listener（12 分区）+ 批量 Feign 扣减（一次 RPC 多单）
+**决策**：V5 实验性架构（无锁 + fire-and-forget + 批量 Feign）实测未在单机单 Redis 环境兑现优势，
+已回退。V5 现为 **V4 的独立注册拷贝**（ProgramOrderV5Strategy 与 V41Strategy 相同编排：
+校验 → 本地锁（PROGRAM_ORDER_CREATE_V5）→ 锁内 Lua → 锁外 createNewAsyncAfterLock 发 Kafka），
+作为后续**单机优化 V4** 的对照基线版本（同一套压测协议下 A/B 对比 V4）。
 
-### 实现（T12-T16）
-| # | 改动 | 文件 |
-|---|------|------|
-| T12 | ProgramOrderV5Strategy（无锁）+ V5 端点 + 版本枚举 | strategy/impl + Controller + ProgramOrderVersion |
-| T13 | fire-and-forget：createOrderByMqAsync / createNewAsyncFireAndForget | ProgramOrderService |
-| T14 | BusinessThreadPool 扩容（core CPU+1→×2、max ×5→×10、队列 600→2000） | BusinessThreadPool |
-| T15 | 批量消费：KafkaConsumerConfig(batch factory) + CreateOrderConsumer 批量 | order-service |
-| T16 | 批量 Feign：operateSeatLockAndTicketCategoryRemainNumberBatch + OrderService.createMqBatch | program/order-service |
+回退清单（相对 V5 实验版）：
+- fire-and-forget（createOrderByMqAsync / createNewAsyncFireAndForget / doCreateV2Async）已删除
+- 批量消费（KafkaConsumerConfig batch / createMqBatch / 批量 Feign）已回退为单条 listener + createMq
+- BusinessThreadPool / AUTO_MATCH_RETRY_TIMES / producer acks 恢复 V4 原状
+- 保留：create_order topic 12 分区 + consumer concurrency 12（V4 优化阶段的消费端扩容）
 
-### 实测（开环 60s）
-| rate | v4 | v5第一轮 | v5第二轮 |
-|------|-----|---------|---------|
-| 80 | 100% | 100% | - |
-| 120 | 100% | 96.3% (p50 3374) | 98.2% (p50 1548) |
-| 160 | 81.0% | 80.5% | 53.3% |
-| 200 | 66.5% | 35.3% | 50.5% |
-| 300 | - | 33.9% | 24.0% |
+### 单机优化 V4 的待验证方向（基于 V5 实验结论）
+1. 单请求处理 ~1.5s 的分布需 profiling（Lua 命令密集 / composite 校验链 / BusinessThreadPool 降级同步）
+2. 消费端 DB 单条事务是落库差上限（批量 Feign 帮助有限，需 DB 批量 insert）
+3. 无锁化需 Redis 集群配套；单机下锁对 Redis 有保护作用
 
-### 结论（未全面达标）
-1. **fire-and-forget 生效**：200 档 waiting=0（V4 同档 waiting 数千），请求端吞吐能力提升
-2. **120 档改善**：第二轮 p50 3374→1548ms、成功率 96.3%→98.2%
-3. **剩余瓶颈**：
-   - 单请求处理 ~1.5s（120 QPS 在途 ≈ Tomcat 200 线程满）→ 高到达率 connection timed out
-     （需 profiling：Lua 命令密集 or composite 校验链）
-   - 消费端落库差仍大（DB 单条事务 + Feign 批量帮助有限）
-   - 无锁化在单机 Redis 下并发全开 → Redis 命令堆积
-4. **判断**：v5 的异步化方向正确，但单机单 Redis 环境下无法兑现无锁化优势；
-   fire-and-forget + 批量消费需配套 Redis 集群 / 消费端 DB 批量 insert 才完整。
-   建议保留 v5 方向，单机场景以 V4 为最优。
 
 ### Phase 2：四版本同协议对比
 - v1/v2/v3/v4 × 多票档均匀分布（模拟真实混票）

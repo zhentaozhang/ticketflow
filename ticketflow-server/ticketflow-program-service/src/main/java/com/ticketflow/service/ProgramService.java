@@ -811,28 +811,6 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     }
 
     /**
-     * 批量扣减库存（V5 消费端批量建单使用）。
-     * 一次 RPC 处理多单，减少 Feign 往返次数；逐单独立事务（经 self 代理调用保证 AOP/事务生效），
-     * 任一单失败不影响其余单，返回逐单结果供调用方补偿。
-     *
-     * @param reduceRemainNumberDtoList 多单扣减参数
-     * @return 逐单是否成功
-     */
-    public List<Boolean> operateSeatLockAndTicketCategoryRemainNumberBatch(List<ReduceRemainNumberDto> reduceRemainNumberDtoList) {
-        List<Boolean> results = new ArrayList<>(reduceRemainNumberDtoList.size());
-        for (ReduceRemainNumberDto reduceRemainNumberDto : reduceRemainNumberDtoList) {
-            try {
-                results.add(programService.operateSeatLockAndTicketCategoryRemainNumber(reduceRemainNumberDto));
-            } catch (Exception e) {
-                log.error("批量扣减库存失败 programId : {} seatIdList : {}",
-                        reduceRemainNumberDto.getProgramId(), JSON.toJSONString(reduceRemainNumberDto.getSeatIdList()), e);
-                results.add(false);
-            }
-        }
-        return results;
-    }
-
-    /**
      * V1-V3：DB 直接改 SOLD（乐观：预期座位无人抢），失败后靠 Lua 回滚
      * V4：  先校验 LOCK 状态（悲观：只有锁定中的座位才能支付/取消），
      * 再按 pay/cancel 分别走 SOLD / NO_SOLD + 库存归还
