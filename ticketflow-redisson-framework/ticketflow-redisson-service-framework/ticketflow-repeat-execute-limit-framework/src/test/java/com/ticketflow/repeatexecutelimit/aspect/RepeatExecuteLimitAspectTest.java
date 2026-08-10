@@ -157,7 +157,6 @@ class RepeatExecuteLimitAspectTest {
     @Test
     void successShouldNotWriteIdempotentFlagWhenDurationZero() throws Throwable {
         stubLockName();
-        when(redissonDataHandle.get(PREFIX_NAME + LOCK_NAME)).thenReturn(null);
         stubLocalLockFree();
         ServiceLocker serviceLocker = mock(ServiceLocker.class);
         when(serviceLockFactory.getLock(LockType.Reentrant)).thenReturn(serviceLocker);
@@ -187,7 +186,6 @@ class RepeatExecuteLimitAspectTest {
     @Test
     void classLevelAnnotationShouldApplyLimitWhenMethodNotAnnotated() throws Throwable {
         stubLockName();
-        when(redissonDataHandle.get(PREFIX_NAME + LOCK_NAME)).thenReturn(null);
         stubLocalLockFree();
         ServiceLocker serviceLocker = mock(ServiceLocker.class);
         when(serviceLockFactory.getLock(LockType.Reentrant)).thenReturn(serviceLocker);
@@ -202,7 +200,8 @@ class RepeatExecuteLimitAspectTest {
         RepeatExecuteLimit repeatLimit = stubRepeatLimit(0L);
 
         assertEquals("ok", aspect().aroundClass(joinPoint, repeatLimit));
-        verify(redissonDataHandle, times(2)).get(PREFIX_NAME + LOCK_NAME);
+        // durationTime=0 时不写幂等标记，跳过幂等标识 GET（省 Redis 往返）
+        verify(redissonDataHandle, never()).get(anyString());
         verify(serviceLocker).unlock(LOCK_NAME);
     }
 

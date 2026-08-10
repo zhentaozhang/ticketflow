@@ -103,11 +103,16 @@ public class RepeatExecuteLimitAspect {
         String lockName = lockInfoHandle.getLockName(joinPoint, repeatLimit.name(), repeatLimit.keys());
         //幂等标识
         String repeatFlagName = PREFIX_NAME + lockName;
+        //durationTime=0 时不写幂等标记，GET 恒为 null；跳过幂等标识查询以省 2 次 Redis 往返，
+        //仍保留本地锁 + 分布式锁防并发（语义与原来完全等价）
+        boolean needIdempotentCheck = durationTime > 0;
         //获得幂等标识
-        String flagObject = redissonDataHandle.get(repeatFlagName);
-        //如果幂等标识的值为success，说明已经有请求在执行了，这次请求直接结束
-        if (SUCCESS_FLAG.equals(flagObject)) {
-            throw new TicketFlowFrameException(message);
+        if (needIdempotentCheck) {
+            String flagObject = redissonDataHandle.get(repeatFlagName);
+            //如果幂等标识的值为success，说明已经有请求在执行了，这次请求直接结束
+            if (SUCCESS_FLAG.equals(flagObject)) {
+                throw new TicketFlowFrameException(message);
+            }
         }
         //获取本地锁
         ReentrantLock localLock = localLockCache.getLock(lockName, false);
@@ -126,10 +131,12 @@ public class RepeatExecuteLimitAspect {
             if (result) {
                 try {
                     //再次获取幂等标识
-                    flagObject = redissonDataHandle.get(repeatFlagName);
-                    //如果幂等标识的值为success，说明已经有请求在执行了，这次请求直接结束
-                    if (SUCCESS_FLAG.equals(flagObject)) {
-                        throw new TicketFlowFrameException(message);
+                    if (needIdempotentCheck) {
+                        String flagObject = redissonDataHandle.get(repeatFlagName);
+                        //如果幂等标识的值为success，说明已经有请求在执行了，这次请求直接结束
+                        if (SUCCESS_FLAG.equals(flagObject)) {
+                            throw new TicketFlowFrameException(message);
+                        }
                     }
                     //执行业务逻辑
                     obj = joinPoint.proceed();
