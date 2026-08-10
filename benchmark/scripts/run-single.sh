@@ -17,6 +17,7 @@ CONCURRENCY=${2:-30}
 DURATION=${3:-20}
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 RESULT_DIR="$PROJECT_DIR/results"
+mkdir -p "$RESULT_DIR"
 SEATS_CSV="$PROJECT_DIR/src/test/resources/data/seats-9999.csv"
 LABEL="${VERSION}-c${CONCURRENCY}-d${DURATION}"
 
@@ -92,15 +93,15 @@ mvn -f "$PROJECT_DIR/pom.xml" gatling:test \
 # set -e -o pipefail 下 mvn 失败管道即失败退出，无需额外检查
 # 注意：Gatling 报告固定落 target/gatling/（gatling.resultsDirectory 非插件属性，不传）
 
-# 5. 落库对账：等 mq 消费完再计数
-echo "[5/7] 等待 mq 消费 (30s) 后落库计数..."
+# 5. 指标采集（压测结束立即采，避免 mq 等待期污染瞬时 gauge）
+echo "[5/7] 采集压测指标..."
+bash "$SCRIPT_DIR/collect-metrics.sh" "$LABEL"
+
+# 6. 落库对账：等 mq 消费完再计数
+echo "[6/7] 等待 mq 消费 (30s) 后落库计数..."
 sleep 30
 ORDERS_AFTER=$(count_orders)
 echo "  压测后 d_order 总量: $ORDERS_AFTER"
-
-# 6. 指标采集
-echo "[6/7] 采集压测指标..."
-bash "$SCRIPT_DIR/collect-metrics.sh" "$LABEL"
 
 # 7. 失败分类汇总 + 结果 json
 echo "[7/7] 生成结果 json..."

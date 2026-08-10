@@ -43,7 +43,7 @@ def main():
     stats = load_json(args.stats)
     with open(args.failure) as f:
         failure_raw = json.load(f)
-    failure_counts = {k: v for k, v in failure_raw.items()}
+    failure_counts = dict(failure_raw)
 
     # simulation.log KO 计数（Gatling 3.11 为 TAB 分隔，KO 是独立字段：
     # REQUEST\t\tcreate_order_v1\t...\tKO\tjsonPath(...)）
@@ -62,8 +62,9 @@ def main():
     p95 = req.get("percentiles3", {}).get("ok")
 
     no_json = int(failure_counts.pop("NO_JSON", 0))
-    business_failures = sum(v for k, v in failure_counts.items() if k != "0")
-    success_count = int(failure_counts.get("0", 0))
+    # "0" 是成功计数（respCode 0），pop 出后 business 桶只含真失败
+    success_count = int(failure_counts.pop("0", 0))
+    business_failures = sum(failure_counts.values())
 
     # 对账：业务失败 + NO_JSON 应 ≈ KO 总数（HTTP 层）
     reconciled = business_failures + no_json
