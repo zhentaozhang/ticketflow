@@ -7,6 +7,7 @@ import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.initialize.impl.composite.CompositeContainer;
 import com.ticketflow.repeatexecutelimit.annotion.RepeatExecuteLimit;
 import com.ticketflow.service.ProgramOrderService;
+import com.ticketflow.service.domain.CreateOrderTemporaryData;
 import com.ticketflow.service.strategy.BaseProgramOrder;
 import com.ticketflow.service.strategy.ProgramOrderStrategy;
 import lombok.extern.slf4j.Slf4j;
@@ -35,8 +36,8 @@ public class ProgramOrderV41Strategy implements ProgramOrderStrategy {
     
     /**
      * 创建订单（V41 异步变体版本）
-     * 委托 BaseProgramOrder.localLockCreateOrder 管理本地锁，
-     * 回调 createNewAsync() 走 Kafka 异步消费，适用于高并发削峰场景
+     * 锁内仅执行 Lua 原子扣减（余票/座位），锁外再发送 Kafka 建单消息，
+     * 避免同步等待 Kafka 发送确认拉长锁持有时间、放大锁竞争失败（70005）。
      *
      * @param programOrderCreateDto 订单创建参数
      * @return 订单编号
@@ -47,8 +48,11 @@ public class ProgramOrderV41Strategy implements ProgramOrderStrategy {
     @Override
     public String createOrder(ProgramOrderCreateDto programOrderCreateDto) {
         compositeContainer.execute(CompositeCheckType.PROGRAM_ORDER_CREATE_CHECK.getValue(),programOrderCreateDto);
-        return baseProgramOrder.localLockCreateOrder(PROGRAM_ORDER_CREATE_V4,programOrderCreateDto,
-                () -> programOrderService.createNewAsync(programOrderCreateDto,ProgramOrderVersion.V41_VERSION.getValue()));
+        CreateOrderTemporaryData createOrderTemporaryData = baseProgramOrder.localLockExecute(
+                PROGRAM_ORDER_CREATE_V4, programOrderCreateDto,
+                () -> programOrderService.createOrderOperateProgramCacheResolution(programOrderCreateDto));
+        return programOrderService.createNewAsyncAfterLock(programOrderCreateDto, createOrderTemporaryData,
+                ProgramOrderVersion.V41_VERSION.getValue());
     }
     
     /**

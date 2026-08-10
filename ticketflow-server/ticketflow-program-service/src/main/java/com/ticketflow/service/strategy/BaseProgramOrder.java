@@ -43,8 +43,24 @@ public class BaseProgramOrder {
      * @param lockTask               下单回调（策略实现类中的实际下单逻辑）
      * @return 订单编号
      */
-    public String localLockCreateOrder(String lockKeyPrefix, ProgramOrderCreateDto programOrderCreateDto, 
+    public String localLockCreateOrder(String lockKeyPrefix, ProgramOrderCreateDto programOrderCreateDto,
                                             LockTask<String> lockTask){
+        return localLockExecute(lockKeyPrefix, programOrderCreateDto, lockTask);
+    }
+
+    /**
+     * 本地锁（按 ticketCategoryId 加 ReentrantLock）泛型模板，回调结果类型由调用方指定。
+     * 锁内只应保留必须互斥的临界操作（如 Lua 扣减），耗时操作（如 Kafka 发送）应放在锁外，
+     * 以缩短锁持有时间、降低锁竞争失败率。
+     *
+     * @param lockKeyPrefix          锁 key 前缀（区分不同策略版本）
+     * @param programOrderCreateDto  订单创建请求参数（含座位/票档信息）
+     * @param lockTask               锁内回调，返回任意类型结果
+     * @param <T>                    回调返回类型
+     * @return 锁内回调的执行结果
+     */
+    public <T> T localLockExecute(String lockKeyPrefix, ProgramOrderCreateDto programOrderCreateDto,
+                                      LockTask<T> lockTask){
         // 第一步：提取不重复的票价档位 ID（选座时从 seatDtoList 提取，不选座时直接取 ticketCategoryId）
         List<SeatDto> seatDtoList = programOrderCreateDto.getSeatDtoList();
         List<Long> ticketCategoryIdList = new ArrayList<>();

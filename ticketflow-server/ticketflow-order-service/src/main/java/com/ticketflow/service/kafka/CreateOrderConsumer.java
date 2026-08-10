@@ -28,10 +28,10 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
 /**
  * Kafka 异步订单创建消费者。
  * 接收 V4/V41 策略发送的创建订单消息，解析 OrderCreateMq，
- * 调用 OrderService.create() 完成订单持久化。
+ * 调用 OrderService.createMq() 完成订单持久化。
  *
- * 幂等保障：先检查 Redis 中 ORDER_MQ 标记，已消费直接跳过。
- * 延迟消费：收到消息后等待 MESSAGE_DELAY_TIME（5秒），
+ * 幂等保障：createMq 的 @RepeatExecuteLimit（60秒）防止同一订单号重复建单。
+ * 延迟消费：收到消息后等待 MESSAGE_DELAY_TIME（60秒），
  *           给 program-service 留出 Redis 数据同步时间。
  *
  * 丢弃订单：超过丢弃时间阈值的消息写入 DISCARD_ORDER 并记录原因
@@ -52,7 +52,11 @@ public class CreateOrderConsumer {
     
     public static Long MESSAGE_DELAY_TIME = 60000L;
     
-    @KafkaListener(topics = {SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"${spring.kafka.topic:create_order}"})
+    /**
+     * 消费并行度与 topic 分区数一致（create_order topic 调整为 12 分区）。
+     * 每分区一个 consumer，提升订单创建消费吞吐，缓解高到达率下消费积压/超时丢弃。
+     */
+    @KafkaListener(topics = {SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"${spring.kafka.topic:create_order}"}, concurrency = "12")
     public void consumerOrderMessage(ConsumerRecord<String,String> consumerRecord){
         String value = consumerRecord.value();
         if (StringUtil.isEmpty(value)) {
@@ -68,7 +72,7 @@ public class CreateOrderConsumer {
             
             log.info("消费到kafka的创建订单消息 消息体: {} 延迟时间 : {} 毫秒",value,delayTime);
             
-            // 超过 MESSAGE_DELAY_TIME(5s) 的消息视为超时 → 丢入 DISCARD_ORDER（Redis list）用于后续对账分析 + Prometheus 计数
+            // 超过 MESSAGE_DELAY_TIME(60s) 的消息视为超时 → 丢入 DISCARD_ORDER（Redis list）用于后续对账分析 + Prometheus 计数
             if (currentTimeTimestamp - createOrderTimeTimestamp > MESSAGE_DELAY_TIME) {
                 Map<Long, List<OrderTicketUserCreateDto>> orderTicketUserSeatList =
                         orderCreateMq.getOrderTicketUserCreateDtoList().stream().collect(Collectors.groupingBy(OrderTicketUserCreateDto::getTicketCategoryId));
@@ -79,6 +83,12 @@ public class CreateOrderConsumer {
                 });
                 log.info("消费到kafka的创建订单消息延迟时间大于了 {} 毫秒 此订单消息被丢弃 订单号 : {} 座位信息 : {}",
                         delayTime,orderCreateMq.getOrderNumber(),JSON.toJSONString(seatMap));
+                //释放该订单在 Redis 中锁定的座位，避免座位永久锁死
+                try {
+                    orderService.rollbackProgramSeatByDiscard(orderCreateMq);
+                }catch (Exception rollbackException) {
+                    log.error("丢弃订单回滚Redis座位失败 订单号 : {}",orderCreateMq.getOrderNumber(),rollbackException);
+                }
                 //将延迟丢弃的订单放入redis中
                 redisCache.leftPushForList(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER,
                         orderCreateMq.getProgramId()),new DiscardOrder(orderCreateMq, DiscardOrderReason.CONSUMER_DELAY.getCode(), "消费延迟"));

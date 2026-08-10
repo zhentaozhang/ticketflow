@@ -39,7 +39,8 @@ for f in files:
     protocol = fl.get("protocol_no_json", 0)
     rows.append({
         "version": d.get("version"),
-        "concurrency": d.get("concurrency"),
+        "mode": d.get("mode", "closed"),
+        "rate": d.get("rate") or d.get("concurrency"),
         "success_rate": g.get("success_rate"),
         "total": g.get("total"),
         "p50": g.get("p50_ms"),
@@ -56,17 +57,17 @@ for f in files:
         "success_count": od.get("success_count"),
     })
 
-rows.sort(key=lambda r: (r["version"], r["concurrency"]))
+rows.sort(key=lambda r: (r["version"], r["rate"]))
 
-header = "| version | conc | 成功率 | 总请求 | p50(ms) | p95(ms) | -100 | 70005 | 40002 | 40003 | 其他业务 | 协议/连接 | 落库差 |"
-sep = "|---------|------|--------|--------|---------|---------|------|-------|-------|-------|----------|-----------|--------|"
+header = "| version | mode | rate/并发 | 成功率 | 总请求 | p50(ms) | p95(ms) | -100 | 70005 | 40002 | 40003 | 其他业务 | 协议/连接 | 落库差 |"
+sep = "|---------|------|----------|--------|--------|---------|---------|------|-------|-------|-------|----------|-----------|--------|"
 
 lines = [header, sep]
 for r in rows:
     f = r["failures"]
     rate = f"{r['success_rate']*100:.1f}%" if r["success_rate"] is not None else "N/A"
     lines.append(
-        f"| {r['version']} | {r['concurrency']} | {rate} | {r['total']} | "
+        f"| {r['version']} | {r['mode']} | {r['rate']} | {rate} | {r['total']} | "
         f"{r['p50']} | {r['p95']} | {f['-100']} | {f['70005']} | {f['40002']} | {f['40003']} | "
         f"{f['other_biz']} | {f['protocol_no_json']} | {r['order_delta']} |"
     )

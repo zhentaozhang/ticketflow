@@ -1,8 +1,10 @@
 #!/bin/bash
 # =============================================
-# 单版本压测执行脚本（真并发 + 选座 + 落库对账 + 失败汇总）
-# 用法: bash scripts/run-single.sh <version> [concurrency] [duration]
-# 示例: bash scripts/run-single.sh v4 30 20
+# 单版本压测执行脚本（真并发/开环 + 选座 + 落库对账 + 失败汇总）
+# 用法: bash scripts/run-single.sh <version> [concurrency] [duration] [mode] [rate]
+#   mode: closed=闭环真并发（默认）; openloop=开环到达率
+# 示例: bash scripts/run-single.sh v4 30 20            # 闭环 30 并发
+#       bash scripts/run-single.sh v4 30 20 openloop 200   # 开环 200 QPS
 # 前置: 服务已启动（6086），prometheus 已启动（9090），test-data.sql 已导入
 # =============================================
 set -e
@@ -15,26 +17,40 @@ source "$SCRIPT_DIR/lib-orders.sh"
 VERSION=${1:-v4}
 CONCURRENCY=${2:-30}
 DURATION=${3:-20}
+MODE=${4:-closed}
+RATE=${5:-$CONCURRENCY}
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 RESULT_DIR="$PROJECT_DIR/results"
 mkdir -p "$RESULT_DIR"
 SEATS_CSV="$PROJECT_DIR/src/test/resources/data/seats-9999.csv"
-LABEL="${VERSION}-c${CONCURRENCY}-d${DURATION}"
+if [ "$MODE" = "openloop" ]; then
+  LABEL="${VERSION}-r${RATE}-d${DURATION}"
+else
+  LABEL="${VERSION}-c${CONCURRENCY}-d${DURATION}"
+fi
 
 echo "=========================================="
-echo "  版本对比压测"
+echo "  版本压测"
 echo "  版本:     $VERSION"
-echo "  并发:     $CONCURRENCY"
-echo "  时长:     ${DURATION}s（ramp 10s 后的稳态窗口）"
+echo "  模式:     $MODE"
+echo "  并发/到达率: ${CONCURRENCY}/${RATE}"
+echo "  时长:     ${DURATION}s（开环满速 / 闭环 ramp 10s 后的稳态窗口）"
 echo "  开始时间: $(date '+%H:%M:%S')"
 echo "=========================================="
 
-# 1. 前置数据：允许选座 + 重置（清缓存使 permit_choose_seat 生效）
-echo "[1/7] 前置数据: permit_choose_seat=1 + reset..."
+# 1. 前置数据：允许选座 + 预热（DB 重置 + 节目详情/座位/余票全量入缓存）
+#    dataPreheat 内部先 resetExecute（重置 DB + 清缓存）再预热座位分辩率/余票，
+#    避免压测首波请求在锁内触发 DB 冷加载（拉长锁持有时间 → 70005 暴增）
+echo "[1/7] 前置数据: permit_choose_seat=1 + preheat..."
 MYSQL -e "UPDATE ticketflow_program_1.d_program_1 SET permit_choose_seat=1 WHERE id=9999;"
-curl -sf -X POST http://127.0.0.1:6086/program/reset/execute \
+if ! curl -sf -X POST http://127.0.0.1:6086/program/data/preheat \
   -H "Content-Type: application/json" \
-  -d '{"programId": 9999}' > /dev/null || echo "  (reset 接口不可用，跳过)"
+  -d '{"programId": 9999}' > /dev/null; then
+  echo "  (data/preheat 不可用，降级用 reset/execute)"
+  curl -sf -X POST http://127.0.0.1:6086/program/reset/execute \
+    -H "Content-Type: application/json" \
+    -d '{"programId": 9999}' > /dev/null || true
+fi
 curl -sf -X POST http://127.0.0.1:6086/test/reset \
   -H "Content-Type: application/json" \
   -d '{"testSendDto": "reset"}' > /dev/null || true
@@ -83,10 +99,12 @@ ORDERS_BEFORE=$(count_orders)
 echo "  压测前 d_order 总量: $ORDERS_BEFORE"
 
 # 4. 执行 Gatling 压测
-echo "[4/7] 执行压测 (version=$VERSION, concurrency=$CONCURRENCY, duration=${DURATION}s)..."
+echo "[4/7] 执行压测 (version=$VERSION, mode=$MODE, rate=$RATE, concurrency=$CONCURRENCY, duration=${DURATION}s)..."
 mvn -f "$PROJECT_DIR/pom.xml" gatling:test \
   -Dgatling.simulationClass=simulations.OrderBenchmark \
   -DappVersion="$VERSION" \
+  -Dmode="$MODE" \
+  -Drate="$RATE" \
   -Dconcurrency="$CONCURRENCY" \
   -Dduration="$DURATION" \
   -DresultsDir="$RESULT_DIR" 2>&1 | tee "$RESULT_DIR/gatling-${LABEL}-${TIMESTAMP}.log"
@@ -114,7 +132,9 @@ SIM_LOG="${LATEST_REPORT}simulation.log"
 python3 "$PROJECT_DIR/scripts/build-result.py" \
   --label "$LABEL" \
   --version "$VERSION" \
+  --mode "$MODE" \
   --concurrency "$CONCURRENCY" \
+  --rate "$RATE" \
   --duration "$DURATION" \
   --stats "$STATS_JSON" \
   --failure "$FAILURE_JSON" \
