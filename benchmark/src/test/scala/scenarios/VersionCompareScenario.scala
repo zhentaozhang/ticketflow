@@ -8,7 +8,7 @@ import feeders.TestDataFeeder._
 
 object VersionCompareScenario {
 
-  private val versions = List("v1", "v2", "v3", "v4")
+  private val versions = List("v1", "v2", "v3", "v4", "v5")
 
   def allScenarios: List[PopulationBuilder] = versions.map { v =>
     scenario(s"版本对比_${v}")

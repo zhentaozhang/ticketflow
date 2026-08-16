@@ -17,6 +17,8 @@ public enum ProgramOrderVersion {
     V3_VERSION("v3", "v3版本", 3),
 
     V4_VERSION("v4", "v4版本", 4),
+
+    V5_VERSION("v5", "v5版本", 5),
     ;
 
     private final String version;

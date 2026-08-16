@@ -189,6 +189,8 @@ public enum BaseCode {
 
     SEAT_OPERATE_IS_NOT_NOT_SOLD_OR_SOLD(40034, "座位操作状态只能是售卖或者为售卖"),
 
+    ORDER_CREATE_REPEAT(40035, "订单提交过于频繁，请稍后重试"),
+
     // ===== 座位/订单业务 (50000~59999) =====
     DELAY_QUEUE_CLIENT_NOT_EXIST(50001, "延迟队列客户端不存在"),
 

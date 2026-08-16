@@ -297,6 +297,60 @@ class ProgramServiceTest {
         }
 
         @Test
+        void V5支付成功_未投影座位直接置已售并补扣库存() {
+            //V5：投影尚未执行（DB 座位仍 NO_SOLD），支付时应容忍并补扣 remain
+            when(seatMapper.selectList(any(LambdaQueryWrapper.class)))
+                    .thenReturn(List.of(seat(SEAT_ID_1, SellStatus.NO_SOLD.getCode()), seat(SEAT_ID_2, SellStatus.NO_SOLD.getCode())));
+            when(ticketCategoryMapper.reduceRemainNumber(anyLong(), anyLong(), anyLong())).thenReturn(1);
+
+            Boolean result = programService.operateProgramData(operateDataDto(SellStatus.SOLD.getCode(), ProgramOrderVersion.V5_VERSION.getValue()));
+
+            assertTrue(result);
+            verify(seatMapper).update(any(Seat.class), any(LambdaUpdateWrapper.class));
+            verify(ticketCategoryMapper).reduceRemainNumber(2L, TICKET_CATEGORY_ID, PROGRAM_ID);
+        }
+
+        @Test
+        void V5支付成功_已投影座位锁定转已售不重复扣库存() {
+            //V5：投影已完成（DB 座位 LOCK），支付时不重复扣 remain
+            when(seatMapper.selectList(any(LambdaQueryWrapper.class)))
+                    .thenReturn(List.of(seat(SEAT_ID_1, SellStatus.LOCK.getCode()), seat(SEAT_ID_2, SellStatus.LOCK.getCode())));
+
+            Boolean result = programService.operateProgramData(operateDataDto(SellStatus.SOLD.getCode(), ProgramOrderVersion.V5_VERSION.getValue()));
+
+            assertTrue(result);
+            verify(seatMapper).update(any(Seat.class), any(LambdaUpdateWrapper.class));
+            verify(ticketCategoryMapper, never()).reduceRemainNumber(anyLong(), anyLong(), anyLong());
+        }
+
+        @Test
+        void V5取消_未投影座位置未售不归还库存() {
+            //V5：未投影（DB 座位 NO_SOLD、remain 从未扣减），取消时不归还 remain
+            when(seatMapper.selectList(any(LambdaQueryWrapper.class)))
+                    .thenReturn(List.of(seat(SEAT_ID_1, SellStatus.NO_SOLD.getCode()), seat(SEAT_ID_2, SellStatus.NO_SOLD.getCode())));
+
+            Boolean result = programService.operateProgramData(operateDataDto(SellStatus.NO_SOLD.getCode(), ProgramOrderVersion.V5_VERSION.getValue()));
+
+            assertTrue(result);
+            verify(seatMapper).update(any(Seat.class), any(LambdaUpdateWrapper.class));
+            verify(ticketCategoryMapper, never()).increaseRemainNumber(anyLong(), anyLong(), anyLong());
+        }
+
+        @Test
+        void V5取消_已投影座位锁定转未售并归还库存() {
+            //V5：已投影（DB 座位 LOCK、remain 已扣减），取消时归还 remain
+            when(seatMapper.selectList(any(LambdaQueryWrapper.class)))
+                    .thenReturn(List.of(seat(SEAT_ID_1, SellStatus.LOCK.getCode()), seat(SEAT_ID_2, SellStatus.LOCK.getCode())));
+            when(ticketCategoryMapper.increaseRemainNumber(anyLong(), anyLong(), anyLong())).thenReturn(1);
+
+            Boolean result = programService.operateProgramData(operateDataDto(SellStatus.NO_SOLD.getCode(), ProgramOrderVersion.V5_VERSION.getValue()));
+
+            assertTrue(result);
+            verify(seatMapper).update(any(Seat.class), any(LambdaUpdateWrapper.class));
+            verify(ticketCategoryMapper).increaseRemainNumber(2L, TICKET_CATEGORY_ID, PROGRAM_ID);
+        }
+
+        @Test
         void 订单版本为空_不抛NPE_按非V4处理() {
             when(seatMapper.selectList(any(LambdaQueryWrapper.class)))
                     .thenReturn(List.of(seat(SEAT_ID_1, SellStatus.NO_SOLD.getCode()), seat(SEAT_ID_2, SellStatus.NO_SOLD.getCode())));

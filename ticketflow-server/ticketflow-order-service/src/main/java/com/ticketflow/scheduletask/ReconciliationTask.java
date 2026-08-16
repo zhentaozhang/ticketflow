@@ -39,8 +39,8 @@ public class ReconciliationTask {
     @Autowired
     private ProgramClient programClient;
 
-    //对账任务每3分钟执行一次：补偿 DB 有单 Redis 无流水的记录，并回滚 DISCARD_ORDER 丢弃订单的 Redis 扣减
-    @Scheduled(cron = "0 0/3 * * * ? ")
+    //对账任务每1分钟执行一次：补偿 DB 有单 Redis 无流水的记录，并回滚 DISCARD_ORDER 丢弃订单的 Redis 扣减
+    @Scheduled(cron = "0 0/1 * * * ? ")
     public void reconciliationTask(){
         BusinessThreadPool.execute( () -> {
             try {

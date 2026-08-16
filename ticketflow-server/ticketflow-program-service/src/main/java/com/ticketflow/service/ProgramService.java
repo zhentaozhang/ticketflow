@@ -845,7 +845,9 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         }
         Integer orderVersion = programOperateDataDto.getOrderVersion();
         // V1-V3：直接在 DB 检查 SOLD 并更新（无 LOCK 中间态）；orderVersion 为空按历史版本语义处理
-        if (!ProgramOrderVersion.V4_VERSION.getValue().equals(orderVersion)) {
+        // V4/V5：座位有 LOCK 中间态；V5 额外容忍未投影（NO_SOLD）座位
+        boolean isV5Order = ProgramOrderVersion.V5_VERSION.getValue().equals(orderVersion);
+        if (!ProgramOrderVersion.V4_VERSION.getValue().equals(orderVersion) && !isV5Order) {
             for (Seat seat : seatList) {
                 if (Objects.equals(seat.getSellStatus(), SellStatus.SOLD.getCode())) {
                     throw new TicketFlowFrameException(BaseCode.SEAT_SOLD);
@@ -866,13 +868,31 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
             }
         } else {
             // V4：座位有 LOCK 中间态，必须从 LOCK→SOLD（支付）或 LOCK→NO_SOLD（取消）
+            // V5：Redis 为唯一权威，DB 座位可能是 NO_SOLD（投影尚未执行）或 LOCK（已投影），均允许；
+            //     DB remain 只在状态真正发生"未投影→扣减 / 已投影→归还"转变时调整，保证幂等。
+            boolean isV5 = isV5Order;
+            boolean hasNoSold = false;
+            boolean hasLock = false;
             for (Seat seat : seatList) {
-                if (!Objects.equals(seat.getSellStatus(), SellStatus.LOCK.getCode())) {
-                    throw new TicketFlowFrameException(BaseCode.SEAT_IS_NOT_NOT_LOCK);
+                if (Objects.equals(seat.getSellStatus(), SellStatus.SOLD.getCode())) {
+                    // 终态：重复回调或投影竞态，幂等跳过（支付语义下已售即成功）
+                    continue;
                 }
+                if (Objects.equals(seat.getSellStatus(), SellStatus.NO_SOLD.getCode())) {
+                    hasNoSold = true;
+                } else if (Objects.equals(seat.getSellStatus(), SellStatus.LOCK.getCode())) {
+                    hasLock = true;
+                } else {
+                    throw new TicketFlowFrameException(BaseCode.SEAT_IS_NOT_NOT_SOLD);
+                }
+            }
+            // V4 保持严格 LOCK 语义（不允许未投影座位直接支付/取消）
+            if (!isV5 && hasNoSold) {
+                throw new TicketFlowFrameException(BaseCode.SEAT_IS_NOT_NOT_LOCK);
             }
 
             Seat updateSeat = new Seat();
+            List<TicketCategoryCountDto> ticketCategoryCountDtoList = programOperateDataDto.getTicketCategoryCountDtoList();
             //订单支付成功的操作
             if (Objects.equals(programOperateDataDto.getSellStatus(), SellStatus.SOLD.getCode())) {
                 updateSeat.setSellStatus(SellStatus.SOLD.getCode());
@@ -881,24 +901,37 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
                                 .eq(Seat::getProgramId, programOperateDataDto.getProgramId())
                                 .in(Seat::getId, seatIdList);
                 seatMapper.update(updateSeat, seatLambdaUpdateWrapper);
+                // V5：座位从未投影（NO_SOLD→SOLD 转变），DB remain 从未扣减，此时补扣一次
+                if (isV5 && hasNoSold) {
+                    int updateRemainNumberCount = 0;
+                    for (TicketCategoryCountDto ticketCategoryCountDto : ticketCategoryCountDtoList) {
+                        updateRemainNumberCount = updateRemainNumberCount + ticketCategoryMapper.reduceRemainNumber(
+                                ticketCategoryCountDto.getCount(), ticketCategoryCountDto.getTicketCategoryId(),
+                                programOperateDataDto.getProgramId());
+                    }
+                    if (updateRemainNumberCount != ticketCategoryCountDtoList.size()) {
+                        throw new TicketFlowFrameException(BaseCode.UPDATE_TICKET_CATEGORY_COUNT_NOT_CORRECT);
+                    }
+                }
             } else if (Objects.equals(programOperateDataDto.getSellStatus(), SellStatus.NO_SOLD.getCode())) {
-                //订单取消的操作  
+                //订单取消的操作：无论 NO_SOLD 还是 LOCK 都置回 NO_SOLD
                 updateSeat.setSellStatus(SellStatus.NO_SOLD.getCode());
                 LambdaUpdateWrapper<Seat> seatLambdaUpdateWrapper =
                         Wrappers.lambdaUpdate(Seat.class)
                                 .eq(Seat::getProgramId, programOperateDataDto.getProgramId())
                                 .in(Seat::getId, seatIdList);
                 seatMapper.update(updateSeat, seatLambdaUpdateWrapper);
-                List<TicketCategoryCountDto> ticketCategoryCountDtoList = programOperateDataDto.getTicketCategoryCountDtoList();
-                int updateRemainNumberCount = 0;
-                //把库存增加回去
-                for (TicketCategoryCountDto ticketCategoryCountDto : ticketCategoryCountDtoList) {
-                    updateRemainNumberCount = updateRemainNumberCount + ticketCategoryMapper.increaseRemainNumber(
-                            ticketCategoryCountDto.getCount(), ticketCategoryCountDto.getTicketCategoryId(),
-                            programOperateDataDto.getProgramId());
-                }
-                if (updateRemainNumberCount != ticketCategoryCountDtoList.size()) {
-                    throw new TicketFlowFrameException(BaseCode.UPDATE_TICKET_CATEGORY_COUNT_NOT_CORRECT);
+                // V5：仅当座位已投影（LOCK→NO_SOLD 转变，remain 曾被扣减）才归还库存；未投影不归还避免重复
+                if (hasLock) {
+                    int updateRemainNumberCount = 0;
+                    for (TicketCategoryCountDto ticketCategoryCountDto : ticketCategoryCountDtoList) {
+                        updateRemainNumberCount = updateRemainNumberCount + ticketCategoryMapper.increaseRemainNumber(
+                                ticketCategoryCountDto.getCount(), ticketCategoryCountDto.getTicketCategoryId(),
+                                programOperateDataDto.getProgramId());
+                    }
+                    if (updateRemainNumberCount != ticketCategoryCountDtoList.size()) {
+                        throw new TicketFlowFrameException(BaseCode.UPDATE_TICKET_CATEGORY_COUNT_NOT_CORRECT);
+                    }
                 }
             }
         }

@@ -6,6 +6,7 @@ import com.ticketflow.domain.DiscardOrder;
 import com.ticketflow.domain.OrderCreateMq;
 import com.ticketflow.dto.OrderTicketUserCreateDto;
 import com.ticketflow.enums.DiscardOrderReason;
+import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
 import com.ticketflow.service.OrderService;
@@ -21,6 +22,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_NAME;
@@ -73,7 +75,9 @@ public class CreateOrderConsumer {
             log.info("消费到kafka的创建订单消息 消息体: {} 延迟时间 : {} 毫秒",value,delayTime);
             
             // 超过 MESSAGE_DELAY_TIME(60s) 的消息视为超时 → 丢入 DISCARD_ORDER（Redis list）用于后续对账分析 + Prometheus 计数
-            if (currentTimeTimestamp - createOrderTimeTimestamp > MESSAGE_DELAY_TIME) {
+            // V5：Redis 为唯一库存权威，积压消息不丢弃，继续建单（最终一致由对账兜底），避免"Redis 已扣但订单丢失"
+            boolean isV5 = Objects.equals(orderCreateMq.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue());
+            if (!isV5 && currentTimeTimestamp - createOrderTimeTimestamp > MESSAGE_DELAY_TIME) {
                 Map<Long, List<OrderTicketUserCreateDto>> orderTicketUserSeatList =
                         orderCreateMq.getOrderTicketUserCreateDtoList().stream().collect(Collectors.groupingBy(OrderTicketUserCreateDto::getTicketCategoryId));
                 //key: 节目票档id value: 座位id集合

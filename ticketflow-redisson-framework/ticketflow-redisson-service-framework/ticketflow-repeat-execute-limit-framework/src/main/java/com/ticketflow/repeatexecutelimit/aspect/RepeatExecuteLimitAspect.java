@@ -25,6 +25,7 @@ import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.springframework.core.annotation.Order;
+import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.lang.reflect.Method;
@@ -141,12 +142,10 @@ public class RepeatExecuteLimitAspect {
                     //执行业务逻辑
                     obj = joinPoint.proceed();
                     if (durationTime > 0) {
-                        try {
-                            //业务逻辑执行成功 并且 指定了设置幂等保持时间 设置请求标识
-                            redissonDataHandle.set(repeatFlagName, SUCCESS_FLAG, durationTime, TimeUnit.SECONDS);
-                        } catch (Exception e) {
-                            log.error("getBucket error", e);
-                        }
+                        //业务逻辑执行成功 并且 指定了设置幂等保持时间 设置请求标识
+                        //事务同步：若外层仍有未提交事务，延迟到 afterCommit 再写幂等标记，
+                        //避免"事务回滚但幂等标记已置成功"导致后续请求被误拒
+                        writeIdempotentFlagAfterCommit(repeatFlagName, durationTime);
                     }
                     return obj;
                 } finally {
@@ -158,6 +157,31 @@ public class RepeatExecuteLimitAspect {
             }
         } finally {
             localLock.unlock();
+        }
+    }
+
+    /**
+     * 幂等标记写入：若事务仍处于激活状态，注册 afterCommit 回调延迟写入；
+     * 否则（无事务或事务已提交）立即写入。
+     */
+    private void writeIdempotentFlagAfterCommit(String repeatFlagName, long durationTime) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    writeIdempotentFlag(repeatFlagName, durationTime);
+                }
+            });
+        } else {
+            writeIdempotentFlag(repeatFlagName, durationTime);
+        }
+    }
+
+    private void writeIdempotentFlag(String repeatFlagName, long durationTime) {
+        try {
+            redissonDataHandle.set(repeatFlagName, SUCCESS_FLAG, durationTime, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.error("getBucket error", e);
         }
     }
 }

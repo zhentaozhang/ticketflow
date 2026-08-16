@@ -736,15 +736,17 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         programOperateDataDto.setSeatIdList(unLockSeatIdList);
         programOperateDataDto.setTicketCategoryCountDtoList(ticketCategoryCountDtoList);
         programOperateDataDto.setOrderVersion(orderVersion);
+        //V5 与 V4 一致：走同步 Feign 更新 program 侧 DB（pay/cancel 时 DB 座位/余票收敛）
+        boolean isV5 = ProgramOrderVersion.V5_VERSION.getValue().equals(orderVersion);
         //如果创建订单版本是v1，v2，v3
-        if (!orderVersion.equals(ProgramOrderVersion.V4_VERSION.getValue())){
+        if (!orderVersion.equals(ProgramOrderVersion.V4_VERSION.getValue()) && !isV5){
             orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
             if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())) {
                 programOperateDataDto.setSellStatus(SellStatus.SOLD.getCode());
                 delayOperateProgramDataSend.sendMessage(JSON.toJSONString(programOperateDataDto));
             }
         }else {
-            //如果创建订单版本是v4 更新节目服务的相关数据
+            //V4/V5：同步更新节目服务的相关数据（program 侧 operateProgramData 对 V5 容忍未投影座位）
             if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ||
                     Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
                 programOperateDataDto.setSellStatus(Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ? SellStatus.SOLD.getCode() : SellStatus.NO_SOLD.getCode());
@@ -863,38 +865,43 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     
     
     // V4/V41 Kafka 消费者入口：先 Feign 锁定 program 侧的座位+库存，再在本事务建 DB 订单
+    // V5：Redis 为唯一库存权威，建单不再同步 Feign 扣 DB（DB 座位/余票由投影任务/支付取消路径异步收敛）
     @RepeatExecuteLimit(name = CREATE_PROGRAM_ORDER_MQ, keys = {"#orderCreateMq.orderNumber"}, durationTime = 60)
     @Transactional(rollbackFor = Exception.class)
     public String createMq(OrderCreateMq orderCreateMq){
         List<OrderTicketUserCreateDto> orderTicketUserCreateDtoList = orderCreateMq.getOrderTicketUserCreateDtoList();
-        //使用 Stream API 按 ticketCategoryId 分组并计数
-        Map<Long, Long> countMap = orderTicketUserCreateDtoList.stream()
-                .collect(Collectors.groupingBy(OrderTicketUserCreateDto::getTicketCategoryId, Collectors.counting()));
-        
-        //将统计结果转换为列表，存入 TicketCountDto 对象中
-        List<TicketCategoryCountDto> ticketCountList = countMap.entrySet().stream()
-                .map(entry -> new TicketCategoryCountDto(entry.getKey(), entry.getValue()))
-                .toList();
-        //修改节目服务中的座位状态和扣减库存
-        ReduceRemainNumberDto reduceRemainNumberDto = new ReduceRemainNumberDto();
-        reduceRemainNumberDto.setProgramId(orderCreateMq.getProgramId());
-        reduceRemainNumberDto.setSellStatus(SellStatus.LOCK.getCode());
-        reduceRemainNumberDto.setSeatIdList(orderTicketUserCreateDtoList.stream().map(OrderTicketUserCreateDto::getSeatId).collect(Collectors.toList()));
-        reduceRemainNumberDto.setTicketCategoryCountDtoList(ticketCountList);
-        ApiResponse<Boolean> programApiResponse = programClient.operateSeatLockAndTicketCategoryRemainNumber(reduceRemainNumberDto);
-        if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
-            //丢弃记录统一由 CreateOrderConsumer 外层 catch 写入，此处不再重复写入
-            throw new TicketFlowFrameException(programApiResponse);
-        }
         String orderNumber;
-        try {
-            //真正地创建订单
+        if (Objects.equals(orderCreateMq.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue())) {
+            // V5：无第二权威，直接建单；Redis 已在请求侧完成扣减，消费侧不再重复扣 DB
             orderNumber = createByMq(orderCreateMq);
-        } catch (Exception e) {
-            //Feign 已扣减 DB（座位 LOCK + 余票扣减）但本地建单失败（事务回滚，订单不存在）：
-            //远程扣减不受本地事务回滚影响，需显式反向恢复 DB
-            rollbackProgramDataByCreateFail(orderCreateMq, reduceRemainNumberDto);
-            throw e;
+        } else {
+            //使用 Stream API 按 ticketCategoryId 分组并计数
+            Map<Long, Long> countMap = orderTicketUserCreateDtoList.stream()
+                    .collect(Collectors.groupingBy(OrderTicketUserCreateDto::getTicketCategoryId, Collectors.counting()));
+            //将统计结果转换为列表，存入 TicketCountDto 对象中
+            List<TicketCategoryCountDto> ticketCountList = countMap.entrySet().stream()
+                    .map(entry -> new TicketCategoryCountDto(entry.getKey(), entry.getValue()))
+                    .toList();
+            //修改节目服务中的座位状态和扣减库存
+            ReduceRemainNumberDto reduceRemainNumberDto = new ReduceRemainNumberDto();
+            reduceRemainNumberDto.setProgramId(orderCreateMq.getProgramId());
+            reduceRemainNumberDto.setSellStatus(SellStatus.LOCK.getCode());
+            reduceRemainNumberDto.setSeatIdList(orderTicketUserCreateDtoList.stream().map(OrderTicketUserCreateDto::getSeatId).collect(Collectors.toList()));
+            reduceRemainNumberDto.setTicketCategoryCountDtoList(ticketCountList);
+            ApiResponse<Boolean> programApiResponse = programClient.operateSeatLockAndTicketCategoryRemainNumber(reduceRemainNumberDto);
+            if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
+                //丢弃记录统一由 CreateOrderConsumer 外层 catch 写入，此处不再重复写入
+                throw new TicketFlowFrameException(programApiResponse);
+            }
+            try {
+                //真正地创建订单
+                orderNumber = createByMq(orderCreateMq);
+            } catch (Exception e) {
+                //Feign 已扣减 DB（座位 LOCK + 余票扣减）但本地建单失败（事务回滚，订单不存在）：
+                //远程扣减不受本地事务回滚影响，需显式反向恢复 DB
+                rollbackProgramDataByCreateFail(orderCreateMq, reduceRemainNumberDto);
+                throw e;
+            }
         }
         redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ,orderNumber),orderNumber,1, TimeUnit.MINUTES);
         return orderNumber;
