@@ -32,7 +32,8 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * 接收 V4/V5 策略发送的创建订单消息，解析 OrderCreateMq，
  * 调用 OrderService.createMq() 完成订单持久化。
  *
- * 幂等保障：createMq 的 @RepeatExecuteLimit（60秒）防止同一订单号重复建单。
+ * 幂等保障：createMq 对同 orderNumber 重复消息幂等成功（selectOne 防重 + DB 唯一索引兜底 +
+ *          ORDER_EXIST 特判不写 DISCARD_ORDER）；@RepeatExecuteLimit(durationTime=0) 仅防并发。
  * 延迟消费：收到消息后等待 MESSAGE_DELAY_TIME（60秒），
  *           给 program-service 留出 Redis 数据同步时间。
  *
@@ -55,10 +56,11 @@ public class CreateOrderConsumer {
     public static Long MESSAGE_DELAY_TIME = 60000L;
     
     /**
-     * 消费并行度与 topic 分区数一致（create_order topic 12 分区）。
+     * 消费并行度与 topic 分区数一致（create_order topic 48 分区）。
      * 每分区一个 consumer，提升订单创建消费吞吐，缓解高到达率下消费积压/超时丢弃。
+     * 注意：分区数变更需同步执行 kafka-topics.sh --alter --partitions 48（见部署文档）。
      */
-    @KafkaListener(topics = {SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"${spring.kafka.topic:create_order}"}, concurrency = "12")
+    @KafkaListener(topics = {SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"${spring.kafka.topic:create_order}"}, concurrency = "48")
     public void consumerOrderMessage(ConsumerRecord<String,String> consumerRecord){
         String value = consumerRecord.value();
         if (StringUtil.isEmpty(value)) {
