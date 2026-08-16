@@ -903,7 +903,10 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 throw e;
             }
         }
-        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ,orderNumber),orderNumber,1, TimeUnit.MINUTES);
+        // 建单完成标记：供前端 /order/get/cache 轮询终态，同时支撑 PENDING 对账的"已建单"判定。
+        // TTL 10min > 对账 3min 滞后窗口（ReconciliationTask 按 3min 前的 ProgramRecordTask 触发），
+        // 确保对账首次裁决该 PENDING 条目时标记尚未过期。
+        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ,orderNumber),orderNumber,10, TimeUnit.MINUTES);
         return orderNumber;
     }
 

@@ -607,4 +607,55 @@ class OrderTaskServiceTest {
 
         verify(orderService, never()).rollbackProgramSeatByDiscard(any());
     }
+
+    @Test
+    void pendingOrderCompensation_订单标记已存在_跳过回滚仅移除() {
+        OrderCreateMq mq = buildPendingMq(ORDER_NUMBER, new Date(System.currentTimeMillis() - 120_000L));
+        when(redisCache.lenForList(any())).thenReturn(1L);
+        when(redisCache.rangeForList(any(), anyLong(), anyLong(), eq(PendingOrder.class)))
+                .thenReturn(List.of(new PendingOrder(mq)));
+        // ORDER_MQ 标记命中（marker-first），不再查询订单行
+        when(redisCache.get(any(RedisKeyBuild.class), eq(String.class))).thenReturn("marker");
+
+        orderTaskService.pendingOrderCompensation(PROGRAM_ID);
+
+        verify(orderService, never()).rollbackProgramSeatByDiscard(any());
+        verify(orderService, never()).count(any());
+        verify(redisCache).removeForList(any(), any(PendingOrder.class), eq(1L));
+    }
+
+    @Test
+    void pendingOrderCompensation_单条回滚失败_保留条目不中断后续() {
+        OrderCreateMq mq1 = buildPendingMq(ORDER_NUMBER, new Date(System.currentTimeMillis() - 120_000L));
+        OrderCreateMq mq2 = buildPendingMq(ORDER_NUMBER + 1, new Date(System.currentTimeMillis() - 120_000L));
+        when(redisCache.lenForList(any())).thenReturn(2L);
+        when(redisCache.rangeForList(any(), anyLong(), anyLong(), eq(PendingOrder.class)))
+                .thenReturn(List.of(new PendingOrder(mq1), new PendingOrder(mq2)));
+        when(redisCache.get(any(RedisKeyBuild.class), eq(String.class))).thenReturn(null);
+        when(orderService.count(any())).thenReturn(0L);
+        doThrow(new RuntimeException("回滚失败")).when(orderService).rollbackProgramSeatByDiscard(mq1);
+
+        orderTaskService.pendingOrderCompensation(PROGRAM_ID);
+
+        // 第一条失败保留，第二条仍被回滚并移除
+        verify(orderService).rollbackProgramSeatByDiscard(mq1);
+        verify(orderService).rollbackProgramSeatByDiscard(mq2);
+        verify(redisCache).removeForList(any(), any(PendingOrder.class), eq(1L));
+    }
+
+    @Test
+    void pendingOrderCompensation_回滚失败保留条目() {
+        OrderCreateMq mq = buildPendingMq(ORDER_NUMBER, new Date(System.currentTimeMillis() - 120_000L));
+        when(redisCache.lenForList(any())).thenReturn(1L);
+        when(redisCache.rangeForList(any(), anyLong(), anyLong(), eq(PendingOrder.class)))
+                .thenReturn(List.of(new PendingOrder(mq)));
+        when(redisCache.get(any(RedisKeyBuild.class), eq(String.class))).thenReturn(null);
+        when(orderService.count(any())).thenReturn(0L);
+        doThrow(new RuntimeException("回滚失败")).when(orderService).rollbackProgramSeatByDiscard(mq);
+
+        orderTaskService.pendingOrderCompensation(PROGRAM_ID);
+
+        verify(orderService).rollbackProgramSeatByDiscard(mq);
+        verify(redisCache, never()).removeForList(any(), any(), anyLong());
+    }
 }

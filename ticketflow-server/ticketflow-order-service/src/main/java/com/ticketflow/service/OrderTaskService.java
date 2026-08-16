@@ -186,11 +186,13 @@ public class OrderTaskService {
      * 消费侧建单状态未知。该方法按节目读取 PENDING 记录逐条裁决：
      * <ul>
      *   <li>仅处理写入超 60s 的记录（给消费侧留出建单窗口）；</li>
-     *   <li>订单已建（订单行存在或 ORDER_MQ 标记存在）→ 直接移除记录；</li>
+     *   <li>订单已建（ORDER_MQ 标记或订单行存在）→ 直接移除记录；</li>
      *   <li>订单未建 → rollbackProgramSeatByDiscard 回滚 Redis 座位后移除记录。</li>
      * </ul>
      * 幂等：rollbackProgramSeatByDiscard 内置双重安全约束（订单已存在跳过、座位不在锁定集合跳过），
-     * 同时容忍"late-failureCallback 已提前回滚"的状态；回滚失败保留记录由下轮对账重试兜底。
+     * 同时容忍"late-failureCallback 已提前回滚"的状态；
+     * 处理失败保留的条目将在该节目产生新的对账任务时（新订单触发 ProgramRecordTask）随下一轮对账重试，
+     * 与 discardOrderCompensation 的补偿语义一致。
      *
      * @param programId 节目 id
      */
@@ -209,29 +211,27 @@ public class OrderTaskService {
                 continue;
             }
             OrderCreateMq orderCreateMq = pendingOrder.getOrderCreateMq();
-            long age = System.currentTimeMillis() - orderCreateMq.getCreateOrderTime().getTime();
-            if (age < PENDING_WINDOW_MS) {
+            try {
                 // 未超窗：等待消费侧建单，下轮再裁决
-                continue;
-            }
-            // 已建单判定：订单行存在 或 ORDER_MQ 标记存在
-            Long orderCount = orderService.count(Wrappers.lambdaQuery(Order.class)
-                    .eq(Order::getOrderNumber, orderCreateMq.getOrderNumber()));
-            boolean orderCreated = (orderCount != null && orderCount > 0)
-                    || Objects.nonNull(redisCache.get(RedisKeyBuild.createRedisKey(
-                    RedisKeyManage.ORDER_MQ, orderCreateMq.getOrderNumber()), String.class));
-            if (!orderCreated) {
-                try {
-                    orderService.rollbackProgramSeatByDiscard(orderCreateMq);
-                } catch (Exception e) {
-                    // 回滚失败保留记录，由下轮对账重试兜底
-                    log.error("PENDING 补偿回滚失败 节目id : {} 订单号 : {}",
-                            programId, orderCreateMq.getOrderNumber(), e);
+                long age = System.currentTimeMillis() - orderCreateMq.getCreateOrderTime().getTime();
+                if (age < PENDING_WINDOW_MS) {
                     continue;
                 }
+                // 已建单判定：ORDER_MQ 标记优先（常见路径省 DB 查询），未命中再查订单行
+                boolean orderCreated = Objects.nonNull(redisCache.get(RedisKeyBuild.createRedisKey(
+                        RedisKeyManage.ORDER_MQ, orderCreateMq.getOrderNumber()), String.class))
+                        || orderService.count(Wrappers.lambdaQuery(Order.class)
+                        .eq(Order::getOrderNumber, orderCreateMq.getOrderNumber())) > 0;
+                if (!orderCreated) {
+                    orderService.rollbackProgramSeatByDiscard(orderCreateMq);
+                }
+                // 裁决完成（建单成功 / 回滚成功含终态跳过）后移除记录，避免 PENDING 无限增长
+                redisCache.removeForList(pendingOrderKey, pendingOrder, 1);
+            } catch (Exception e) {
+                // 单条记录异常不影响后续条目；保留记录由后续对账轮次重试兜底
+                log.error("PENDING 补偿处理异常 节目id : {} 订单号 : {}",
+                        programId, orderCreateMq.getOrderNumber(), e);
             }
-            // 裁决完成（建单成功 / 回滚成功含终态跳过）后移除记录，避免 PENDING 无限增长
-            redisCache.removeForList(pendingOrderKey, pendingOrder, 1);
         }
     }
 
