@@ -201,6 +201,9 @@ for index,ticket_count in ipairs(ticket_count_list) do
 end
 -- 扣减成功后（每单仅执行一次）累加账户订单计数，计数单一归属 Lua，消费侧不再重复累加
 redis.call('INCRBY', KEYS[9], tonumber(ARGV[6]))
+-- 计数器 TTL 钉在固定值：既防止限购随 preload 短 TTL 过期重置，也避免无 TTL 永久累积漂移；
+-- 活动结束后无交易 24h 自然过期（无需依赖节目重置清理）
+redis.call('EXPIRE', KEYS[9], 86400)
 -- 将没有售卖的座位删除
 for ticket_category_id, seat_id_array in pairs(seat_id_list) do
     redis.call('hdel',string.format(placeholder_seat_no_sold_hash_key,program_id,tostring(ticket_category_id)),unpack(seat_id_array))

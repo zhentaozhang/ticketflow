@@ -1238,6 +1238,30 @@ class OrderServiceTest {
         verify(programClient, never()).operateProgramData(any(ProgramOperateDataDto.class));
     }
 
+    @Test
+    void createMqV5重复消息_幂等成功返回原订单号且不调Feign() {
+        // V5 分支：建单不调 Feign 锁座（DB 由投影任务异步收敛），重复消息走 ORDER_EXIST 幂等特判
+        OrderCreateMq mq = buildCreateMq();
+        mq.setOrderVersion(ProgramOrderVersion.V5_VERSION.getValue());
+        Order existOrder = new Order();
+        existOrder.setOrderNumber(ORDER_NUMBER);
+        // 第一次建单 selectOne=null；第二次重放 selectOne=existOrder（doCreate 防重抛出）+ catch 特判内再次 selectOne
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null, existOrder);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L, 4L);
+
+        String first = orderService.createMq(mq);
+        assertEquals(String.valueOf(ORDER_NUMBER), first);
+
+        String second = orderService.createMq(mq);
+        assertEquals(String.valueOf(ORDER_NUMBER), second);
+
+        // V5 全程不调 Feign 锁座/反向恢复
+        verify(programClient, never()).operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class));
+        verify(programClient, never()).operateProgramData(any(ProgramOperateDataDto.class));
+        // 重复消息幂等成功，不写 DISCARD_ORDER
+        verify(redisCache, never()).leftPushForList(any(RedisKeyBuild.class), any());
+    }
+
     // ==================== 查询 ====================
 
     @Test

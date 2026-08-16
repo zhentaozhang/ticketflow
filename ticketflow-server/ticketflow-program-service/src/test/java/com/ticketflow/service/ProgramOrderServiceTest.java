@@ -709,7 +709,8 @@ class ProgramOrderServiceTest {
             assertNotNull(result);
             // 降级路径：写入 PENDING 待确认队列（不做缓存回滚，回滚由 A2 对账任务裁决）
             verify(redisCache).leftPushForList(pendingKeyCaptor.capture(), pendingCaptor.capture());
-            assertTrue(pendingKeyCaptor.getValue().getRelKey().contains("d_mai_order_create_pending"));
+            assertEquals(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_CREATE_PENDING, PROGRAM_ID),
+                    pendingKeyCaptor.getValue());
             assertEquals(result, String.valueOf(pendingCaptor.getValue().getOrderCreateMq().getOrderNumber()));
             // 未走发送失败回滚路径
             verify(programCacheResolutionOperate, never()).programCacheOperate(anyList(), any());

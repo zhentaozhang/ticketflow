@@ -235,7 +235,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         //用户下此节目的订单数量加1操作
         // V5：ACCOUNT_ORDER_COUNT 由请求侧 V5 Lua 原子维护（INCRBY），消费侧不重复累加
         // V1-V4：请求侧 Lua 不维护计数，仍由消费侧事务提交后累加，保持原语义
-        if (!Objects.equals(orderCreateDomain.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue())) {
+        boolean isV5 = Objects.equals(orderCreateDomain.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue());
+        if (!isV5) {
             // 事务提交后再累加：回滚事务不再产生 Redis 计数漂移；Redis 调用也不占用事务内 DB 连接
             Long increment = (long) orderCreateDomain.getOrderTicketUserCreateDtoList().size();
             Long userId = orderCreateDomain.getUserId();
