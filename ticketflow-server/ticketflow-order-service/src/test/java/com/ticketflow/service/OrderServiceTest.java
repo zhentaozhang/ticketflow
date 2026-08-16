@@ -571,6 +571,50 @@ class OrderServiceTest {
     }
 
     @Test
+    void updateOrderRelatedData支付时V4节目服务返回失败不抛异常且Lua仍执行() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class)))
+                .thenReturn(ApiResponse.error(500, "program服务不可用"));
+
+        // 事务外尽力而为：Feign 失败不阻断订单状态流转，Lua（Redis 权威）照常执行
+        assertDoesNotThrow(() -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
+
+        ArgumentCaptor<Order> updateOrderCaptor = ArgumentCaptor.forClass(Order.class);
+        verify(orderMapper).update(updateOrderCaptor.capture(), any(Wrapper.class));
+        assertEquals(OrderStatus.PAY.getCode(), updateOrderCaptor.getValue().getOrderStatus());
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+    }
+
+    @Test
+    void updateOrderRelatedData支付时V4节目服务抛异常不抛异常且Lua仍执行() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class)))
+                .thenThrow(new RuntimeException("program服务异常"));
+
+        assertDoesNotThrow(() -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
+
+        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+    }
+
+    @Test
+    void updateOrderRelatedData同步器激活时数据同步延迟到事务提交后() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
+            // 同步器激活：incrBy/Lua 不应立即执行，而是注册到 afterCommit 回调（事务提交后）
+            verify(redisCache, never()).incrBy(any(), anyLong());
+            verify(orderProgramCacheResolutionOperate, never()).programCacheReverseOperate(anyList(), any(Object[].class));
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
     void updateOrderRelatedData更新主订单失败时抛ORDER_CANAL_ERROR() {
         stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
         when(orderMapper.update(any(Order.class), any(Wrapper.class))).thenReturn(0);
@@ -674,16 +718,16 @@ class OrderServiceTest {
     }
 
     @Test
-    void updateProgramRelatedDataResolutionV4节目服务失败时抛异常() {
+    void updateProgramRelatedDataResolutionV4节目服务失败时不抛异常且Lua仍执行() {
         SeatVo seatVo = new SeatVo();
         seatVo.setId(SEAT_ID);
         when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
         when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.error(7777, "失败"));
         java.util.Map<Long, List<Long>> seatMap = java.util.Map.of(TICKET_CATEGORY_ID, List.of(SEAT_ID));
-        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
-                () -> orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.CANCEL,
-                        IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue()));
-        assertEquals(7777, e.getCode());
+        // 事务外尽力而为：Feign 失败不抛异常，Lua（Redis 权威）照常执行，DB 侧由投影任务/守恒任务观测兜底
+        assertDoesNotThrow(() -> orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.CANCEL,
+                IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue()));
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
     }
 
     // ==================== 丢弃订单座位回滚 rollbackProgramSeatByDiscard ====================

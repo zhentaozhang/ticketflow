@@ -570,16 +570,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     }
     
     /**
-     * 支付/取消的核心 6 步编排：
+     * 支付/取消的核心编排（事务瘦身版）：
+     * 事务内（本地 DB 写）:
      * 1. 校验 orderStatus（仅 CANCEL / PAY）
      * 2. 更新 Order status
      * 3. 更新 OrderTicketUser status
      * 4. 写入流水 OrderTicketUserRecord（CHANGE_STATUS / INCREASE）
+     * 事务提交后（afterCommit，失败仅记日志由对账兜底）：
      * 5. 取消时 Redis 扣减 accountOrderCount
-     * 6. 调用 Lua（V1-V3）或 Lua + Feign（V4）操作座位和库存缓存
+     * 6. 调用 Lua（V1-V3）或 Lua + Feign（V4/V5）操作座位和库存缓存
      *
-     * PS：V4 路径走 Feign（programClient.operateProgramData → DB update），
-     * V1-V3 路径靠延迟队列 DelayOperateProgramDataSend 异步更新 DB。
+     * PS：V4/V5 路径走 Feign（programClient.operateProgramData → DB update），
+     * V1-V3 路径靠延迟队列 DelayOperateProgramDataSend 异步更新 DB；
+     * 远程调用全部移出事务：事务不再被 Feign RTT 占住 DB 连接，
+     * Feign 失败也不回滚订单状态流转。
      */
     @Transactional(rollbackFor = Exception.class)
     public void updateOrderRelatedData(Long orderNumber,OrderStatus orderStatus){
@@ -640,10 +644,12 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         }
         orderTicketUserRecordService.saveBatch(orderTicketUserRecordList);
 
-        if (Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
-            redisCache.incrBy(RedisKeyBuild.createRedisKey(
-                    RedisKeyManage.ACCOUNT_ORDER_COUNT,order.getUserId(),order.getProgramId()),-updateTicketUserOrderResult);
-        }
+        //事务内仅保留本地 DB 写入；Redis 计数 / Lua 座位操作 / Feign DB 收敛全部移出事务：
+        // 1) 事务不再被远程 RTT（Feign 10s 超时）占住 DB 连接
+        // 2) Feign/Lua 失败不再回滚订单状态流转（订单状态已提交）
+        // 3) Redis 调用与 DB 事务解耦，事务回滚不产生计数/缓存漂移
+        // 失败容忍：Redis 侧由对账（ProgramRecordHandler/ReconciliationTask）兜底，
+        // DB 侧由投影任务/V5StockConservationTask 观测告警
         Long programId = order.getProgramId();
         Map<Long, List<OrderTicketUser>> orderTicketUserSeatList =
                 orderTicketUserList.stream().collect(Collectors.groupingBy(OrderTicketUser::getTicketCategoryId));
@@ -651,8 +657,30 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         orderTicketUserSeatList.forEach((k,v) -> {
             seatMap.put(k,v.stream().map(OrderTicketUser::getSeatId).collect(Collectors.toList()));
         });
-        updateProgramRelatedDataResolution(programId,seatMap,orderStatus,order.getIdentifierId(),order.getUserId(),
-                seatIdAndTicketUserIdDomainList,order.getOrderVersion());
+        Runnable afterCommitWork = () -> {
+            try {
+                if (Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
+                    redisCache.incrBy(RedisKeyBuild.createRedisKey(
+                            RedisKeyManage.ACCOUNT_ORDER_COUNT,order.getUserId(),order.getProgramId()),-updateTicketUserOrderResult);
+                }
+                updateProgramRelatedDataResolution(programId,seatMap,orderStatus,order.getIdentifierId(),order.getUserId(),
+                        seatIdAndTicketUserIdDomainList,order.getOrderVersion());
+            } catch (Exception e) {
+                log.error("支付/取消后数据同步失败 订单号 : {} 状态 : {}", orderNumber, orderStatus, e);
+            }
+        };
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            // 事务提交后执行（afterCommit）：回滚事务不同步，远程调用移出事务
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    afterCommitWork.run();
+                }
+            });
+        } else {
+            // 无事务上下文（自调用/直测）回退为立即执行，等价原行为
+            afterCommitWork.run();
+        }
     }
 
     public void checkOrderStatus(Order order){
@@ -772,9 +800,17 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ||
                     Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
                 programOperateDataDto.setSellStatus(Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ? SellStatus.SOLD.getCode() : SellStatus.NO_SOLD.getCode());
-                ApiResponse<Boolean> programApiResponse = programClient.operateProgramData(programOperateDataDto);
-                if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
-                    throw new TicketFlowFrameException(programApiResponse);
+                // 事务外尽力而为：Feign 失败仅记日志不阻断 Lua（Redis 权威）继续执行，
+                // DB 侧由投影任务/V5StockConservationTask 观测兜底
+                try {
+                    ApiResponse<Boolean> programApiResponse = programClient.operateProgramData(programOperateDataDto);
+                    if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
+                        log.error("program服务 operateProgramData 失败（事务外尽力而为） dto : {} response : {}",
+                                JSON.toJSONString(programOperateDataDto), JSON.toJSONString(programApiResponse));
+                    }
+                } catch (Exception e) {
+                    log.error("program服务 operateProgramData 异常（事务外尽力而为，DB 侧由投影任务/守恒任务观测兜底） dto : {}",
+                            JSON.toJSONString(programOperateDataDto), e);
                 }
             }
             orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
