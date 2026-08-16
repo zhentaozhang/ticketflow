@@ -10,6 +10,7 @@ import com.ticketflow.client.OrderClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.domain.OrderCreateMq;
+import com.ticketflow.domain.PendingOrder;
 import com.ticketflow.domain.PurchaseSeat;
 import com.ticketflow.dto.DelayOrderCancelDto;
 import com.ticketflow.dto.OrderCreateDto;
@@ -820,7 +821,8 @@ public class ProgramOrderService {
 
     /**
      * 通过 Kafka 发送建单消息。
-     * 同步等待发送结果，失败时自动回滚 Redis 缓存。
+     * 等待发送确认；超时（2s）降级为已受理并写 PENDING 待确认队列（不抛异常），
+     * 订单终态由 PENDING 对账任务裁决；发送失败仍回滚 Redis 缓存并上抛。
      */
     private String createOrderByMq(OrderCreateMq orderCreateMq, List<PurchaseSeat> purchaseSeatList) {
         CreateOrderMqDomain createOrderMqDomain = new CreateOrderMqDomain();
@@ -847,18 +849,39 @@ public class ProgramOrderService {
             latch.countDown();
         });
         try {
-            if (!latch.await(10, TimeUnit.SECONDS)) {
-                log.error("创建订单kafka发送消息等待超时 orderNumber : {}", orderCreateMq.getOrderNumber());
-                throw new TicketFlowFrameException(BaseCode.EXECUTE_TIME_OUT);
+            if (!latch.await(2, TimeUnit.SECONDS)) {
+                // 超时降级：不再抛异常。消息大概率已发送（producer retries=3），
+                // 订单终态由 PENDING 对账兜底：已建单则移除，未建单则回滚 Redis 座位。
+                log.warn("创建订单kafka发送消息等待超时 降级为已受理 orderNumber : {}", orderCreateMq.getOrderNumber());
+                writePendingOrder(orderCreateMq);
+                return createOrderMqDomain.orderNumber;
             }
         } catch (InterruptedException e) {
-            log.error("createOrderByMq InterruptedException", e);
-            throw new TicketFlowFrameException(e);
+            Thread.currentThread().interrupt();
+            // 中断视为已受理（同超时语义），不抛异常
+            log.error("createOrderByMq InterruptedException 降级为已受理 orderNumber : {}", orderCreateMq.getOrderNumber(), e);
+            writePendingOrder(orderCreateMq);
+            return createOrderMqDomain.orderNumber;
         }
         if (Objects.nonNull(createOrderMqDomain.ticketFlowFrameException)) {
             throw createOrderMqDomain.ticketFlowFrameException;
         }
         return createOrderMqDomain.orderNumber;
+    }
+
+    /**
+     * 写入 PENDING 待确认队列：请求侧发送超时降级时留痕，
+     * 供 order-service 对账任务扫描后裁决（建单成功移除 / 未建单回滚座位）。
+     */
+    private void writePendingOrder(OrderCreateMq orderCreateMq) {
+        try {
+            redisCache.leftPushForList(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_CREATE_PENDING,
+                    orderCreateMq.getProgramId()), new PendingOrder(orderCreateMq));
+        } catch (Exception e) {
+            // PENDING 写入失败不能上抛：主路径已降级为成功，缺失留痕由 Redis 座位锁死时限 + 人工对账兜底
+            log.error("创建订单kafka发送超时后写入 PENDING 失败 需人工处理 orderNumber : {}",
+                    orderCreateMq.getOrderNumber(), e);
+        }
     }
 
     /**

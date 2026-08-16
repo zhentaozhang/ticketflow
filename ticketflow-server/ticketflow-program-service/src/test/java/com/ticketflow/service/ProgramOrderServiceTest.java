@@ -10,6 +10,7 @@ import com.ticketflow.mq.callback.FailureCallback;
 import com.ticketflow.mq.callback.SuccessCallback;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.domain.OrderCreateMq;
+import com.ticketflow.domain.PendingOrder;
 import com.ticketflow.domain.PurchaseSeat;
 import com.ticketflow.dto.DelayOrderCancelDto;
 import com.ticketflow.dto.OrderCreateDto;
@@ -31,6 +32,7 @@ import com.ticketflow.service.lua.ProgramCacheCreateOrderData;
 import com.ticketflow.service.lua.ProgramCacheCreateOrderResolutionOperate;
 import com.ticketflow.service.lua.ProgramCacheResolutionOperate;
 import com.ticketflow.core.SpringUtil;
+import com.ticketflow.redis.RedisKeyBuild;
 import com.ticketflow.vo.ProgramVo;
 import com.ticketflow.vo.SeatVo;
 import com.ticketflow.vo.TicketCategoryVo;
@@ -664,6 +666,47 @@ class ProgramOrderServiceTest {
 
             // Kafka 发送失败：回滚 Redis 缓存（释放已锁座位、恢复余票）
             verify(programCacheResolutionOperate).programCacheOperate(anyList(), any());
+        }
+
+        @Test
+        void sendTimeout_DegradesToAcceptedAndWritesPending() {
+            ProgramOrderCreateDto dto = createDtoWithSeats(1);
+
+            when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
+                    .thenReturn(createShowTime());
+            when(ticketCategoryService.selectTicketCategoryListByProgramIdMultipleCache(eq(PROGRAM_ID), any()))
+                    .thenReturn(List.of(createTicketCategory(TICKET_CATEGORY_ID)));
+            when(seatService.selectSeatResolution(anyLong(), anyLong(), anyLong(), any()))
+                    .thenReturn(List.of(createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID)));
+            Map<String, Long> remainMap = new HashMap<>();
+            remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 100L);
+            when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
+                    .thenReturn(remainMap);
+            when(uidGenerator.getUid()).thenReturn(888L, 12345L);
+
+            List<PurchaseSeat> purchaseSeats = List.of(createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID));
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.SUCCESS.getCode());
+            luaResult.setPurchaseSeatList(purchaseSeats);
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
+            when(programService.simpleGetProgramAndShowMultipleCache(PROGRAM_ID))
+                    .thenReturn(createProgramVo());
+
+            // sendMessage 永不回调成功/失败 → latch.await 超时 → 降级为已受理并写 PENDING
+            doNothing().when(createOrderSend).sendMessage(anyString(), any(), any());
+
+            ArgumentCaptor<RedisKeyBuild> pendingKeyCaptor = ArgumentCaptor.forClass(RedisKeyBuild.class);
+            ArgumentCaptor<PendingOrder> pendingCaptor = ArgumentCaptor.forClass(PendingOrder.class);
+            String result = programOrderService.createNewAsync(dto, ProgramOrderVersion.V4_VERSION.getValue());
+
+            assertNotNull(result);
+            // 降级路径：写入 PENDING 待确认队列（不做缓存回滚，回滚由 A2 对账任务裁决）
+            verify(redisCache).leftPushForList(pendingKeyCaptor.capture(), pendingCaptor.capture());
+            assertTrue(pendingKeyCaptor.getValue().getRelKey().contains("d_mai_order_create_pending"));
+            assertEquals(result, String.valueOf(pendingCaptor.getValue().getOrderCreateMq().getOrderNumber()));
+            // 未走发送失败回滚路径
+            verify(programCacheResolutionOperate, never()).programCacheOperate(anyList(), any());
         }
     }
 
