@@ -30,7 +30,9 @@ import com.ticketflow.service.domain.CreateOrderTemporaryData;
 import com.ticketflow.service.kafka.CreateOrderSend;
 import com.ticketflow.service.lua.ProgramCacheCreateOrderData;
 import com.ticketflow.service.lua.ProgramCacheCreateOrderResolutionOperate;
+import com.ticketflow.service.lua.ProgramCacheCreateOrderV5ResolutionOperate;
 import com.ticketflow.service.lua.ProgramCacheResolutionOperate;
+import com.ticketflow.service.stock.ProgramLocalStockGate;
 import com.ticketflow.core.SpringUtil;
 import com.ticketflow.redis.RedisKeyBuild;
 import com.ticketflow.vo.ProgramVo;
@@ -93,6 +95,8 @@ class ProgramOrderServiceTest {
     @Mock private UidGenerator uidGenerator;
     @Mock private ProgramCacheResolutionOperate programCacheResolutionOperate;
     @Mock private ProgramCacheCreateOrderResolutionOperate programCacheCreateOrderResolutionOperate;
+    @Mock private ProgramCacheCreateOrderV5ResolutionOperate programCacheCreateOrderV5ResolutionOperate;
+    @Mock private ProgramLocalStockGate programLocalStockGate;
     @Mock private DelayOrderCancelSend delayOrderCancelSend;
     @Mock private CreateOrderSend createOrderSend;
     @Mock private ProgramService programService;
@@ -707,6 +711,45 @@ class ProgramOrderServiceTest {
             assertEquals(result, String.valueOf(pendingCaptor.getValue().getOrderCreateMq().getOrderNumber()));
             // 未走发送失败回滚路径
             verify(programCacheResolutionOperate, never()).programCacheOperate(anyList(), any());
+        }
+    }
+
+    // ==================== P1: createNewAsyncV5 (V5) ====================
+
+    @Nested
+    class CreateNewAsyncV5 {
+
+        @Test
+        void v5Lua幂等标记TTL为3秒() {
+            ProgramOrderCreateDto dto = createDtoWithSeats(1);
+
+            when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
+                    .thenReturn(createShowTime());
+            when(ticketCategoryService.selectTicketCategoryListByProgramIdMultipleCache(eq(PROGRAM_ID), any()))
+                    .thenReturn(List.of(createTicketCategory(TICKET_CATEGORY_ID)));
+            when(seatService.selectSeatResolution(anyLong(), anyLong(), anyLong(), any()))
+                    .thenReturn(List.of(createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID)));
+            Map<String, Long> remainMap = new HashMap<>();
+            remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 100L);
+            when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
+                    .thenReturn(remainMap);
+            // 本地库存闸门未跟踪（-1=不拦截），避免售罄短路
+            when(programLocalStockGate.estimatedRemain(PROGRAM_ID, TICKET_CATEGORY_ID)).thenReturn(-1);
+            when(uidGenerator.getUid()).thenReturn(888L);
+
+            List<PurchaseSeat> purchaseSeats = List.of(createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID));
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.SUCCESS.getCode());
+            luaResult.setPurchaseSeatList(purchaseSeats);
+            when(programCacheCreateOrderV5ResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
+
+            programOrderService.createOrderOperateProgramCacheResolutionV5(dto);
+
+            // 幂等标记 TTL 通过 ARGV[4]（data[3]）传入 V5 Lua，必须为 3 秒
+            ArgumentCaptor<String[]> dataCaptor = ArgumentCaptor.forClass(String[].class);
+            verify(programCacheCreateOrderV5ResolutionOperate).programCacheOperate(anyList(), dataCaptor.capture());
+            assertEquals("3", dataCaptor.getValue()[3]);
         }
     }
 

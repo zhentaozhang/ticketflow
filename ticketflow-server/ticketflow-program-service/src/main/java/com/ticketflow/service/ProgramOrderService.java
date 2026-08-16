@@ -86,9 +86,10 @@ public class ProgramOrderService {
     /**
      * V5 下单幂等标记 TTL（秒）。
      * 仅防"同一用户同一节目在请求在途/刚提交"窗口内的重复提交，语义对齐 V4 @RepeatExecuteLimit(durationTime=0)
-     * （只排除在途并发，不阻断合法二次购买）。请求侧在途窗口通常 <1s，取 10s 留足余量。
+     * （只排除在途并发，不阻断合法二次购买）。请求侧在途窗口通常 <1s，取 3s 留足余量；
+     * 合法二次购买 3s 后可再次提交；消息重放幂等由消费侧（selectOne + 唯一索引 + ORDER_EXIST 特判）兜底。
      */
-    private static final int V5_IDEMPOTENT_TTL_SECONDS = 10;
+    private static final int V5_IDEMPOTENT_TTL_SECONDS = 3;
 
     /**
      * V5 不选座自动匹配的窄粒度本地锁前缀（按 programId+ticketCategoryId 加锁）。
