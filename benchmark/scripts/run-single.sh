@@ -21,6 +21,10 @@ DURATION=${3:-60}
 MODE=${4:-closed}
 RATE=${5:-$CONCURRENCY}
 ROUNDS=${6:-1}
+# 被测机地址：默认单机 127.0.0.1；局域网双机模式设 TARGET_HOST=<被测机IP>（压测机连被测机）
+# export：collect-metrics.sh 等子进程脚本需要继承
+export TARGET_HOST=${TARGET_HOST:-127.0.0.1}
+BASE_URL="http://${TARGET_HOST}:6086"
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 RESULT_DIR="$PROJECT_DIR/results"
 mkdir -p "$RESULT_DIR"
@@ -38,6 +42,7 @@ echo "  模式:     $MODE"
 echo "  并发/到达率: ${CONCURRENCY}/${RATE}"
 echo "  时长:     ${DURATION}s（开环满速 / 闭环 ramp 10s 后的稳态窗口）"
 echo "  轮数:     $ROUNDS（同参数重复，compare-report 输出中位数/min-max）"
+echo "  被测机:   $TARGET_HOST（双机模式时压测机需 mysql 客户端 + 被测机放行 3306/6086/9092/9090）"
 echo "  开始时间: $(date '+%H:%M:%S')"
 echo "=========================================="
 
@@ -115,15 +120,15 @@ run_round() {
   #    避免压测首波请求在锁内触发 DB 冷加载（拉长锁持有时间 → 70005 暴增）
   echo "[1/7] 前置数据: permit_choose_seat=1 + preheat..."
   MYSQL -e "UPDATE ticketflow_program_1.d_program_1 SET permit_choose_seat=1 WHERE id=9999;"
-  if ! curl -sf -X POST http://127.0.0.1:6086/program/data/preheat \
+  if ! curl -sf -X POST "$BASE_URL/program/data/preheat" \
     -H "Content-Type: application/json" \
     -d '{"programId": 9999}' > /dev/null; then
     echo "  (data/preheat 不可用，降级用 reset/execute)"
-    curl -sf -X POST http://127.0.0.1:6086/program/reset/execute \
+    curl -sf -X POST "$BASE_URL/program/reset/execute" \
       -H "Content-Type: application/json" \
       -d '{"programId": 9999}' > /dev/null || true
   fi
-  curl -sf -X POST http://127.0.0.1:6086/test/reset \
+  curl -sf -X POST "$BASE_URL/test/reset" \
     -H "Content-Type: application/json" \
     -d '{"testSendDto": "reset"}' > /dev/null || true
   sleep 3
@@ -174,6 +179,7 @@ run_round() {
   echo "[4/7] 执行压测 (version=$VERSION, mode=$MODE, rate=$RATE, concurrency=$CONCURRENCY, duration=${DURATION}s)..."
   mvn -f "$PROJECT_DIR/pom.xml" gatling:test \
     -Dgatling.simulationClass=simulations.OrderBenchmark \
+    -DbaseUrl="$BASE_URL" \
     -DappVersion="$VERSION" \
     -Dmode="$MODE" \
     -Drate="$RATE" \

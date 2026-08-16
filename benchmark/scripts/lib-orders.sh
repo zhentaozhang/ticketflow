@@ -2,13 +2,24 @@
 # =============================================
 # 落库对账辅助函数：d_order 分片 ds_0/1 × d_order_0..7 = 16 张表
 # 每单 1 条 d_order 记录 → 求和即订单总量
-# 注意：MySQL 跑在 docker 容器内（容器名 ticketflow-mysql），
-# 宿主机 mysql 9.x 不支持 mysql_native_password → 必须 docker exec
+#
+# 两种模式（由 TARGET_HOST 环境变量切换）：
+#   默认单机：MySQL 跑在 docker 容器内（容器名 ticketflow-mysql），
+#             宿主机 mysql 9.x 不支持 mysql_native_password → 必须 docker exec
+#   局域网双机：TARGET_HOST=<被测机IP> 时用压测机本地 mysql 客户端远程连接（需 brew install mysql-client）
 # =============================================
 
-MYSQL() {
-  docker exec ticketflow-mysql mysql -uroot -proot -N "$@"
-}
+if [ -n "$TARGET_HOST" ]; then
+  # 双机模式：压测机本地 mysql 客户端 → 被测机 3306（防火墙需放行 3306）
+  MYSQL() {
+    mysql -h"$TARGET_HOST" -P3306 -uroot -proot -N "$@"
+  }
+else
+  # 单机模式：docker exec 进入被测机上的 mysql 容器
+  MYSQL() {
+    docker exec ticketflow-mysql mysql -uroot -proot -N "$@"
+  }
+fi
 
 count_orders() {
   local QUERY="SELECT SUM(c) FROM ("

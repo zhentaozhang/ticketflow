@@ -176,6 +176,57 @@ Redis 大读取拉长锁持有时间 → `tryLock(3s)` 超时 → 70005。
 - 2026-08-16 起已落地公平对比口径：端到端成功率（落库率）主指标、多轮中位数区间、
   冷却 lag=0 闭环、配置快照、容量拐点标注（见「口径」节）——跨机执行后可直接产出公平的 V1~V5 对比
 
+## 局域网双机部署（压测机/被测机分离）
+
+解决"同机压测"局限：**主电脑（macOS）做压测机跑 Gatling，第二台电脑（Windows）做被测机**部署全部中间件 + 被测服务，同一 WiFi 内网互访。
+
+### 被测机（Windows）初始化
+
+```powershell
+# 前置：装好 Docker Desktop(WSL2) + JDK17 + Git + Maven（16G 内存建议 Docker Desktop 内存限 4G）
+# 首次执行（含 clone/改配置/起中间件/导SQL/构建/起服务/扩topic/防火墙）
+.\benchmark\setup-target-machine.ps1 `
+  -RepoUrl https://github.com/zhentaozhang/ticketflow.git `
+  -Branch v5-optimization -WorkDir D:\ticketflow -JasyptPassword <密码>
+```
+
+脚本要点：
+- 自动把 `docker-compose.yml` 的 Kafka advertised listeners 从 `127.0.0.1:9092` 改为本机局域网 IP
+  （否则 Mac 查 lag/调试 Kafka 会连到自身；Windows 本机连自己 IP 同样通）
+- SQL 需手动导入（`docker/mysql/init.d` 为空，容器不会自动导）：脚本按 `sql/cloud/` 顺序执行并校验 12 万座位
+- 服务以 Windows 原生 JVM 后台启动（`-Xmx1g`），日志 `logs-program.out` / `logs-order.out`
+- 防火墙（管理员）放行 6086/8081/3306/6379/9092/8848/9090
+
+### 压测机（macOS）
+
+```bash
+# 装 mysql 客户端（落库对账）+ 可选 kafka CLI（查 lag）
+brew install mysql-client
+# brew install kafka   # 可选：双机模式查 consumer lag 用
+
+# 双机模式：TARGET_HOST 指向被测机局域网 IP（脚本自动改 baseUrl/落库对账/Prometheus/lag 地址）
+export TARGET_HOST=192.168.x.x
+
+# 连通性验证
+curl http://$TARGET_HOST:6086/actuator/health
+mysql -h$TARGET_HOST -uroot -proot -e "select 1"
+
+# 冒烟压测
+bash benchmark/scripts/run-single.sh v5 0 30 openloop 40 1
+
+# 正式对比：V1~V5 每档 3 轮（注意：先跑 v5 优化前基线，再切分支跑优化后）
+for v in v1 v2 v3 v4 v5; do
+  bash benchmark/scripts/run-staircase.sh $v "80 120 160 200 300 400" 60 3
+done
+bash benchmark/scripts/compare-report.sh
+```
+
+### 双机模式注意事项
+
+- 内网 WiFi 延迟 ~2-5ms 对 5 个版本一致（公平），报告标注即可；两台都建议连 5G 频段，避免 2.4G 抖动污染 p50/p95
+- 无网线时 IP 可能随 DHCP 变化：在路由器做 DHCP 静态绑定（或 Windows 设静态 IP），防止压测中途 IP 漂移
+- `TARGET_HOST` 未设置时全部脚本保持单机（127.0.0.1）行为，向后兼容
+
 ## 目录结构
 
 ```
