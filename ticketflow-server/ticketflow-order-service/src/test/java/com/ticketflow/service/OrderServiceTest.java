@@ -219,6 +219,21 @@ class OrderServiceTest {
     }
 
     @Test
+    void doCreateV5订单_不重复累加账户计数() {
+        // D2：V5 计数由请求侧 Lua 原子维护（INCRBY），消费侧 doCreate 不再累加，避免双计
+        OrderCreateDomain v5Domain = buildCreateDomain();
+        v5Domain.setOrderVersion(ProgramOrderVersion.V5_VERSION.getValue());
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+
+        String orderNumber = orderService.doCreate(v5Domain);
+
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+        verify(orderMapper).insert(any(Order.class));
+        verify(redisCache, never()).incrBy(any(RedisKeyBuild.class), anyLong());
+    }
+
+    @Test
     void doCreate_同步器激活时计数延迟到事务提交后() {
         when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
         when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);

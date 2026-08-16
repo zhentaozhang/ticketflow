@@ -33,6 +33,7 @@ import com.ticketflow.service.lua.ProgramCacheCreateOrderResolutionOperate;
 import com.ticketflow.service.lua.ProgramCacheCreateOrderV5ResolutionOperate;
 import com.ticketflow.service.lua.ProgramCacheResolutionOperate;
 import com.ticketflow.service.stock.ProgramLocalStockGate;
+import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.core.SpringUtil;
 import com.ticketflow.redis.RedisKeyBuild;
 import com.ticketflow.vo.ProgramVo;
@@ -105,6 +106,7 @@ class ProgramOrderServiceTest {
     @Mock private SeatService seatService;
     @Mock private ProgramRecordTaskMapper programRecordTaskMapper;
     @Mock private com.ticketflow.redis.RedisCache redisCache;
+    @Mock private com.ticketflow.locallock.LocalLockCache localLockCache;
 
     private static final Long PROGRAM_ID = 501L;
     private static final Long USER_ID = 1001L;
@@ -743,6 +745,9 @@ class ProgramOrderServiceTest {
             luaResult.setPurchaseSeatList(purchaseSeats);
             when(programCacheCreateOrderV5ResolutionOperate.programCacheOperate(anyList(), any()))
                     .thenReturn(luaResult);
+            // D2：createOrderOperateProgramCacheResolutionV5 新增取限购参数，需 stub 节目缓存
+            when(programService.simpleGetProgramAndShowMultipleCache(PROGRAM_ID))
+                    .thenReturn(createProgramVo());
 
             programOrderService.createOrderOperateProgramCacheResolutionV5(dto);
 
@@ -750,6 +755,90 @@ class ProgramOrderServiceTest {
             ArgumentCaptor<String[]> dataCaptor = ArgumentCaptor.forClass(String[].class);
             verify(programCacheCreateOrderV5ResolutionOperate).programCacheOperate(anyList(), dataCaptor.capture());
             assertEquals("3", dataCaptor.getValue()[3]);
+        }
+
+        @Test
+        void v5Lua限购参数传递正确_选座() {
+            ProgramOrderCreateDto dto = createDtoWithSeats(2);
+
+            when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
+                    .thenReturn(createShowTime());
+            when(ticketCategoryService.selectTicketCategoryListByProgramIdMultipleCache(eq(PROGRAM_ID), any()))
+                    .thenReturn(List.of(createTicketCategory(TICKET_CATEGORY_ID)));
+            when(seatService.selectSeatResolution(anyLong(), anyLong(), anyLong(), any()))
+                    .thenReturn(List.of(createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID)));
+            Map<String, Long> remainMap = new HashMap<>();
+            remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 100L);
+            when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
+                    .thenReturn(remainMap);
+            when(programLocalStockGate.estimatedRemain(PROGRAM_ID, TICKET_CATEGORY_ID)).thenReturn(-1);
+            when(uidGenerator.getUid()).thenReturn(888L);
+
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.SUCCESS.getCode());
+            luaResult.setPurchaseSeatList(List.of(
+                    createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID),
+                    createPurchaseSeat(51L, 2000L, TICKET_CATEGORY_ID)));
+            when(programCacheCreateOrderV5ResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
+
+            ProgramVo programVo = createProgramVo();
+            programVo.setPerAccountLimitPurchaseCount(2);
+            when(programService.simpleGetProgramAndShowMultipleCache(PROGRAM_ID)).thenReturn(programVo);
+
+            programOrderService.createOrderOperateProgramCacheResolutionV5(dto);
+
+            // KEYS[9] = 账户订单计数 key；data[4]=限购数量、data[5]=本次购票总数（选座=座位数）
+            ArgumentCaptor<List<String>> keysCaptor = ArgumentCaptor.forClass(List.class);
+            ArgumentCaptor<String[]> dataCaptor = ArgumentCaptor.forClass(String[].class);
+            verify(programCacheCreateOrderV5ResolutionOperate).programCacheOperate(keysCaptor.capture(), dataCaptor.capture());
+            assertTrue(keysCaptor.getValue().get(keysCaptor.getValue().size() - 1).contains(
+                    RedisKeyManage.ACCOUNT_ORDER_COUNT.getKey().split("%s")[0]));
+            assertEquals("2", dataCaptor.getValue()[4]);
+            assertEquals("2", dataCaptor.getValue()[5]);
+        }
+
+        @Test
+        void v5Lua限购参数传递正确_不选座() {
+            ProgramOrderCreateDto dto = createDtoWithSeats(0);
+            dto.setSeatDtoList(null);
+            dto.setTicketCategoryId(TICKET_CATEGORY_ID);
+            dto.setTicketCount(3);
+
+            when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
+                    .thenReturn(createShowTime());
+            when(ticketCategoryService.selectTicketCategoryListByProgramIdMultipleCache(eq(PROGRAM_ID), any()))
+                    .thenReturn(List.of(createTicketCategory(TICKET_CATEGORY_ID)));
+            when(programLocalStockGate.estimatedRemain(PROGRAM_ID, TICKET_CATEGORY_ID)).thenReturn(-1);
+            when(uidGenerator.getUid()).thenReturn(888L);
+
+            // 自动匹配路径：应用层读取 no_sold 集合 + Lua 校验
+            Map<String, SeatVo> noSoldMap = new HashMap<>();
+            noSoldMap.put("50", createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID));
+            noSoldMap.put("51", createSeatVo(51L, 1, 2, TICKET_CATEGORY_ID));
+            noSoldMap.put("52", createSeatVo(52L, 1, 3, TICKET_CATEGORY_ID));
+            when(redisCache.getAllMapForHash(any(RedisKeyBuild.class), eq(SeatVo.class))).thenReturn(noSoldMap);
+            // V5 自动匹配窄粒度本地锁
+            when(localLockCache.getLock(anyString(), anyBoolean())).thenReturn(new java.util.concurrent.locks.ReentrantLock());
+
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.SUCCESS.getCode());
+            luaResult.setPurchaseSeatList(List.of(
+                    createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID),
+                    createPurchaseSeat(51L, 2000L, TICKET_CATEGORY_ID),
+                    createPurchaseSeat(52L, 2000L, TICKET_CATEGORY_ID)));
+            when(programCacheCreateOrderV5ResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
+            ProgramVo programVo = createProgramVo();
+            programVo.setPerAccountLimitPurchaseCount(5);
+            when(programService.simpleGetProgramAndShowMultipleCache(PROGRAM_ID)).thenReturn(programVo);
+
+            programOrderService.createOrderOperateProgramCacheResolutionV5(dto);
+
+            ArgumentCaptor<String[]> dataCaptor = ArgumentCaptor.forClass(String[].class);
+            verify(programCacheCreateOrderV5ResolutionOperate).programCacheOperate(anyList(), dataCaptor.capture());
+            assertEquals("5", dataCaptor.getValue()[4]);
+            assertEquals("3", dataCaptor.getValue()[5]);
         }
     }
 

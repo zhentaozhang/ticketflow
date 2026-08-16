@@ -233,28 +233,32 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         orderProgram.setIdentifierId(order.getIdentifierId());
         orderProgramMapper.insert(orderProgram);
         //用户下此节目的订单数量加1操作
-        // 事务提交后再累加：回滚事务不再产生 Redis 计数漂移；Redis 调用也不占用事务内 DB 连接
-        Long increment = (long) orderCreateDomain.getOrderTicketUserCreateDtoList().size();
-        Long userId = orderCreateDomain.getUserId();
-        Long programId = orderCreateDomain.getProgramId();
-        Runnable doIncr = () -> {
-            try {
-                redisCache.incrBy(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, userId, programId), increment);
-            } catch (Exception e) {
-                log.error("ACCOUNT_ORDER_COUNT 累加失败 userId:{} programId:{}", userId, programId, e);
-            }
-        };
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            // 事务提交后执行（afterCommit）：回滚事务不累加，Redis 调用移出事务
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    doIncr.run();
+        // V5：ACCOUNT_ORDER_COUNT 由请求侧 V5 Lua 原子维护（INCRBY），消费侧不重复累加
+        // V1-V4：请求侧 Lua 不维护计数，仍由消费侧事务提交后累加，保持原语义
+        if (!Objects.equals(orderCreateDomain.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue())) {
+            // 事务提交后再累加：回滚事务不再产生 Redis 计数漂移；Redis 调用也不占用事务内 DB 连接
+            Long increment = (long) orderCreateDomain.getOrderTicketUserCreateDtoList().size();
+            Long userId = orderCreateDomain.getUserId();
+            Long programId = orderCreateDomain.getProgramId();
+            Runnable doIncr = () -> {
+                try {
+                    redisCache.incrBy(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, userId, programId), increment);
+                } catch (Exception e) {
+                    log.error("ACCOUNT_ORDER_COUNT 累加失败 userId:{} programId:{}", userId, programId, e);
                 }
-            });
-        } else {
-            // 无事务上下文（自调用/直测）回退为立即执行，等价原行为
-            doIncr.run();
+            };
+            if (TransactionSynchronizationManager.isSynchronizationActive()) {
+                // 事务提交后执行（afterCommit）：回滚事务不累加，Redis 调用移出事务
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        doIncr.run();
+                    }
+                });
+            } else {
+                // 无事务上下文（自调用/直测）回退为立即执行，等价原行为
+                doIncr.run();
+            }
         }
         return String.valueOf(order.getOrderNumber());
     }

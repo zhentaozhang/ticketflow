@@ -9,13 +9,17 @@
 --- KEYS[6]: 记录标识 (reduce_xxx) 也作为幂等标记的 value
 --- KEYS[7]: 记录类型 (reduce)
 --- KEYS[8]: 幂等 key（同一 userId+programId 的提交标记，EX ttl 秒）
+--- KEYS[9]: 账户订单计数 key (d_mai_account_order_count_%s_%s，String 类型，限购校验+扣减后累加)
 --- ARGV[1]: 票档列表 JSON [{ticketCategoryId, ticketCount, programTicketRemainNumberHashKey}]
 --- ARGV[2]: 座位数据 JSON
 --- ARGV[3]: 购票人 id 列表 JSON
 --- ARGV[4]: 幂等标记 TTL（秒）
+--- ARGV[5]: 该用户限购数量 perAccountLimitPurchaseCount（0/null=不限购）
+--- ARGV[6]: 本次购票总数（限购校验与计数累加使用）
 ---
 --- 错误码：
 ---   40035  — 重复提交（同一用户同一节目在幂等窗口内再次提交）
+---   50009  — 超出该用户限购数量
 ---   40001  — 座位不存在（hget 为空）
 ---   40002  — 座位已锁定（sellStatus=2）
 ---   40003  — 座位已售出（sellStatus=3）
@@ -38,6 +42,17 @@ if not idem_result then
 end
 
 local type = tonumber(KEYS[1])
+
+-- 限购校验（每单仅执行一次，顶层执行）：KEYS[9]=账户订单计数，ARGV[5]=限购数量，ARGV[6]=本次购票总数
+-- 未预热（GET 为 nil）视为 0 不拦截首单，预热由登录/详情页异步完成；限购失败直接 return fail(50009)（fail 内部已 DEL 幂等标记）
+local account_count_str = redis.call('GET', KEYS[9])
+if account_count_str then
+    local account_count = tonumber(account_count_str)
+    local limit = tonumber(ARGV[5])
+    if limit and limit > 0 and account_count + tonumber(ARGV[6]) > limit then
+        return fail(50009)
+    end
+end
 -- 没有售卖的座位key
 local placeholder_seat_no_sold_hash_key = KEYS[2]
 -- 锁定的座位key
@@ -184,6 +199,8 @@ for index,ticket_count in ipairs(ticket_count_list) do
     local count = ticket_count.ticketCount
     redis.call('hincrby',ticket_remain_number_hash_key,ticket_category_id,"-" .. count)
 end
+-- 扣减成功后（每单仅执行一次）累加账户订单计数，计数单一归属 Lua，消费侧不再重复累加
+redis.call('INCRBY', KEYS[9], tonumber(ARGV[6]))
 -- 将没有售卖的座位删除
 for ticket_category_id, seat_id_array in pairs(seat_id_list) do
     redis.call('hdel',string.format(placeholder_seat_no_sold_hash_key,program_id,tostring(ticket_category_id)),unpack(seat_id_array))

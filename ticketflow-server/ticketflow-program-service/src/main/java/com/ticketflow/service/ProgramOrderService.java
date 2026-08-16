@@ -471,8 +471,8 @@ public class ProgramOrderService {
         Long programId = programOrderCreateDto.getProgramId();
         List<SeatDto> seatDtoList = programOrderCreateDto.getSeatDtoList();
         List<String> keys = new ArrayList<>();
-        //V5：ARGV[4] = 幂等标记 TTL（秒）；data[0..2] 与 V4 一致，data[3]=TTL
-        String[] data = new String[4];
+        //V5：ARGV[4]=幂等标记 TTL（秒）、ARGV[5]=限购数量、ARGV[6]=本次购票总数；data[0..2] 与 V4 一致
+        String[] data = new String[6];
         JSONArray jsonArray = new JSONArray();
         JSONArray addSeatDatajsonArray = new JSONArray();
         if (CollectionUtil.isNotEmpty(seatDtoList)) {
@@ -533,11 +533,21 @@ public class ProgramOrderService {
         //V5：幂等 key（同一 userId+programId 的提交标记）
         keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.V5_ORDER_CREATE_IDEMPOTENT,
                 programOrderCreateDto.getUserId(), programOrderCreateDto.getProgramId()).getRelKey());
+        //V5：账户订单计数 key（限购校验 + 扣减成功后累加，计数单一归属 Lua）
+        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT,
+                programOrderCreateDto.getUserId(), programOrderCreateDto.getProgramId()).getRelKey());
         data[0] = JSON.toJSONString(jsonArray);
         data[2] = JSON.toJSONString(programOrderCreateDto.getTicketUserIdList().stream()
                 .map(String::valueOf)
                 .toList());
         data[3] = String.valueOf(V5_IDEMPOTENT_TTL_SECONDS);
+        //V5 限购：perAccountLimitPurchaseCount（缓存中未配置/为空按不限购处理），null -> "0"
+        Integer perAccountLimitPurchaseCount =
+                programService.simpleGetProgramAndShowMultipleCache(programId).getPerAccountLimitPurchaseCount();
+        data[4] = String.valueOf(Objects.isNull(perAccountLimitPurchaseCount) ? 0 : perAccountLimitPurchaseCount);
+        //V5 限购：本次购票总数（选座=座位数，不选座=票数）
+        data[5] = String.valueOf(CollectionUtil.isNotEmpty(seatDtoList) ? seatDtoList.size()
+                : programOrderCreateDto.getTicketCount());
 
         //本地库存闸门预判：快速拒绝已售罄，避免无谓的 Redis EVAL
         checkLocalStockGate(programOrderCreateDto);
