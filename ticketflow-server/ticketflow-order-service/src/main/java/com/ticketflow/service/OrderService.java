@@ -800,11 +800,13 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 delayOperateProgramDataSend.sendMessage(JSON.toJSONString(programOperateDataDto));
             }
         }else {
-            //V4/V5：同步更新节目服务的相关数据（program 侧 operateProgramData 对 V5 容忍未投影座位）
+            //V4/V5：先 Lua 收敛 Redis 权威数据（座位三区/余票），再 Feign 收敛 DB 派生数据。
+            //Redis 为权威，先更新；DB 为派生，后收敛——Feign 失败仅记日志（DB 滞后由投影/守恒任务观测兜底）
+            orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
             if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ||
                     Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
                 programOperateDataDto.setSellStatus(Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ? SellStatus.SOLD.getCode() : SellStatus.NO_SOLD.getCode());
-                // 事务外尽力而为：Feign 失败仅记日志不阻断 Lua（Redis 权威）继续执行，
+                // 事务外尽力而为：Feign 失败仅记日志不阻断（Redis 已收敛），
                 // DB 侧由投影任务/V5StockConservationTask 观测兜底
                 try {
                     ApiResponse<Boolean> programApiResponse = programClient.operateProgramData(programOperateDataDto);
@@ -817,7 +819,6 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                             JSON.toJSONString(programOperateDataDto), e);
                 }
             }
-            orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
         }
     }
     
