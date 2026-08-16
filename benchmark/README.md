@@ -45,36 +45,46 @@ Gatling 开环到达率模型灌压，Prometheus 采集资源指标，落库对�
 2. 座位导出与校验（12 万行、分档数量校验，缺档报错）
 3. 压测前 `d_order` 落库计数
 4. Gatling 压测（`mvn gatling:test`）
-5. Prometheus 指标采集（压测结束立即采）
-6. 等 mq 消费 30s 后落库计数
-7. `build-result.py` 生成结果 json（成功率、p50/p95、错误码分桶、落库差）
+5. Prometheus 指标采集（压测结束立即采）+ 压测机 CPU
+6. **冷却闭环**：轮询 `kafka-consumer-groups lag` 直到 0（上限 90s）后再落库计数（V1-V3 同步路径 lag 恒 0 立即返回）
+7. `build-result.py` 生成结果 json（受理/端到端成功率、p50/p95/p99/max、错误码分桶、落库差）
 
-### 口径
+### 口径（2026-08-16 改造：公平对比 V1~V5 的统一口径）
 
-- **成功率** = HTTP 200 且业务 code=0 的请求占比（Gatling ok/total）
-- **落库差** = 压测前后 `d_order` 增量 vs 成功数（对账应闭合；v4 需等 mq 消费完再计数）
-- **错误码**（`DefaultExceptionHandler`）：
+- **端到端成功率（主指标）** = 落库订单数 ÷ 请求数（`order_diff.end_to_end_success_rate`）。消费排空（lag=0）后统计。**异步架构（V4/V5）必须用它**：受理成功 ≠ 订单创建成功（历史上 V4 曾出现 99.9% 受理率但仅 17% 落库）。
+- **受理成功率（次级）** = HTTP 200 且业务 code=0 的请求占比（Gatling ok/total）
+- **延迟**：受理 p50/p95/**p99/max**（stats.json percentiles1/3/4 + maxResponseTime）
+- **失败五桶**（对比归因）：协议/连接失败（过载）、70005 锁失败、40002/3 座位竞争、50009 限购、落库差（异步正确性丢失）
+- **多轮机制**：`run-single.sh <version> ... [rounds]`，同参数 N 轮独立 reset+压测+冷却；`compare-report.sh` 聚合输出**中位数 (min-max) 区间**，不取最优轮
+- **配置快照**：每轮生成 `snapshot-*.json`（git commit/分支、Tomcat 线程、Kafka 分区数、Redis 模式、座位规模），随 result 记录，防配置漂移
+- **容量拐点**：`compare-report.sh` 按版本标注端到端成功率首次跌破 99% / 95% 的 rate
+
+### 错误码（`DefaultExceptionHandler`）
 
 | 码 | 含义 |
 |----|------|
 | 0 | 成功 |
 | 70005 | 分布式锁加锁失败（tryLock 3s 超时，v2/v3/v4） |
 | 40001/40002/40003 | 选座/余票竞争业务失败 |
+| 50009 | 超出该用户限购数量（v5） |
 | -100 | 未捕获系统异常（`ApiResponse.error()` 兜底） |
 
 ### 运行方式
 
 ```bash
-# 单版本单档：开环 120 QPS × 60s
+# 单版本单档：开环 120 QPS × 60s（单轮）
 bash scripts/run-single.sh v4 0 60 openloop 120
 
-# 阶梯拐点扫描：开环多档位依次跑
-bash scripts/run-staircase.sh v4 "40 80 120 160 200" 60
+# 同参数 3 轮取中位数区间（推荐：每档 ≥3 轮）
+bash scripts/run-single.sh v5 0 60 openloop 120 3
 
-# 四版本对比（闭环 30/60/120 并发 × 20s）
+# 阶梯拐点扫描：开环多档位依次跑（每档可指定轮数）
+bash scripts/run-staircase.sh v5 "40 80 120 160 200" 60 3
+
+# 四版本对比（闭环 30/60/120 并发）
 bash scripts/run-compare.sh
 
-# 聚合对比报告（读取 results/ 下结果生成 markdown 表）
+# 聚合对比报告（多轮中位数/区间 + 容量拐点 + 公平性声明）
 bash scripts/compare-report.sh
 ```
 
@@ -161,8 +171,10 @@ Redis 大读取拉长锁持有时间 → `tryLock(3s)` 超时 → 70005。
 ### 测量局限
 
 - 压测机 = 被测机，CPU 竞争抬高低并发延迟，p50/p95 绝对值有噪声
-  （60s vs 120s 窗口差异显著），精确 A/B 需分离压测机
+  （60s vs 120s 窗口差异显著），精确 A/B 需分离压测机（跨机压测另做）
 - 单机 Redis 为物理瓶颈；结果随硬件与部署环境变化
+- 2026-08-16 起已落地公平对比口径：端到端成功率（落库率）主指标、多轮中位数区间、
+  冷却 lag=0 闭环、配置快照、容量拐点标注（见「口径」节）——跨机执行后可直接产出公平的 V1~V5 对比
 
 ## 目录结构
 

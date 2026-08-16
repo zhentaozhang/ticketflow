@@ -70,6 +70,16 @@ query_and_append "jvm_threads_live_threads" "live_threads"
 query_and_append "hikaricp_connections_active{pool='HikariPool-1'}" "hikari_active_connections"
 query_and_append "hikaricp_connections_pending{pool='HikariPool-1'}" "hikari_pending_threads"
 
+# 压测机 CPU（同机压测局限标注：高并发下压测机可能成为瓶颈）
+# macOS: top -l 1 解析 "CPU usage: 12.34% user, ..."；Linux 备选 /proc/stat
+HOST_CPU=$(top -l 1 -n 0 2>/dev/null | grep "CPU usage" | sed -E 's/.* ([0-9.]+)% user.*/\1/' || echo "N/A")
+if [ "$FIRST" = true ]; then
+  FIRST=false
+else
+  echo "," >> "$OUTPUT_FILE"
+fi
+echo "  \"load_generator_cpu_percent\": \"$HOST_CPU\"" >> "$OUTPUT_FILE"
+
 # Kafka consumer lag（create_order_data 消费组；v4 异步链路是否积压/消费成瓶颈）
 KAFKA_LAG=$(docker exec ticketflow-kafka /opt/bitnami/kafka/bin/kafka-consumer-groups.sh \
   --bootstrap-server localhost:9092 --describe --group create_order_data 2>/dev/null \
