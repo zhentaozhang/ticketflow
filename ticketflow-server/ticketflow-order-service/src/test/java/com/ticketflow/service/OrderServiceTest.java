@@ -1103,7 +1103,47 @@ class OrderServiceTest {
         assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
         verify(orderMapper).insert(any(Order.class));
         verify(redisCache).set(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ, ORDER_NUMBER)),
-                eq(String.valueOf(ORDER_NUMBER)), eq(1L), eq(java.util.concurrent.TimeUnit.MINUTES));
+                eq(String.valueOf(ORDER_NUMBER)), eq(10L), eq(java.util.concurrent.TimeUnit.MINUTES));
+    }
+
+    @Test
+    void createMq重复消息_幂等成功返回原订单号() {
+        // 第一次消费：无既有订单，正常建单
+        // 第二次消费（同 orderNumber 重放）：doCreate 防重 selectOne 命中 → ORDER_EXIST
+        //  → createMq 特判为幂等成功返回原订单号，不写 DISCARD_ORDER
+        Order existOrder = new Order();
+        existOrder.setOrderNumber(ORDER_NUMBER);
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null, existOrder);
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(1L);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
+
+        String first = orderService.createMq(buildCreateMq());
+        assertEquals(String.valueOf(ORDER_NUMBER), first);
+
+        // 重复消息：不抛异常，幂等返回相同订单号
+        String second = orderService.createMq(buildCreateMq());
+        assertEquals(String.valueOf(ORDER_NUMBER), second);
+        // createMq 内不写 DISCARD_ORDER（真实失败才由 CreateOrderConsumer 外层写入）
+        verify(redisCache, never()).leftPushForList(any(RedisKeyBuild.class), any());
+    }
+
+    @Test
+    void createMq重复消息_幂等成功不触发反向恢复() {
+        Order existOrder = new Order();
+        existOrder.setOrderNumber(ORDER_NUMBER);
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(existOrder);
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(1L);
+
+        String orderNumber = orderService.createMq(buildCreateMq());
+
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+        // 幂等重复不执行反向恢复（不回滚已建订单的 DB 座位/余票）
+        verify(programClient, never()).operateProgramData(any(ProgramOperateDataDto.class));
     }
 
     // ==================== 查询 ====================
