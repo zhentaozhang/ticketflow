@@ -42,9 +42,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.redisson.api.RLock;
+import org.springframework.beans.BeanUtils;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -213,6 +215,37 @@ class OrderServiceTest {
         verify(orderProgramMapper).insert(orderProgramCaptor.capture());
         assertEquals(ORDER_NUMBER, orderProgramCaptor.getValue().getOrderNumber());
 
+        verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(1L));
+    }
+
+    @Test
+    void doCreate_同步器激活时计数延迟到事务提交后() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            String orderNumber = orderService.doCreate(buildCreateDomain());
+            assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+            // 同步器激活：incrBy 不应立即执行，而是注册到 afterCommit 回调（事务提交后）
+            verify(redisCache, never()).incrBy(any(), anyLong());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
+    void create_无事务上下文_计数立即累加() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
+        OrderCreateDto dto = new OrderCreateDto();
+        BeanUtils.copyProperties(buildCreateDomain(), dto);
+        String orderNumber = orderService.create(dto);
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+        // 无事务上下文（纯 Mockito 无 Spring 代理）：走回退分支立即累加，等价原行为
         verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(1L));
     }
 
