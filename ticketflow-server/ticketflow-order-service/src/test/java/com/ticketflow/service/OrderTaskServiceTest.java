@@ -7,6 +7,7 @@ import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.core.SpringUtil;
 import com.ticketflow.domain.DiscardOrder;
 import com.ticketflow.domain.OrderCreateMq;
+import com.ticketflow.domain.PendingOrder;
 import com.ticketflow.domain.ProgramRecord;
 import com.ticketflow.domain.ReconciliationTaskData;
 import com.ticketflow.domain.SeatRecord;
@@ -40,6 +41,7 @@ import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -179,6 +181,15 @@ class OrderTaskServiceTest {
         ticketUser.setSeatId(SEAT_ID);
         ticketUser.setTicketUserId(USER_ID + 1000);
         mq.setOrderTicketUserCreateDtoList(List.of(ticketUser));
+        return mq;
+    }
+
+    /**
+     * 构建带可控 createOrderTime 的建单消息（PENDING 补偿测试用）。
+     */
+    private OrderCreateMq buildPendingMq(Long orderNumber, Date createOrderTime) {
+        OrderCreateMq mq = buildDiscardOrderMq(orderNumber);
+        mq.setCreateOrderTime(createOrderTime);
         return mq;
     }
 
@@ -529,6 +540,70 @@ class OrderTaskServiceTest {
                 .thenReturn(List.of(new DiscardOrder()));
 
         orderTaskService.discardOrderCompensation(PROGRAM_ID);
+
+        verify(orderService, never()).rollbackProgramSeatByDiscard(any());
+    }
+
+    // ==================== PENDING 补偿 pendingOrderCompensation ====================
+
+    @Test
+    void pendingOrderCompensation_超窗且未建单_回滚并移除() {
+        OrderCreateMq mq = buildPendingMq(ORDER_NUMBER, new Date(System.currentTimeMillis() - 120_000L));
+        when(redisCache.lenForList(any())).thenReturn(1L);
+        when(redisCache.rangeForList(any(), anyLong(), anyLong(), eq(PendingOrder.class)))
+                .thenReturn(List.of(new PendingOrder(mq)));
+        when(orderService.count(any())).thenReturn(0L);
+        when(redisCache.get(any(), eq(String.class))).thenReturn(null);
+
+        orderTaskService.pendingOrderCompensation(PROGRAM_ID);
+
+        verify(orderService).rollbackProgramSeatByDiscard(mq);
+        verify(redisCache).removeForList(any(), any(PendingOrder.class), eq(1L));
+    }
+
+    @Test
+    void pendingOrderCompensation_订单已存在_跳过回滚仅移除() {
+        OrderCreateMq mq = buildPendingMq(ORDER_NUMBER, new Date(System.currentTimeMillis() - 120_000L));
+        when(redisCache.lenForList(any())).thenReturn(1L);
+        when(redisCache.rangeForList(any(), anyLong(), anyLong(), eq(PendingOrder.class)))
+                .thenReturn(List.of(new PendingOrder(mq)));
+        when(orderService.count(any())).thenReturn(1L);
+
+        orderTaskService.pendingOrderCompensation(PROGRAM_ID);
+
+        verify(orderService, never()).rollbackProgramSeatByDiscard(any());
+        verify(redisCache).removeForList(any(), any(PendingOrder.class), eq(1L));
+    }
+
+    @Test
+    void pendingOrderCompensation_未超窗_保留条目() {
+        OrderCreateMq mq = buildPendingMq(ORDER_NUMBER, new Date(System.currentTimeMillis() - 10_000L));
+        when(redisCache.lenForList(any())).thenReturn(1L);
+        when(redisCache.rangeForList(any(), anyLong(), anyLong(), eq(PendingOrder.class)))
+                .thenReturn(List.of(new PendingOrder(mq)));
+
+        orderTaskService.pendingOrderCompensation(PROGRAM_ID);
+
+        verify(orderService, never()).rollbackProgramSeatByDiscard(any());
+        verify(redisCache, never()).removeForList(any(), any(), anyLong());
+    }
+
+    @Test
+    void pendingOrderCompensation_无记录_不回滚() {
+        when(redisCache.lenForList(any())).thenReturn(0L);
+
+        orderTaskService.pendingOrderCompensation(PROGRAM_ID);
+
+        verify(orderService, never()).rollbackProgramSeatByDiscard(any());
+    }
+
+    @Test
+    void pendingOrderCompensation_空消息体跳过() {
+        when(redisCache.lenForList(any())).thenReturn(1L);
+        when(redisCache.rangeForList(any(), anyLong(), anyLong(), eq(PendingOrder.class)))
+                .thenReturn(List.of(new PendingOrder()));
+
+        orderTaskService.pendingOrderCompensation(PROGRAM_ID);
 
         verify(orderService, never()).rollbackProgramSeatByDiscard(any());
     }

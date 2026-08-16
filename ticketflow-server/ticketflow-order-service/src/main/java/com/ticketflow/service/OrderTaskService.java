@@ -7,11 +7,14 @@ import com.ticketflow.client.ProgramClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.domain.DiscardOrder;
+import com.ticketflow.domain.OrderCreateMq;
+import com.ticketflow.domain.PendingOrder;
 import com.ticketflow.domain.ProgramRecord;
 import com.ticketflow.domain.ReconciliationTaskData;
 import com.ticketflow.domain.SeatRecord;
 import com.ticketflow.domain.TicketCategoryRecord;
 import com.ticketflow.dto.TicketCategoryListDto;
+import com.ticketflow.entity.Order;
 import com.ticketflow.entity.OrderProgram;
 import com.ticketflow.entity.OrderTicketUserRecord;
 import com.ticketflow.enums.BaseCode;
@@ -81,6 +84,12 @@ public class OrderTaskService {
 
     @Autowired
     private OrderService orderService;
+
+    /**
+     * PENDING 裁决窗口：请求侧降级为已受理后，等待消费侧建单的最长时间。
+     * 超过该窗口仍未建单，视为发送未落地，回滚 Redis 座位。
+     */
+    private static final long PENDING_WINDOW_MS = 60_000L;
 
     // ==================== 对账任务入口 ====================
     
@@ -170,6 +179,62 @@ public class OrderTaskService {
         }
     }
     
+    /**
+     * PENDING 补偿：请求侧 Kafka 发送确认超时降级为"已受理"的订单，裁决 Redis 扣减是否落地。
+     * <p>
+     * 覆盖场景：producer Lua 已扣座位/余票，但发送确认超时（消息可能已发送、也可能未发送），
+     * 消费侧建单状态未知。该方法按节目读取 PENDING 记录逐条裁决：
+     * <ul>
+     *   <li>仅处理写入超 60s 的记录（给消费侧留出建单窗口）；</li>
+     *   <li>订单已建（订单行存在或 ORDER_MQ 标记存在）→ 直接移除记录；</li>
+     *   <li>订单未建 → rollbackProgramSeatByDiscard 回滚 Redis 座位后移除记录。</li>
+     * </ul>
+     * 幂等：rollbackProgramSeatByDiscard 内置双重安全约束（订单已存在跳过、座位不在锁定集合跳过），
+     * 同时容忍"late-failureCallback 已提前回滚"的状态；回滚失败保留记录由下轮对账重试兜底。
+     *
+     * @param programId 节目 id
+     */
+    public void pendingOrderCompensation(Long programId) {
+        RedisKeyBuild pendingOrderKey = RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_CREATE_PENDING, programId);
+        Long length = redisCache.lenForList(pendingOrderKey);
+        if (length == null || length <= 0) {
+            return;
+        }
+        List<PendingOrder> pendingOrderList = redisCache.rangeForList(pendingOrderKey, 0, length - 1, PendingOrder.class);
+        if (CollectionUtil.isEmpty(pendingOrderList)) {
+            return;
+        }
+        for (PendingOrder pendingOrder : pendingOrderList) {
+            if (Objects.isNull(pendingOrder) || Objects.isNull(pendingOrder.getOrderCreateMq())) {
+                continue;
+            }
+            OrderCreateMq orderCreateMq = pendingOrder.getOrderCreateMq();
+            long age = System.currentTimeMillis() - orderCreateMq.getCreateOrderTime().getTime();
+            if (age < PENDING_WINDOW_MS) {
+                // 未超窗：等待消费侧建单，下轮再裁决
+                continue;
+            }
+            // 已建单判定：订单行存在 或 ORDER_MQ 标记存在
+            Long orderCount = orderService.count(Wrappers.lambdaQuery(Order.class)
+                    .eq(Order::getOrderNumber, orderCreateMq.getOrderNumber()));
+            boolean orderCreated = (orderCount != null && orderCount > 0)
+                    || Objects.nonNull(redisCache.get(RedisKeyBuild.createRedisKey(
+                    RedisKeyManage.ORDER_MQ, orderCreateMq.getOrderNumber()), String.class));
+            if (!orderCreated) {
+                try {
+                    orderService.rollbackProgramSeatByDiscard(orderCreateMq);
+                } catch (Exception e) {
+                    // 回滚失败保留记录，由下轮对账重试兜底
+                    log.error("PENDING 补偿回滚失败 节目id : {} 订单号 : {}",
+                            programId, orderCreateMq.getOrderNumber(), e);
+                    continue;
+                }
+            }
+            // 裁决完成（建单成功 / 回滚成功含终态跳过）后移除记录，避免 PENDING 无限增长
+            redisCache.removeForList(pendingOrderKey, pendingOrder, 1);
+        }
+    }
+
     // ==================== 查找需要补偿的记录 ====================
     
     /**

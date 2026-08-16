@@ -68,6 +68,8 @@ public class ReconciliationTask {
                 for (Long programId : programIdSet) {
                     orderTaskService.reconciliationTask(programId);
                     orderTaskService.discardOrderCompensation(programId);
+                    //PENDING 发送超时订单补偿：已建单则移除，未建单则回滚 Redis 座位
+                    orderTaskService.pendingOrderCompensation(programId);
                 }
                 //修改对账记录任务集合为已处理
                 ProgramRecordTaskUpdateDto programRecordTaskUpdateDto = new ProgramRecordTaskUpdateDto();
