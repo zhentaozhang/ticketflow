@@ -35,6 +35,7 @@ vue3/components.d.ts
 ### Docs ###
 docs/
 ticketflow-study-plan.md
+!coupon-seckill/docs/
 
 ### Generated benchmark outputs ###
 benchmark/results/
