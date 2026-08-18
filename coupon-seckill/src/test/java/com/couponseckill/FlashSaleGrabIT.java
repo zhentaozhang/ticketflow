@@ -216,6 +216,46 @@ class FlashSaleGrabIT {
         assertEquals(0, new BigDecimal("20.00").compareTo(result.getAmount()));
     }
 
+    @Test
+    @DisplayName("并发幂等：同一 requestId 并发抢购仅一条成功（Lua dedup + DB 唯一索引）")
+    void concurrentDuplicateRequestOnlyOneWins() throws Exception {
+        FlashSaleActivity activity = newActivity(10, 1, ongoingWindow(), LocalDateTime.now().plusHours(2));
+        long userId = 10003L;
+        String requestId = UUID.randomUUID().toString();
+
+        int threads = 20;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+        AtomicInteger accepted = new AtomicInteger();
+
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                try {
+                    start.await();
+                    GrabRequest req = new GrabRequest();
+                    req.setActivityId(activity.getId());
+                    req.setRequestId(requestId);
+                    grabService.grab(userId, req);
+                    accepted.incrementAndGet();
+                } catch (BizException expected) {
+                    // 重复请求被拒（-4）或限购
+                } catch (Exception ignored) {
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+        start.countDown();
+        assertTrue(done.await(30, TimeUnit.SECONDS));
+        pool.shutdown();
+
+        awaitAsyncSettle();
+        assertEquals(1, accepted.get(), "同一 requestId 并发只放行一次");
+        long rows = countOrdersAcrossShards(activity.getId(), userId);
+        assertEquals(1, rows, "DB 仅一条流水");
+    }
+
     private GrabRequest req(Long activityId) {
         GrabRequest req = new GrabRequest();
         req.setActivityId(activityId);
