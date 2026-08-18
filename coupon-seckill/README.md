@@ -61,10 +61,13 @@ mvn spring-boot:run                 # 默认 mock-messaging=true，无 Kafka 也
 mvn test                            # 集成测试（真实 Redis + MySQL）
 ```
 
-### 测试覆盖（10/10 通过）
+### 测试覆盖（53/53 通过）
 
-- `FlashSaleGrabIT`：100 并发抢 50 库存零超卖 / requestId 幂等 / 限购 / 售罄 / 全链路发券
-- `CouponUseIT`：锁券→核销 / 退回→重锁 / 20 并发锁券单赢家(防双花) / 重复核销拒绝 / 对账修正 Redis 库存
+- 纯单元测试 35（Mockito，无外部依赖）：雪花 ID、分表路由/线程隔离、管理校验、Lua 错误码映射、发券幂等三分支、用券全分支
+- Lua 脚本测试 7（直连本地 Redis，无 Redis 自动跳过）：原子扣减/负库存回加/限购/幂等/时间窗/回补
+- 集成测试 11（真实 Redis + MySQL）：100 并发抢 50 库存零超卖、同 requestId 并发仅一次成功、20 并发锁券单赢家(防双花)、对账修正 Redis 库存
+
+详细过程与踩坑记录见 [docs/02-实现思路与工作留痕.md](docs/02-实现思路与工作留痕.md)
 
 ### 接口一览
 
