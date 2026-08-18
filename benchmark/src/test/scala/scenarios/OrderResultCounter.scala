@@ -16,6 +16,10 @@ object OrderResultCounter {
     counters.merge(code, 1L, (a: Long, b: Long) => a + b)
   }
 
+  def clear(): Unit = {
+    counters.clear()
+  }
+
   def dump(label: String, dir: String): Unit = {
     import scala.jdk.CollectionConverters._
     val data = counters.asScala.toMap

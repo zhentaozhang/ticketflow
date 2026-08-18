@@ -36,6 +36,11 @@ class OrderBenchmark extends Simulation {
 
   setUp(pop)
 
+  // 多轮压测时静态计数器会跨轮累计：每轮 before 清空，保证 failure-*.json 只含本轮数据
+  before {
+    OrderResultCounter.clear()
+  }
+
   after {
     val label =
       if (mode == "openloop") s"${version}-r${rate}-d${duration}"

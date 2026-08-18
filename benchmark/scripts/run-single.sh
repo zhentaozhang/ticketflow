@@ -203,7 +203,12 @@ run_round() {
   echo "[7/7] 生成结果 json..."
   LATEST_REPORT=$(ls -td "$PROJECT_DIR/target/gatling/"*/ 2>/dev/null | head -1)
   STATS_JSON="${LATEST_REPORT}js/stats.json"
-  FAILURE_JSON="$RESULT_DIR/failure-${ROUND_LABEL}.json"
+  # OrderResultCounter.dump 的文件名不带 round 后缀（openloop: v-r{d}-d{d}；closed: v-c{c}-d{d}）
+  if [ "$MODE" = "openloop" ]; then
+    FAILURE_JSON="$RESULT_DIR/failure-${VERSION}-r${RATE}-d${DURATION}.json"
+  else
+    FAILURE_JSON="$RESULT_DIR/failure-${VERSION}-c${CONCURRENCY}-d${DURATION}.json"
+  fi
   METRICS_JSON=$(ls -t "$RESULT_DIR"/metrics-${ROUND_LABEL}-*.json 2>/dev/null | head -1)
   SIM_LOG="${LATEST_REPORT}simulation.log"
 
