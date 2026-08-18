@@ -1,11 +1,16 @@
 spring:
   application:
-    name: coupon-seckill
+    name: ${PREFIX_DISTINCTION_NAME:ticketflow}-coupon-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_ADDR:127.0.0.1:8848}
+        ip: 127.0.0.1
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DB:coupon_seckill}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true
     username: ${MYSQL_USER:root}
-    password: ${MYSQL_PASSWORD:}
+    password: ${MYSQL_PASSWORD:root}
   data:
     redis:
       host: ${REDIS_HOST:localhost}

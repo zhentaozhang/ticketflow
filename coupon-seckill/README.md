@@ -51,7 +51,7 @@ coupon-seckill/
 | M2 | 抢购主链路：Lua 原子扣减 + 异步发券 + 结果查询 | ✅ |
 | M3 | 用券闭环（锁券/核销/退回）+ 对账/过期/超时/状态推进任务 | ✅ |
 | M4 | 压测优化：端到端落库率主指标、容量拐点 2600/s、分区扩容优化 +30% | ✅ [报告](docs/03-M4-压测报告.md) |
-| M5 | 集成 ticketflow（独立服务 + order-service 对接 + 灰度） | ⏳ 待做 |
+| M5 | 集成：ticketflow-coupon-service 注册 Nacos + Gateway 路由 + order-service 用券契约（抢券→下单立减→核销/退券） | ✅ [记录](docs/04-M5-集成记录.md) |
 
 ## 运行与验证
 

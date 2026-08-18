@@ -41,6 +41,15 @@ spring:
             - StripPrefix=2
           metadata:
             title: 订单服务
+
+        - id: ${prefix.distinction.name:ticketflow}-coupon-service
+          uri: lb://${prefix.distinction.name:ticketflow}-coupon-service
+          predicates:
+            - Path=/ticketflow/coupon/**
+          filters:
+            - StripPrefix=2
+          metadata:
+            title: 优惠券服务
             
         - id: ${prefix.distinction.name:ticketflow}-migrate-service
           uri: lb://${prefix.distinction.name:ticketflow}-migrate-service
