@@ -27,6 +27,7 @@ def parse_args():
     p.add_argument("--orders-before", type=int, required=True)
     p.add_argument("--orders-after", type=int, required=True)
     p.add_argument("--metrics", required=True)
+    p.add_argument("--snapshot", default=None, help="配置快照 json（run-single.sh 生成）")
     p.add_argument("--out", required=True)
     return p.parse_args()
 
@@ -69,13 +70,16 @@ def main():
                     no_json += 1
 
     # stats.json 结构（Gatling 3.11.5 实测）：stats.stats 是 dict（GROUP 节点，单请求场景即全部），
-    # 计数在 numberOfRequests.{total,ok,ko}，百分位在 percentiles1/3.{total,ok,ko}
+    # 计数在 numberOfRequests.{total,ok,ko}，百分位在 percentiles1/3/4.{total,ok,ko}
+    #   percentiles1=p50  percentiles3=p95  percentiles4=p99
     req = stats.get("stats", {})
     total = req.get("numberOfRequests", {}).get("total", 0)
     ok = req.get("numberOfRequests", {}).get("ok", 0)
     ko_gatling = req.get("numberOfRequests", {}).get("ko", 0)
     p50 = req.get("percentiles1", {}).get("ok")
     p95 = req.get("percentiles3", {}).get("ok")
+    p99 = req.get("percentiles4", {}).get("ok")
+    p_max = req.get("maxResponseTime", {}).get("ok")
 
     # 成功计数以 stats.ok 为准（同上了 in-flight 丢失，counter 的 "0" 仅作参考）
     success_count = ok
@@ -85,6 +89,10 @@ def main():
     # 对账：业务失败 + NO_JSON 应 ≈ KO 总数（HTTP 层）
     reconciled = business_failures + no_json
     gap = ko_gatling - reconciled
+
+    # 落库差额（消费排空后统计）：异步版本（V4/V5）的端到端成功率 = 落库数/请求数
+    order_delta = args.orders_after - args.orders_before
+    end_to_end_success_rate = round(order_delta / total, 4) if total else None
 
     result = {
         "version": args.version,
@@ -99,10 +107,13 @@ def main():
             "success_rate": round(ok / total, 4) if total else None,
             "p50_ms": p50,
             "p95_ms": p95,
+            "p99_ms": p99,
+            "max_ms": p_max,
         },
         "failures": {
             "business": biz_codes,
             "protocol_no_json": no_json,
+            "limit_over_50009": biz_codes.get("50009", 0),
             "counter_ref": counter_ref,
             "sim_log_ko": ko_count,
             "reconciled": reconciled,
@@ -111,18 +122,21 @@ def main():
         "order_diff": {
             "before": args.orders_before,
             "after": args.orders_after,
-            "delta": args.orders_after - args.orders_before,
+            "delta": order_delta,
             "success_count": success_count,
+            # 端到端成功率 = 落库数/请求数（异步架构主指标；受理成功率见 gatling.success_rate）
+            "end_to_end_success_rate": end_to_end_success_rate,
         },
         "metrics": load_json(args.metrics) if os.path.exists(args.metrics) else {},
+        "snapshot": load_json(args.snapshot) if args.snapshot and os.path.exists(args.snapshot) else {},
     }
     with open(args.out, "w") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
     print(f"结果已保存: {args.out}")
-    print(f"  total={total} ok={ok} success_rate={result['gatling']['success_rate']} "
-          f"p50={p50}ms p95={p95}ms ko={ko_gatling}")
+    print(f"  total={total} ok={ok} 受理成功率={result['gatling']['success_rate']} "
+          f"端到端成功率(落库率)={end_to_end_success_rate} p50={p50}ms p95={p95}ms p99={p99}ms max={p_max}ms ko={ko_gatling}")
     print(f"  业务失败={business_failures} protocol_no_json={no_json} "
-          f"对账 gap={gap} 落库差额={result['order_diff']['delta']}")
+          f"对账 gap={gap} 落库差额={order_delta}")
 
 
 if __name__ == "__main__":

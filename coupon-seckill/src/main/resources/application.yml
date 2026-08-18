@@ -1,0 +1,68 @@
+spring:
+  application:
+    name: ${PREFIX_DISTINCTION_NAME:ticketflow}-coupon-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_ADDR:127.0.0.1:8848}
+        ip: 127.0.0.1
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DB:coupon_seckill}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:root}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      lettuce:
+        pool:
+          max-active: 64
+          max-idle: 32
+          min-idle: 8
+  kafka:
+    bootstrap-servers: ${KAFKA_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      enable-idempotence: true
+    consumer:
+      group-id: coupon-seckill
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        max.poll.interval.ms: 300000
+    listener:
+      ack-mode: manual
+    topic:
+      flash-sale-request: ${KAFKA_TOPIC_FLASH_SALE_REQUEST:flash_sale_request}
+      flash-sale-dlt: ${KAFKA_TOPIC_FLASH_SALE_DLT:flash_sale_dlt}
+
+server:
+  port: ${SERVER_PORT:8090}
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: input
+
+logging:
+  level:
+    com.couponseckill: info
+
+coupon-seckill:
+  # 抢购异步发券：无 Kafka 环境时使用内存队列模拟（feature.mock-messaging=true），保证本地可跑通全链路
+  mock-messaging: ${MOCK_MESSAGING:true}
+  grab:
+    dedup-ttl-seconds: 60
+  issue:
+    retry-max: 5
+    timeout-ms: 300000

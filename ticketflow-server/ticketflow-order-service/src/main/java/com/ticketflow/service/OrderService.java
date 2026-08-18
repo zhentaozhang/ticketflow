@@ -85,6 +85,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -231,9 +233,34 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         orderProgram.setIdentifierId(order.getIdentifierId());
         orderProgramMapper.insert(orderProgram);
         //用户下此节目的订单数量加1操作
-        redisCache.incrBy(RedisKeyBuild.createRedisKey(
-                RedisKeyManage.ACCOUNT_ORDER_COUNT,orderCreateDomain.getUserId(),
-                orderCreateDomain.getProgramId()),orderCreateDomain.getOrderTicketUserCreateDtoList().size());
+        // V5：ACCOUNT_ORDER_COUNT 由请求侧 V5 Lua 原子维护（INCRBY），消费侧不重复累加
+        // V1-V4：请求侧 Lua 不维护计数，仍由消费侧事务提交后累加，保持原语义
+        boolean isV5 = Objects.equals(orderCreateDomain.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue());
+        if (!isV5) {
+            // 事务提交后再累加：回滚事务不再产生 Redis 计数漂移；Redis 调用也不占用事务内 DB 连接
+            Long increment = (long) orderCreateDomain.getOrderTicketUserCreateDtoList().size();
+            Long userId = orderCreateDomain.getUserId();
+            Long programId = orderCreateDomain.getProgramId();
+            Runnable doIncr = () -> {
+                try {
+                    redisCache.incrBy(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, userId, programId), increment);
+                } catch (Exception e) {
+                    log.error("ACCOUNT_ORDER_COUNT 累加失败 userId:{} programId:{}", userId, programId, e);
+                }
+            };
+            if (TransactionSynchronizationManager.isSynchronizationActive()) {
+                // 事务提交后执行（afterCommit）：回滚事务不累加，Redis 调用移出事务
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        doIncr.run();
+                    }
+                });
+            } else {
+                // 无事务上下文（自调用/直测）回退为立即执行，等价原行为
+                doIncr.run();
+            }
+        }
         return String.valueOf(order.getOrderNumber());
     }
     
@@ -548,16 +575,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     }
     
     /**
-     * 支付/取消的核心 6 步编排：
+     * 支付/取消的核心编排（事务瘦身版）：
+     * 事务内（本地 DB 写）:
      * 1. 校验 orderStatus（仅 CANCEL / PAY）
      * 2. 更新 Order status
      * 3. 更新 OrderTicketUser status
      * 4. 写入流水 OrderTicketUserRecord（CHANGE_STATUS / INCREASE）
+     * 事务提交后（afterCommit，失败仅记日志由对账兜底）：
      * 5. 取消时 Redis 扣减 accountOrderCount
-     * 6. 调用 Lua（V1-V3）或 Lua + Feign（V4）操作座位和库存缓存
+     * 6. 调用 Lua（V1-V3）或 Lua + Feign（V4/V5）操作座位和库存缓存
      *
-     * PS：V4 路径走 Feign（programClient.operateProgramData → DB update），
-     * V1-V3 路径靠延迟队列 DelayOperateProgramDataSend 异步更新 DB。
+     * PS：V4/V5 路径走 Feign（programClient.operateProgramData → DB update），
+     * V1-V3 路径靠延迟队列 DelayOperateProgramDataSend 异步更新 DB；
+     * 远程调用全部移出事务：事务不再被 Feign RTT 占住 DB 连接，
+     * Feign 失败也不回滚订单状态流转。
      */
     @Transactional(rollbackFor = Exception.class)
     public void updateOrderRelatedData(Long orderNumber,OrderStatus orderStatus){
@@ -618,10 +649,12 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         }
         orderTicketUserRecordService.saveBatch(orderTicketUserRecordList);
 
-        if (Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
-            redisCache.incrBy(RedisKeyBuild.createRedisKey(
-                    RedisKeyManage.ACCOUNT_ORDER_COUNT,order.getUserId(),order.getProgramId()),-updateTicketUserOrderResult);
-        }
+        //事务内仅保留本地 DB 写入；Redis 计数 / Lua 座位操作 / Feign DB 收敛全部移出事务：
+        // 1) 事务不再被远程 RTT（Feign 10s 超时）占住 DB 连接
+        // 2) Feign/Lua 失败不再回滚订单状态流转（订单状态已提交）
+        // 3) Redis 调用与 DB 事务解耦，事务回滚不产生计数/缓存漂移
+        // 失败容忍：Redis 侧由对账（ProgramRecordHandler/ReconciliationTask）兜底，
+        // DB 侧由投影任务/V5StockConservationTask 观测告警
         Long programId = order.getProgramId();
         Map<Long, List<OrderTicketUser>> orderTicketUserSeatList =
                 orderTicketUserList.stream().collect(Collectors.groupingBy(OrderTicketUser::getTicketCategoryId));
@@ -629,8 +662,30 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         orderTicketUserSeatList.forEach((k,v) -> {
             seatMap.put(k,v.stream().map(OrderTicketUser::getSeatId).collect(Collectors.toList()));
         });
-        updateProgramRelatedDataResolution(programId,seatMap,orderStatus,order.getIdentifierId(),order.getUserId(),
-                seatIdAndTicketUserIdDomainList,order.getOrderVersion());
+        Runnable afterCommitWork = () -> {
+            try {
+                if (Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
+                    redisCache.incrBy(RedisKeyBuild.createRedisKey(
+                            RedisKeyManage.ACCOUNT_ORDER_COUNT,order.getUserId(),order.getProgramId()),-updateTicketUserOrderResult);
+                }
+                updateProgramRelatedDataResolution(programId,seatMap,orderStatus,order.getIdentifierId(),order.getUserId(),
+                        seatIdAndTicketUserIdDomainList,order.getOrderVersion());
+            } catch (Exception e) {
+                log.error("支付/取消后数据同步失败 订单号 : {} 状态 : {}", orderNumber, orderStatus, e);
+            }
+        };
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            // 事务提交后执行（afterCommit）：回滚事务不同步，远程调用移出事务
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    afterCommitWork.run();
+                }
+            });
+        } else {
+            // 无事务上下文（自调用/直测）回退为立即执行，等价原行为
+            afterCommitWork.run();
+        }
     }
 
     public void checkOrderStatus(Order order){
@@ -736,24 +791,35 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         programOperateDataDto.setSeatIdList(unLockSeatIdList);
         programOperateDataDto.setTicketCategoryCountDtoList(ticketCategoryCountDtoList);
         programOperateDataDto.setOrderVersion(orderVersion);
+        //V5 与 V4 一致：走同步 Feign 更新 program 侧 DB（pay/cancel 时 DB 座位/余票收敛）
+        boolean isV5 = ProgramOrderVersion.V5_VERSION.getValue().equals(orderVersion);
         //如果创建订单版本是v1，v2，v3
-        if (!orderVersion.equals(ProgramOrderVersion.V4_VERSION.getValue())){
+        if (!orderVersion.equals(ProgramOrderVersion.V4_VERSION.getValue()) && !isV5){
             orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
             if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())) {
                 programOperateDataDto.setSellStatus(SellStatus.SOLD.getCode());
                 delayOperateProgramDataSend.sendMessage(JSON.toJSONString(programOperateDataDto));
             }
         }else {
-            //如果创建订单版本是v4 更新节目服务的相关数据
+            //V4/V5：先 Lua 收敛 Redis 权威数据（座位三区/余票），再 Feign 收敛 DB 派生数据。
+            //Redis 为权威，先更新；DB 为派生，后收敛——Feign 失败仅记日志（DB 滞后由投影/守恒任务观测兜底）
+            orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
             if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ||
                     Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
                 programOperateDataDto.setSellStatus(Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ? SellStatus.SOLD.getCode() : SellStatus.NO_SOLD.getCode());
-                ApiResponse<Boolean> programApiResponse = programClient.operateProgramData(programOperateDataDto);
-                if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
-                    throw new TicketFlowFrameException(programApiResponse);
+                // 事务外尽力而为：Feign 失败仅记日志不阻断（Redis 已收敛），
+                // DB 侧由投影任务/V5StockConservationTask 观测兜底
+                try {
+                    ApiResponse<Boolean> programApiResponse = programClient.operateProgramData(programOperateDataDto);
+                    if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
+                        log.error("program服务 operateProgramData 失败（事务外尽力而为） dto : {} response : {}",
+                                JSON.toJSONString(programOperateDataDto), JSON.toJSONString(programApiResponse));
+                    }
+                } catch (Exception e) {
+                    log.error("program服务 operateProgramData 异常（事务外尽力而为，DB 侧由投影任务/守恒任务观测兜底） dto : {}",
+                            JSON.toJSONString(programOperateDataDto), e);
                 }
             }
-            orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
         }
     }
     
@@ -863,40 +929,63 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     
     
     // V4/V41 Kafka 消费者入口：先 Feign 锁定 program 侧的座位+库存，再在本事务建 DB 订单
-    @RepeatExecuteLimit(name = CREATE_PROGRAM_ORDER_MQ, keys = {"#orderCreateMq.orderNumber"}, durationTime = 60)
+    // V5：Redis 为唯一库存权威，建单不再同步 Feign 扣 DB（DB 座位/余票由投影任务/支付取消路径异步收敛）
+    // 幂等：durationTime=0 不写幂等标记（省 2 次 GET + 1 次 SET，RTT 5→2），
+    // 重复消息由 doCreate 的 selectOne 防重 + DB 唯一索引 d_order_order_number_IDX + ORDER_EXIST 幂等特判兜底。
+    @RepeatExecuteLimit(name = CREATE_PROGRAM_ORDER_MQ, keys = {"#orderCreateMq.orderNumber"}, durationTime = 0)
     @Transactional(rollbackFor = Exception.class)
     public String createMq(OrderCreateMq orderCreateMq){
         List<OrderTicketUserCreateDto> orderTicketUserCreateDtoList = orderCreateMq.getOrderTicketUserCreateDtoList();
-        //使用 Stream API 按 ticketCategoryId 分组并计数
-        Map<Long, Long> countMap = orderTicketUserCreateDtoList.stream()
-                .collect(Collectors.groupingBy(OrderTicketUserCreateDto::getTicketCategoryId, Collectors.counting()));
-        
-        //将统计结果转换为列表，存入 TicketCountDto 对象中
-        List<TicketCategoryCountDto> ticketCountList = countMap.entrySet().stream()
-                .map(entry -> new TicketCategoryCountDto(entry.getKey(), entry.getValue()))
-                .toList();
-        //修改节目服务中的座位状态和扣减库存
-        ReduceRemainNumberDto reduceRemainNumberDto = new ReduceRemainNumberDto();
-        reduceRemainNumberDto.setProgramId(orderCreateMq.getProgramId());
-        reduceRemainNumberDto.setSellStatus(SellStatus.LOCK.getCode());
-        reduceRemainNumberDto.setSeatIdList(orderTicketUserCreateDtoList.stream().map(OrderTicketUserCreateDto::getSeatId).collect(Collectors.toList()));
-        reduceRemainNumberDto.setTicketCategoryCountDtoList(ticketCountList);
-        ApiResponse<Boolean> programApiResponse = programClient.operateSeatLockAndTicketCategoryRemainNumber(reduceRemainNumberDto);
-        if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
-            //丢弃记录统一由 CreateOrderConsumer 外层 catch 写入，此处不再重复写入
-            throw new TicketFlowFrameException(programApiResponse);
-        }
         String orderNumber;
         try {
-            //真正地创建订单
-            orderNumber = createByMq(orderCreateMq);
-        } catch (Exception e) {
-            //Feign 已扣减 DB（座位 LOCK + 余票扣减）但本地建单失败（事务回滚，订单不存在）：
-            //远程扣减不受本地事务回滚影响，需显式反向恢复 DB
-            rollbackProgramDataByCreateFail(orderCreateMq, reduceRemainNumberDto);
+            if (Objects.equals(orderCreateMq.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue())) {
+                // V5：无第二权威，直接建单；Redis 已在请求侧完成扣减，消费侧不再重复扣 DB
+                orderNumber = createByMq(orderCreateMq);
+            } else {
+                //使用 Stream API 按 ticketCategoryId 分组并计数
+                Map<Long, Long> countMap = orderTicketUserCreateDtoList.stream()
+                        .collect(Collectors.groupingBy(OrderTicketUserCreateDto::getTicketCategoryId, Collectors.counting()));
+                //将统计结果转换为列表，存入 TicketCountDto 对象中
+                List<TicketCategoryCountDto> ticketCountList = countMap.entrySet().stream()
+                        .map(entry -> new TicketCategoryCountDto(entry.getKey(), entry.getValue()))
+                        .toList();
+                //修改节目服务中的座位状态和扣减库存
+                ReduceRemainNumberDto reduceRemainNumberDto = new ReduceRemainNumberDto();
+                reduceRemainNumberDto.setProgramId(orderCreateMq.getProgramId());
+                reduceRemainNumberDto.setSellStatus(SellStatus.LOCK.getCode());
+                reduceRemainNumberDto.setSeatIdList(orderTicketUserCreateDtoList.stream().map(OrderTicketUserCreateDto::getSeatId).collect(Collectors.toList()));
+                reduceRemainNumberDto.setTicketCategoryCountDtoList(ticketCountList);
+                ApiResponse<Boolean> programApiResponse = programClient.operateSeatLockAndTicketCategoryRemainNumber(reduceRemainNumberDto);
+                if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
+                    //丢弃记录统一由 CreateOrderConsumer 外层 catch 写入，此处不再重复写入
+                    throw new TicketFlowFrameException(programApiResponse);
+                }
+                try {
+                    //真正地创建订单
+                    orderNumber = createByMq(orderCreateMq);
+                } catch (Exception e) {
+                    //Feign 已扣减 DB（座位 LOCK + 余票扣减）但本地建单失败（事务回滚，订单不存在）：
+                    //远程扣减不受本地事务回滚影响，需显式反向恢复 DB（内部对"订单已存在"自动跳过）
+                    rollbackProgramDataByCreateFail(orderCreateMq, reduceRemainNumberDto);
+                    throw e;
+                }
+            }
+        } catch (TicketFlowFrameException e) {
+            // 重复消息（Kafka 重投/对账重放）：订单已存在视为幂等成功，不抛异常、不写 DISCARD_ORDER
+            if (Objects.equals(e.getCode(), BaseCode.ORDER_EXIST.getCode())) {
+                Order existOrder = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class)
+                        .eq(Order::getOrderNumber, orderCreateMq.getOrderNumber()));
+                if (Objects.nonNull(existOrder)) {
+                    log.info("重复建单消息 幂等成功 订单号 : {}", orderCreateMq.getOrderNumber());
+                    return String.valueOf(existOrder.getOrderNumber());
+                }
+            }
             throw e;
         }
-        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ,orderNumber),orderNumber,1, TimeUnit.MINUTES);
+        // 建单完成标记：供前端 /order/get/cache 轮询终态，同时支撑 PENDING 对账的"已建单"判定。
+        // TTL 10min > 对账 3min 滞后窗口（ReconciliationTask 按 3min 前的 ProgramRecordTask 触发），
+        // 确保对账首次裁决该 PENDING 条目时标记尚未过期。
+        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ,orderNumber),orderNumber,10, TimeUnit.MINUTES);
         return orderNumber;
     }
 

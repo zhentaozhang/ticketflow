@@ -76,11 +76,15 @@ spring:
     bootstrap-servers: 127.0.0.1:9092
     producer:
       retries: 3
+      # V5 可靠投递：acks=all + 幂等 producer，保证 Kafka 发送失败可重试且不重复
+      acks: all
       batch-size: 32768
       linger-ms: 5
       compression-type: snappy
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
     topic: create_order
 
 bloom-filter:

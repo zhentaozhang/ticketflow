@@ -7,6 +7,7 @@
     <a href="#项目简介">项目简介</a> •
     <a href="#核心技术">核心技术</a> •
     <a href="#性能基准">性能基准</a> •
+    <a href="#优惠券秒杀">优惠券秒杀</a> •
     <a href="#系统架构">系统架构</a> •
     <a href="#技术栈">技术栈</a> •
     <a href="#数据库架构">数据库架构</a> •
@@ -128,6 +129,48 @@ sequenceDiagram
 - **Kafka** 实现流量削峰与订单异步解耦
 - **延迟任务**机制实现超时订单自动取消与库存回补
 
+### 优惠券秒杀
+
+面向活动期高并发抢券场景，在 `coupon-seckill` 独立单体验证后以 `ticketflow-coupon-service` 集成：
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant C as 用户
+    participant G as 网关
+    participant S as Coupon 服务
+    participant R as Redis
+    participant K as Kafka
+    participant DB as MySQL
+
+    rect rgb(232, 240, 254)
+        Note over C,S: ① 同步受理（纯 Redis）
+        C->>G: POST /flash-sale/grab
+        G->>S: 路由 + 限流
+        S->>R: EVAL Lua（时间窗+幂等+限购+扣库存）
+        R-->>S: 成功
+        S-->>C: 抢购排队中
+    end
+
+    rect rgb(255, 238, 238)
+        Note over K,DB: ② 异步发券（Kafka 削峰）
+        S->>K: 发布 flash_sale_request
+        K->>DB: 消费落库（流水+用户券）
+        DB-->>S: 唯一索引幂等兕底
+    end
+
+    rect rgb(245, 245, 245)
+        Note over S,DB: ③ 定时对账收敛
+        S->>S: Redis 库存 vs DB 已发券数
+    end
+```
+
+- **单 Lua 原子**完成时间窗校验、请求幂等、限购计数、库存扣减，同步路径不碰 DB
+- **Kafka 异步发券**削峰，端到端落库率为主指标，唯一索引三层幂等
+- **用券闭环**：锁券（Redis SETNX + DB 乐观锁）→ 支付核销 / 取消退券，与订单服务 Feign 契约对接
+- **定时对账**以 DB 为权威收敛 Redis 库存，发送失败同步回补，杜绝超卖与库存悬挂
+
 ---
 
 ## 性能基准
@@ -146,6 +189,22 @@ sequenceDiagram
 - 压测脚本与完整数据见 `benchmark/` 目录
 
 > 性能结果随部署环境与硬件配置变化，仅供参考。
+
+### 优惠券秒杀压测
+
+抢券链路（`ticketflow-coupon-service`）在**本机单实例 + Kafka 生产模式（8 分区）**下，Gatling 同款开环到达率口径压测，端到端落库率（DB 落库流水数 ÷ 请求数，lag=0 冷却后统计）为主指标：
+
+| 档位 | 请求数 | 受理率 | **端到端落库率** | p99 |
+|------|--------|--------|----------------|-----|
+| 400/s | 24,000 | 100% | **100%** | 12ms |
+| 1,200/s | 72,000 | 100% | **100%** | 27ms |
+| 2,000/s | 120,000 | 100% | **100%** | 142ms |
+| **2,600/s** | 156,000 | 100% | **100%** | 26ms |
+| 2,800/s | 168,000 | 100% | 73.8% | 351ms |
+
+- 单机容量拐点约 **2,600/s**（2800/s 起过载，p99 飙至 351ms），安全容量建议 ≤ 2,000/s
+- 优化关键：**Kafka topic 分区数需 ≥ 消费者并发**（3→8 分区，拐点从 2000/s 右移至 2600/s，+30%）
+- 压测脚本与完整数据见 `coupon-seckill/benchmark/` 与 `coupon-seckill/docs/03-M4-压测报告.md`
 
 ---
 
@@ -389,6 +448,7 @@ flowchart LR
 | **Base-Data 基础数据** | 6083 | 渠道密钥配置、地区管理、分类字典 |
 | **Program 节目服务** | 6086 | 节目 CRUD、库存管理、选座锁定、ES 搜索、Kafka 触发下单 |
 | **Order 订单服务** | 8081 | 订单全生命周期、分布式锁并发、延迟队列超时取消 |
+| **Coupon 优惠券服务** | 8090 | 秒杀活动管理、Lua 原子抢购、Kafka 异步发券、用券核销/退券 |
 | **Pay 支付服务** | 6087 | 支付宝统一下单、异步回调、退款 |
 | **Customize 定制服务** | 6084 | 操作审计存储、消息可靠性保障 |
 | **Migrate 迁移服务** | 6088 | 数据迁移、CSV 导入、路由映射刷新 |
@@ -589,6 +649,7 @@ ticketflow/
 ├── docker/                                    # Docker Compose
 ├── vue3/                                      # 用户端前端
 ├── ticketflow-front-manage/                   # 管理端前端
+├── coupon-seckill/                            # 优惠券秒杀（独立单体验证 → ticketflow-coupon-service）
 └── benchmark/                                 # 压测
 ```
 
@@ -605,5 +666,7 @@ ticketflow/
 | 分布式事务 | 最终一致性 + 补偿 | 避免 Seata 带来的性能开销，延迟队列兜底 |
 | ID 生成 | 雪花算法 + 基因法 | 全局唯一 + 单调递增 + 天然支持分片路由 |
 | 可观测性 | Prometheus + Grafana + Spring Boot Admin | 指标采集、可视化监控、服务健康检查 |
+| 优惠券抢购 | Redis Lua 原子扣减 + Kafka 异步发券 | 同步路径纯 Redis 扛峰值，DB 异步化削峰，唯一索引 + 对账兜底幂等与超卖 |
+| 用券一致性 | 锁券强一致 + 抢购最终一致 | 锁券/核销走 DB 事务与乐观锁，抢购结果由对账任务收敛 |
 
 

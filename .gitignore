@@ -35,6 +35,7 @@ vue3/components.d.ts
 ### Docs ###
 docs/
 ticketflow-study-plan.md
+!coupon-seckill/docs/
 
 ### Generated benchmark outputs ###
 benchmark/results/
@@ -45,3 +46,5 @@ benchmark/src/test/resources/data/seats-*.csv
 ### Python 编译缓存 ###
 __pycache__/
 *.pyc
+### Benchmark outputs ###
+benchmark-results/

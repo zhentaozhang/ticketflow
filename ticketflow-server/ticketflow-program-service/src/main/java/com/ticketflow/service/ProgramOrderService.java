@@ -10,6 +10,7 @@ import com.ticketflow.client.OrderClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.domain.OrderCreateMq;
+import com.ticketflow.domain.PendingOrder;
 import com.ticketflow.domain.PurchaseSeat;
 import com.ticketflow.dto.DelayOrderCancelDto;
 import com.ticketflow.dto.OrderCreateDto;
@@ -20,6 +21,7 @@ import com.ticketflow.entity.ProgramRecordTask;
 import com.ticketflow.entity.ProgramShowTime;
 import com.ticketflow.enums.BaseCode;
 import com.ticketflow.enums.OrderStatus;
+import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.enums.RecordType;
 import com.ticketflow.enums.SellStatus;
 import com.ticketflow.exception.TicketFlowFrameException;
@@ -31,7 +33,9 @@ import com.ticketflow.service.kafka.CreateOrderMqDomain;
 import com.ticketflow.service.kafka.CreateOrderSend;
 import com.ticketflow.service.lua.ProgramCacheCreateOrderData;
 import com.ticketflow.service.lua.ProgramCacheCreateOrderResolutionOperate;
+import com.ticketflow.service.lua.ProgramCacheCreateOrderV5ResolutionOperate;
 import com.ticketflow.service.lua.ProgramCacheResolutionOperate;
+import com.ticketflow.service.stock.ProgramLocalStockGate;
 import com.ticketflow.util.DateUtils;
 import com.ticketflow.vo.ProgramVo;
 import com.ticketflow.vo.SeatVo;
@@ -55,6 +59,7 @@ import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 import static com.ticketflow.constant.Constant.GLIDE_LINE;
@@ -78,6 +83,20 @@ public class ProgramOrderService {
      */
     private static final int AUTO_MATCH_RETRY_TIMES = 1;
 
+    /**
+     * V5 下单幂等标记 TTL（秒）。
+     * 仅防"同一用户同一节目在请求在途/刚提交"窗口内的重复提交，语义对齐 V4 @RepeatExecuteLimit(durationTime=0)
+     * （只排除在途并发，不阻断合法二次购买）。请求侧在途窗口通常 <1s，取 3s 留足余量；
+     * 合法二次购买 3s 后可再次提交；消息重放幂等由消费侧（selectOne + 唯一索引 + ORDER_EXIST 特判）兜底。
+     */
+    private static final int V5_IDEMPOTENT_TTL_SECONDS = 3;
+
+    /**
+     * V5 不选座自动匹配的窄粒度本地锁前缀（按 programId+ticketCategoryId 加锁）。
+     * 仅保护"读 no_sold + 应用层匹配 + Lua 校验"两步操作，选座路径保持无锁。
+     */
+    private static final String V5_AUTO_MATCH_LOCK = "v5_auto_match";
+
     @Autowired
     private OrderClient orderClient;
 
@@ -89,6 +108,15 @@ public class ProgramOrderService {
 
     @Autowired
     ProgramCacheCreateOrderResolutionOperate programCacheCreateOrderResolutionOperate;
+
+    @Autowired
+    private ProgramCacheCreateOrderV5ResolutionOperate programCacheCreateOrderV5ResolutionOperate;
+
+    @Autowired
+    private ProgramLocalStockGate programLocalStockGate;
+
+    @Autowired
+    private com.ticketflow.locallock.LocalLockCache localLockCache;
 
     @Autowired
     private DelayOrderCancelSend delayOrderCancelSend;
@@ -228,6 +256,24 @@ public class ProgramOrderService {
         CreateOrderTemporaryData createOrderTemporaryData = createOrderOperateProgramCacheResolution(programOrderCreateDto);
         //发送kafka
         return doCreateV2(programOrderCreateDto, createOrderTemporaryData, orderVersion);
+    }
+
+    /**
+     * V5 全异步创建路径（无锁 + Lua v2 幂等 + 本地库存闸门）。
+     * <p>
+     * 相比 V4（本地锁 + @RepeatExecuteLimit + V4 Lua）：
+     * <ul>
+     *   <li>无本地锁：正确性由 Lua 原子性保证，锁只是"快速失败"手段，移除后请求只在 Redis 天然串行，消除 70005；</li>
+     *   <li>幂等并入 Lua：SETNX 幂等标记 + 校验 + 扣减在同一 EVAL 内原子完成，请求侧不再需要独立幂等 Redis 往返；</li>
+     *   <li>本地库存闸门：售罄请求在到达 Redis 前直接拒绝，售罄短路。</li>
+     * </ul>
+     *
+     * @param programOrderCreateDto 订单创建参数
+     * @return 订单编号（Kafka 中预生成）
+     */
+    public String createNewAsyncV5(ProgramOrderCreateDto programOrderCreateDto) {
+        CreateOrderTemporaryData createOrderTemporaryData = createOrderOperateProgramCacheResolutionV5(programOrderCreateDto);
+        return doCreateV2(programOrderCreateDto, createOrderTemporaryData, ProgramOrderVersion.V5_VERSION.getValue());
     }
 
     /**
@@ -391,6 +437,205 @@ public class ProgramOrderService {
             throw new TicketFlowFrameException(Objects.requireNonNull(BaseCode.getRc(programCacheCreateOrderData.getCode())));
         }
         return new CreateOrderTemporaryData(identifierId, programCacheCreateOrderData.getPurchaseSeatList());
+    }
+
+    /**
+     * V5 版本：执行 Lua v2 完成"幂等守卫 + 校验 + 原子扣减"。
+     * 与 V4 方法的差异：
+     * <ul>
+     *   <li>使用 programDataCreateOrderResolutionV5.lua：幂等 SETNX 并入同一 EVAL（请求侧每单仅 1 次 Lua 往返）；</li>
+     *   <li>执行前做本地库存闸门预判，售罄请求不进入 Redis；</li>
+     *   <li>成功后用 Lua 返回的扣减后余票更新本地库存闸门。</li>
+     * </ul>
+     */
+    public CreateOrderTemporaryData createOrderOperateProgramCacheResolutionV5(ProgramOrderCreateDto programOrderCreateDto) {
+        //从多级缓存中查找节目演出时间ProgramShowTime
+        ProgramShowTime programShowTime =
+                programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(programOrderCreateDto.getProgramId());
+        //查询对应的票档类型
+        List<TicketCategoryVo> getTicketCategoryList =
+                getTicketCategoryList(programOrderCreateDto, programShowTime.getShowTime());
+        //遍历得到的票档，缓存未预热时才预热（预热后每单零 Redis 读取）
+        for (TicketCategoryVo ticketCategory : getTicketCategoryList) {
+            Long ticketCategoryId = ticketCategory.getId();
+            if (!hasSeatResolutionCache(programOrderCreateDto.getProgramId(), ticketCategoryId)) {
+                seatService.selectSeatResolution(programOrderCreateDto.getProgramId(), ticketCategoryId,
+                        DateUtils.countBetweenSecond(DateUtils.now(), programShowTime.getShowTime()), TimeUnit.SECONDS);
+            }
+            if (!redisCache.hasKey(RedisKeyBuild.createRedisKey(
+                    RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programOrderCreateDto.getProgramId(), ticketCategoryId))) {
+                ticketCategoryService.getRedisRemainNumberResolution(
+                        programOrderCreateDto.getProgramId(), ticketCategoryId);
+            }
+        }
+        Long programId = programOrderCreateDto.getProgramId();
+        List<SeatDto> seatDtoList = programOrderCreateDto.getSeatDtoList();
+        List<String> keys = new ArrayList<>();
+        //V5：ARGV[4]=幂等标记 TTL（秒）、ARGV[5]=限购数量、ARGV[6]=本次购票总数；data[0..2] 与 V4 一致
+        String[] data = new String[6];
+        JSONArray jsonArray = new JSONArray();
+        JSONArray addSeatDatajsonArray = new JSONArray();
+        if (CollectionUtil.isNotEmpty(seatDtoList)) {
+            keys.add("1");
+            Map<Long, List<SeatDto>> seatTicketCategoryDtoCount = seatDtoList.stream()
+                    .collect(Collectors.groupingBy(SeatDto::getTicketCategoryId));
+            for (Entry<Long, List<SeatDto>> entry : seatTicketCategoryDtoCount.entrySet()) {
+                Long ticketCategoryId = entry.getKey();
+                int ticketCount = entry.getValue().size();
+                //这里是计算更新票档数据
+                JSONObject jsonObject = new JSONObject();
+                //票档数量的key
+                jsonObject.put("programTicketRemainNumberHashKey", RedisKeyBuild.createRedisKey(
+                        RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programId, ticketCategoryId).getRelKey());
+                //票档id
+                jsonObject.put("ticketCategoryId", ticketCategoryId);
+                //扣减余票数量
+                jsonObject.put("ticketCount", ticketCount);
+                jsonArray.add(jsonObject);
+
+                JSONObject seatDatajsonObject = new JSONObject();
+                //未售卖座位的hash的key
+                seatDatajsonObject.put("seatNoSoldHashKey", RedisKeyBuild.createRedisKey(
+                        RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH, programId, ticketCategoryId).getRelKey());
+                //座位数据
+                seatDatajsonObject.put("seatDataList", JSON.toJSONString(entry.getValue()));
+                addSeatDatajsonArray.add(seatDatajsonObject);
+            }
+        } else {
+            // 不选座：应用层读取 no_sold 座位集合并匹配相邻座位
+            Long ticketCategoryId = programOrderCreateDto.getTicketCategoryId();
+            Integer ticketCount = programOrderCreateDto.getTicketCount();
+            //票档校验与余票参数（ticketCategoryId/ticketCount 固定，重试时复用）
+            JSONObject jsonObject = new JSONObject();
+            //票档数量的key
+            jsonObject.put("programTicketRemainNumberHashKey", RedisKeyBuild.createRedisKey(
+                    RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programId, ticketCategoryId).getRelKey());
+            //票档id
+            jsonObject.put("ticketCategoryId", ticketCategoryId);
+            //扣减余票数量
+            jsonObject.put("ticketCount", ticketCount);
+            jsonArray.add(jsonObject);
+            keys.add("1");
+        }
+        //未售卖座位hash的key(占位符形式)
+        keys.add(RedisKeyBuild.getRedisKey(RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH));
+        //锁定座位hash的key(占位符形式)
+        keys.add(RedisKeyBuild.getRedisKey(RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH));
+        keys.add(String.valueOf(programOrderCreateDto.getProgramId()));
+        //记录的key(占位符形式)
+        keys.add(RedisKeyBuild.getRedisKey(RedisKeyManage.PROGRAM_RECORD));
+        //记录的标识
+        Long identifierId = uidGenerator.getUid();
+        //把记录的标识id放进去
+        keys.add(RecordType.REDUCE.getValue() + GLIDE_LINE + identifierId + GLIDE_LINE + programOrderCreateDto.getUserId());
+        //记录的类型
+        keys.add(RecordType.REDUCE.getValue());
+        //V5：幂等 key（同一 userId+programId 的提交标记）
+        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.V5_ORDER_CREATE_IDEMPOTENT,
+                programOrderCreateDto.getUserId(), programOrderCreateDto.getProgramId()).getRelKey());
+        //V5：账户订单计数 key（限购校验 + 扣减成功后累加，计数单一归属 Lua）
+        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT,
+                programOrderCreateDto.getUserId(), programOrderCreateDto.getProgramId()).getRelKey());
+        data[0] = JSON.toJSONString(jsonArray);
+        data[2] = JSON.toJSONString(programOrderCreateDto.getTicketUserIdList().stream()
+                .map(String::valueOf)
+                .toList());
+        data[3] = String.valueOf(V5_IDEMPOTENT_TTL_SECONDS);
+        //V5 限购：perAccountLimitPurchaseCount（缓存中未配置/为空按不限购处理），null -> "0"
+        Integer perAccountLimitPurchaseCount =
+                programService.simpleGetProgramAndShowMultipleCache(programId).getPerAccountLimitPurchaseCount();
+        data[4] = String.valueOf(Objects.isNull(perAccountLimitPurchaseCount) ? 0 : perAccountLimitPurchaseCount);
+        //V5 限购：本次购票总数（选座=座位数，不选座=票数）
+        data[5] = String.valueOf(CollectionUtil.isNotEmpty(seatDtoList) ? seatDtoList.size()
+                : programOrderCreateDto.getTicketCount());
+
+        //本地库存闸门预判：快速拒绝已售罄，避免无谓的 Redis EVAL
+        checkLocalStockGate(programOrderCreateDto);
+
+        ProgramCacheCreateOrderData programCacheCreateOrderData;
+        if (CollectionUtil.isNotEmpty(seatDtoList)) {
+            // 选座：候选座位由用户指定，Lua 单次原子校验+锁定（无锁，Redis 天然串行）
+            data[1] = JSON.toJSONString(addSeatDatajsonArray);
+            programCacheCreateOrderData = programCacheCreateOrderV5ResolutionOperate.programCacheOperate(keys, data);
+        } else {
+            // 不选座：应用层匹配候选座位，候选被并发抢占（40001/40002/40003）时重新匹配重试。
+            // V5 整体无锁，但"读取 no_sold + 应用层匹配 + Lua 校验"是两步操作，同一票档的并发自动匹配
+            // 会选中同一批相邻座位互相抢占（40001 风暴）。因此仅对自动匹配路径加窄粒度本地锁
+            // （按 programId+ticketCategoryId），选座路径保持无锁。
+            Long ticketCategoryId = programOrderCreateDto.getTicketCategoryId();
+            Integer ticketCount = programOrderCreateDto.getTicketCount();
+            ReentrantLock autoMatchLock = localLockCache.getLock(
+                    V5_AUTO_MATCH_LOCK + "-" + programId + "-" + ticketCategoryId, false);
+            autoMatchLock.lock();
+            try {
+                programCacheCreateOrderData = null;
+                for (int attempt = 0; attempt <= AUTO_MATCH_RETRY_TIMES; attempt++) {
+                    Map<String, SeatVo> noSoldSeatMap = redisCache.getAllMapForHash(
+                            RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH,
+                                    programId, ticketCategoryId), SeatVo.class);
+                    List<SeatVo> matchedSeatList = matchAdjacentSeats(new ArrayList<>(noSoldSeatMap.values()), ticketCount);
+                    if (matchedSeatList.size() < ticketCount) {
+                        throw new TicketFlowFrameException(BaseCode.SEAT_OCCUPY);
+                    }
+                    JSONArray autoMatchSeatDatajsonArray = new JSONArray();
+                    JSONObject seatDatajsonObject = new JSONObject();
+                    seatDatajsonObject.put("seatNoSoldHashKey", RedisKeyBuild.createRedisKey(
+                            RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH, programId, ticketCategoryId).getRelKey());
+                    seatDatajsonObject.put("seatDataList", JSON.toJSONString(matchedSeatList.stream()
+                            .map(seatVo -> {
+                                SeatDto seatDto = new SeatDto();
+                                seatDto.setId(seatVo.getId());
+                                seatDto.setPrice(seatVo.getPrice());
+                                seatDto.setTicketCategoryId(seatVo.getTicketCategoryId());
+                                return seatDto;
+                            }).toList()));
+                    autoMatchSeatDatajsonArray.add(seatDatajsonObject);
+                    data[1] = JSON.toJSONString(autoMatchSeatDatajsonArray);
+                    programCacheCreateOrderData = programCacheCreateOrderV5ResolutionOperate.programCacheOperate(keys, data);
+                    // 仅对"候选座位被并发抢占"重试；其他错误（重复提交/余票不足/价格不一致等）直接失败
+                    if (isSeatRaceError(programCacheCreateOrderData.getCode())) {
+                        log.info("自动匹配座位被并发抢占 重试中 节目id : {} 票档id : {} 尝试次数 : {}", programId, ticketCategoryId, attempt + 1);
+                        continue;
+                    }
+                    break;
+                }
+            } finally {
+                autoMatchLock.unlock();
+            }
+        }
+        if (!Objects.equals(programCacheCreateOrderData.getCode(), BaseCode.SUCCESS.getCode())) {
+            throw new TicketFlowFrameException(Objects.requireNonNull(BaseCode.getRc(programCacheCreateOrderData.getCode())));
+        }
+        //Lua 成功：用返回的扣减后余票更新本地库存闸门（精确追踪，无需额外 Redis 读取）
+        if (CollectionUtil.isNotEmpty(programCacheCreateOrderData.getRemainMap())) {
+            programCacheCreateOrderData.getRemainMap().forEach((categoryId, remain) ->
+                    programLocalStockGate.track(programId, Long.valueOf(categoryId), remain));
+        }
+        return new CreateOrderTemporaryData(identifierId, programCacheCreateOrderData.getPurchaseSeatList());
+    }
+
+    /**
+     * 本地库存闸门预判：对应票档已跟踪且预估余票不足时直接拒绝，不进入 Redis。
+     * 闸门未跟踪（-1）或闸门有货时放行，最终正确性由 Lua 裁决。
+     */
+    private void checkLocalStockGate(ProgramOrderCreateDto programOrderCreateDto) {
+        List<SeatDto> seatDtoList = programOrderCreateDto.getSeatDtoList();
+        if (CollectionUtil.isNotEmpty(seatDtoList)) {
+            Map<Long, Long> countMap = seatDtoList.stream()
+                    .collect(Collectors.groupingBy(SeatDto::getTicketCategoryId, Collectors.counting()));
+            for (Entry<Long, Long> entry : countMap.entrySet()) {
+                int estimated = programLocalStockGate.estimatedRemain(programOrderCreateDto.getProgramId(), entry.getKey());
+                if (estimated >= 0 && estimated < entry.getValue().intValue()) {
+                    throw new TicketFlowFrameException(BaseCode.TICKET_REMAIN_NUMBER_NOT_SUFFICIENT);
+                }
+            }
+        } else {
+            int estimated = programLocalStockGate.estimatedRemain(
+                    programOrderCreateDto.getProgramId(), programOrderCreateDto.getTicketCategoryId());
+            if (estimated >= 0 && estimated < programOrderCreateDto.getTicketCount()) {
+                throw new TicketFlowFrameException(BaseCode.TICKET_REMAIN_NUMBER_NOT_SUFFICIENT);
+            }
+        }
     }
 
     /**
@@ -587,7 +832,8 @@ public class ProgramOrderService {
 
     /**
      * 通过 Kafka 发送建单消息。
-     * 同步等待发送结果，失败时自动回滚 Redis 缓存。
+     * 等待发送确认；超时（2s）降级为已受理并写 PENDING 待确认队列（不抛异常），
+     * 订单终态由 PENDING 对账任务裁决；发送失败仍回滚 Redis 缓存并上抛。
      */
     private String createOrderByMq(OrderCreateMq orderCreateMq, List<PurchaseSeat> purchaseSeatList) {
         CreateOrderMqDomain createOrderMqDomain = new CreateOrderMqDomain();
@@ -614,18 +860,39 @@ public class ProgramOrderService {
             latch.countDown();
         });
         try {
-            if (!latch.await(10, TimeUnit.SECONDS)) {
-                log.error("创建订单kafka发送消息等待超时 orderNumber : {}", orderCreateMq.getOrderNumber());
-                throw new TicketFlowFrameException(BaseCode.EXECUTE_TIME_OUT);
+            if (!latch.await(2, TimeUnit.SECONDS)) {
+                // 超时降级：不再抛异常。消息大概率已发送（producer retries=3），
+                // 订单终态由 PENDING 对账兜底：已建单则移除，未建单则回滚 Redis 座位。
+                log.warn("创建订单kafka发送消息等待超时 降级为已受理 orderNumber : {}", orderCreateMq.getOrderNumber());
+                writePendingOrder(orderCreateMq);
+                return createOrderMqDomain.orderNumber;
             }
         } catch (InterruptedException e) {
-            log.error("createOrderByMq InterruptedException", e);
-            throw new TicketFlowFrameException(e);
+            Thread.currentThread().interrupt();
+            // 中断视为已受理（同超时语义），不抛异常
+            log.error("createOrderByMq InterruptedException 降级为已受理 orderNumber : {}", orderCreateMq.getOrderNumber(), e);
+            writePendingOrder(orderCreateMq);
+            return createOrderMqDomain.orderNumber;
         }
         if (Objects.nonNull(createOrderMqDomain.ticketFlowFrameException)) {
             throw createOrderMqDomain.ticketFlowFrameException;
         }
         return createOrderMqDomain.orderNumber;
+    }
+
+    /**
+     * 写入 PENDING 待确认队列：请求侧发送超时降级时留痕，
+     * 供 order-service 对账任务扫描后裁决（建单成功移除 / 未建单回滚座位）。
+     */
+    private void writePendingOrder(OrderCreateMq orderCreateMq) {
+        try {
+            redisCache.leftPushForList(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_CREATE_PENDING,
+                    orderCreateMq.getProgramId()), new PendingOrder(orderCreateMq));
+        } catch (Exception e) {
+            // PENDING 写入失败不能上抛：主路径已降级为成功，缺失留痕由 Redis 座位锁死时限 + 人工对账兜底
+            log.error("创建订单kafka发送超时后写入 PENDING 失败 需人工处理 orderNumber : {}",
+                    orderCreateMq.getOrderNumber(), e);
+        }
     }
 
     /**

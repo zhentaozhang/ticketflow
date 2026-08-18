@@ -6,6 +6,7 @@ import com.ticketflow.domain.DiscardOrder;
 import com.ticketflow.domain.OrderCreateMq;
 import com.ticketflow.dto.OrderTicketUserCreateDto;
 import com.ticketflow.enums.DiscardOrderReason;
+import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
 import com.ticketflow.service.OrderService;
@@ -21,6 +22,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_NAME;
@@ -30,7 +32,8 @@ import static com.ticketflow.constant.Constant.SPRING_INJECT_PREFIX_DISTINCTION_
  * 接收 V4/V5 策略发送的创建订单消息，解析 OrderCreateMq，
  * 调用 OrderService.createMq() 完成订单持久化。
  *
- * 幂等保障：createMq 的 @RepeatExecuteLimit（60秒）防止同一订单号重复建单。
+ * 幂等保障：createMq 对同 orderNumber 重复消息幂等成功（selectOne 防重 + DB 唯一索引兜底 +
+ *          ORDER_EXIST 特判不写 DISCARD_ORDER）；@RepeatExecuteLimit(durationTime=0) 仅防并发。
  * 延迟消费：收到消息后等待 MESSAGE_DELAY_TIME（60秒），
  *           给 program-service 留出 Redis 数据同步时间。
  *
@@ -53,10 +56,11 @@ public class CreateOrderConsumer {
     public static Long MESSAGE_DELAY_TIME = 60000L;
     
     /**
-     * 消费并行度与 topic 分区数一致（create_order topic 12 分区）。
+     * 消费并行度与 topic 分区数一致（create_order topic 48 分区）。
      * 每分区一个 consumer，提升订单创建消费吞吐，缓解高到达率下消费积压/超时丢弃。
+     * 注意：分区数变更需同步执行 kafka-topics.sh --alter --partitions 48（见部署文档）。
      */
-    @KafkaListener(topics = {SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"${spring.kafka.topic:create_order}"}, concurrency = "12")
+    @KafkaListener(topics = {SPRING_INJECT_PREFIX_DISTINCTION_NAME+"-"+"${spring.kafka.topic:create_order}"}, concurrency = "48")
     public void consumerOrderMessage(ConsumerRecord<String,String> consumerRecord){
         String value = consumerRecord.value();
         if (StringUtil.isEmpty(value)) {
@@ -73,7 +77,9 @@ public class CreateOrderConsumer {
             log.info("消费到kafka的创建订单消息 消息体: {} 延迟时间 : {} 毫秒",value,delayTime);
             
             // 超过 MESSAGE_DELAY_TIME(60s) 的消息视为超时 → 丢入 DISCARD_ORDER（Redis list）用于后续对账分析 + Prometheus 计数
-            if (currentTimeTimestamp - createOrderTimeTimestamp > MESSAGE_DELAY_TIME) {
+            // V5：Redis 为唯一库存权威，积压消息不丢弃，继续建单（最终一致由对账兜底），避免"Redis 已扣但订单丢失"
+            boolean isV5 = Objects.equals(orderCreateMq.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue());
+            if (!isV5 && currentTimeTimestamp - createOrderTimeTimestamp > MESSAGE_DELAY_TIME) {
                 Map<Long, List<OrderTicketUserCreateDto>> orderTicketUserSeatList =
                         orderCreateMq.getOrderTicketUserCreateDtoList().stream().collect(Collectors.groupingBy(OrderTicketUserCreateDto::getTicketCategoryId));
                 //key: 节目票档id value: 座位id集合

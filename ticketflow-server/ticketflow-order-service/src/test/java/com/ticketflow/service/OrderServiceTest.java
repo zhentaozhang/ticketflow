@@ -42,9 +42,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.redisson.api.RLock;
+import org.springframework.beans.BeanUtils;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -213,6 +215,52 @@ class OrderServiceTest {
         verify(orderProgramMapper).insert(orderProgramCaptor.capture());
         assertEquals(ORDER_NUMBER, orderProgramCaptor.getValue().getOrderNumber());
 
+        verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(1L));
+    }
+
+    @Test
+    void doCreateV5订单_不重复累加账户计数() {
+        // D2：V5 计数由请求侧 Lua 原子维护（INCRBY），消费侧 doCreate 不再累加，避免双计
+        OrderCreateDomain v5Domain = buildCreateDomain();
+        v5Domain.setOrderVersion(ProgramOrderVersion.V5_VERSION.getValue());
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+
+        String orderNumber = orderService.doCreate(v5Domain);
+
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+        verify(orderMapper).insert(any(Order.class));
+        verify(redisCache, never()).incrBy(any(RedisKeyBuild.class), anyLong());
+    }
+
+    @Test
+    void doCreate_同步器激活时计数延迟到事务提交后() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            String orderNumber = orderService.doCreate(buildCreateDomain());
+            assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+            // 同步器激活：incrBy 不应立即执行，而是注册到 afterCommit 回调（事务提交后）
+            verify(redisCache, never()).incrBy(any(), anyLong());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
+    void create_无事务上下文_计数立即累加() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
+        OrderCreateDto dto = new OrderCreateDto();
+        BeanUtils.copyProperties(buildCreateDomain(), dto);
+        String orderNumber = orderService.create(dto);
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+        // 无事务上下文（纯 Mockito 无 Spring 代理）：走回退分支立即累加，等价原行为
         verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(1L));
     }
 
@@ -538,6 +586,50 @@ class OrderServiceTest {
     }
 
     @Test
+    void updateOrderRelatedData支付时V4节目服务返回失败不抛异常且Lua仍执行() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class)))
+                .thenReturn(ApiResponse.error(500, "program服务不可用"));
+
+        // 事务外尽力而为：Feign 失败不阻断订单状态流转，Lua（Redis 权威）照常执行
+        assertDoesNotThrow(() -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
+
+        ArgumentCaptor<Order> updateOrderCaptor = ArgumentCaptor.forClass(Order.class);
+        verify(orderMapper).update(updateOrderCaptor.capture(), any(Wrapper.class));
+        assertEquals(OrderStatus.PAY.getCode(), updateOrderCaptor.getValue().getOrderStatus());
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+    }
+
+    @Test
+    void updateOrderRelatedData支付时V4节目服务抛异常不抛异常且Lua仍执行() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class)))
+                .thenThrow(new RuntimeException("program服务异常"));
+
+        assertDoesNotThrow(() -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
+
+        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+    }
+
+    @Test
+    void updateOrderRelatedData同步器激活时数据同步延迟到事务提交后() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
+            // 同步器激活：incrBy/Lua 不应立即执行，而是注册到 afterCommit 回调（事务提交后）
+            verify(redisCache, never()).incrBy(any(), anyLong());
+            verify(orderProgramCacheResolutionOperate, never()).programCacheReverseOperate(anyList(), any(Object[].class));
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
     void updateOrderRelatedData更新主订单失败时抛ORDER_CANAL_ERROR() {
         stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
         when(orderMapper.update(any(Order.class), any(Wrapper.class))).thenReturn(0);
@@ -641,16 +733,16 @@ class OrderServiceTest {
     }
 
     @Test
-    void updateProgramRelatedDataResolutionV4节目服务失败时抛异常() {
+    void updateProgramRelatedDataResolutionV4节目服务失败时不抛异常且Lua仍执行() {
         SeatVo seatVo = new SeatVo();
         seatVo.setId(SEAT_ID);
         when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
         when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.error(7777, "失败"));
         java.util.Map<Long, List<Long>> seatMap = java.util.Map.of(TICKET_CATEGORY_ID, List.of(SEAT_ID));
-        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
-                () -> orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.CANCEL,
-                        IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue()));
-        assertEquals(7777, e.getCode());
+        // 事务外尽力而为：Feign 失败不抛异常，Lua（Redis 权威）照常执行，DB 侧由投影任务/守恒任务观测兜底
+        assertDoesNotThrow(() -> orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.CANCEL,
+                IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue()));
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
     }
 
     // ==================== 丢弃订单座位回滚 rollbackProgramSeatByDiscard ====================
@@ -1103,7 +1195,71 @@ class OrderServiceTest {
         assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
         verify(orderMapper).insert(any(Order.class));
         verify(redisCache).set(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ, ORDER_NUMBER)),
-                eq(String.valueOf(ORDER_NUMBER)), eq(1L), eq(java.util.concurrent.TimeUnit.MINUTES));
+                eq(String.valueOf(ORDER_NUMBER)), eq(10L), eq(java.util.concurrent.TimeUnit.MINUTES));
+    }
+
+    @Test
+    void createMq重复消息_幂等成功返回原订单号() {
+        // 第一次消费：无既有订单，正常建单
+        // 第二次消费（同 orderNumber 重放）：doCreate 防重 selectOne 命中 → ORDER_EXIST
+        //  → createMq 特判为幂等成功返回原订单号，不写 DISCARD_ORDER
+        Order existOrder = new Order();
+        existOrder.setOrderNumber(ORDER_NUMBER);
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null, existOrder);
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(1L);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
+
+        String first = orderService.createMq(buildCreateMq());
+        assertEquals(String.valueOf(ORDER_NUMBER), first);
+
+        // 重复消息：不抛异常，幂等返回相同订单号
+        String second = orderService.createMq(buildCreateMq());
+        assertEquals(String.valueOf(ORDER_NUMBER), second);
+        // createMq 内不写 DISCARD_ORDER（真实失败才由 CreateOrderConsumer 外层写入）
+        verify(redisCache, never()).leftPushForList(any(RedisKeyBuild.class), any());
+    }
+
+    @Test
+    void createMq重复消息_幂等成功不触发反向恢复() {
+        Order existOrder = new Order();
+        existOrder.setOrderNumber(ORDER_NUMBER);
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(existOrder);
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(1L);
+
+        String orderNumber = orderService.createMq(buildCreateMq());
+
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+        // 幂等重复不执行反向恢复（不回滚已建订单的 DB 座位/余票）
+        verify(programClient, never()).operateProgramData(any(ProgramOperateDataDto.class));
+    }
+
+    @Test
+    void createMqV5重复消息_幂等成功返回原订单号且不调Feign() {
+        // V5 分支：建单不调 Feign 锁座（DB 由投影任务异步收敛），重复消息走 ORDER_EXIST 幂等特判
+        OrderCreateMq mq = buildCreateMq();
+        mq.setOrderVersion(ProgramOrderVersion.V5_VERSION.getValue());
+        Order existOrder = new Order();
+        existOrder.setOrderNumber(ORDER_NUMBER);
+        // 第一次建单 selectOne=null；第二次重放 selectOne=existOrder（doCreate 防重抛出）+ catch 特判内再次 selectOne
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null, existOrder);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L, 4L);
+
+        String first = orderService.createMq(mq);
+        assertEquals(String.valueOf(ORDER_NUMBER), first);
+
+        String second = orderService.createMq(mq);
+        assertEquals(String.valueOf(ORDER_NUMBER), second);
+
+        // V5 全程不调 Feign 锁座/反向恢复
+        verify(programClient, never()).operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class));
+        verify(programClient, never()).operateProgramData(any(ProgramOperateDataDto.class));
+        // 重复消息幂等成功，不写 DISCARD_ORDER
+        verify(redisCache, never()).leftPushForList(any(RedisKeyBuild.class), any());
     }
 
     // ==================== 查询 ====================

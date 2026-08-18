@@ -39,8 +39,8 @@ public class ReconciliationTask {
     @Autowired
     private ProgramClient programClient;
 
-    //对账任务每3分钟执行一次：补偿 DB 有单 Redis 无流水的记录，并回滚 DISCARD_ORDER 丢弃订单的 Redis 扣减
-    @Scheduled(cron = "0 0/3 * * * ? ")
+    //对账任务每1分钟执行一次：补偿 DB 有单 Redis 无流水的记录，并回滚 DISCARD_ORDER 丢弃订单的 Redis 扣减
+    @Scheduled(cron = "0 0/1 * * * ? ")
     public void reconciliationTask(){
         BusinessThreadPool.execute( () -> {
             try {
@@ -68,6 +68,8 @@ public class ReconciliationTask {
                 for (Long programId : programIdSet) {
                     orderTaskService.reconciliationTask(programId);
                     orderTaskService.discardOrderCompensation(programId);
+                    //PENDING 发送超时订单补偿：已建单则移除，未建单则回滚 Redis 座位
+                    orderTaskService.pendingOrderCompensation(programId);
                 }
                 //修改对账记录任务集合为已处理
                 ProgramRecordTaskUpdateDto programRecordTaskUpdateDto = new ProgramRecordTaskUpdateDto();

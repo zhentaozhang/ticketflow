@@ -100,6 +100,14 @@ public enum RedisKeyManage {
 
     DISCARD_ORDER("d_mai_discard_order_%s", "使用mq创建方式被丢弃的订单", "使用mq创建方式被丢弃的订单", "k"),
 
+    ORDER_CREATE_PENDING("d_mai_order_create_pending_%s", "请求侧发送超时待确认订单_节目id", "发送超时待确认订单", "k"),
+
+    ORDER_CREATE_PENDING_ALL("d_mai_order_create_pending_*", "请求侧发送超时待确认订单_通配", "发送超时待确认订单", "k"),
+
+    V5_ORDER_CREATE_IDEMPOTENT("d_mai_program_order_create_idempotent_%s_%s", "V5下单幂等标记_用户id_节目id", "V5下单幂等标记", "k"),
+
+    V5_ORDER_DB_PROJECTED("d_mai_order_db_projected_%s", "V5订单DB投影完成标记_订单号", "V5订单DB投影完成标记", "k"),
+
     LOGIN_USER_MOBILE_ERROR("d_mai_login_user_mobile_error_%s", "登录错误的用户手机号key", "登录错误的用户手机号次数", "k"),
 
     LOGIN_USER_EMAIL_ERROR("d_mai_login_user_email_error_%s", "登录错误的用户邮箱key", "登录错误的用户邮箱次数", "k"),
