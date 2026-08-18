@@ -13,21 +13,65 @@
 
 | 关注点 | 方案 |
 |--------|------|
-| 抢购峰值 | 同步路径只做 Redis（单 Lua 原子完成 时间窗+限购+扣库存），QPS 可达 10w+ |
-| 削峰 | Kafka 异步发券落库，DB 不再是瓶颈 |
+| 抢购峰值 | 同步路径只做 Redis（单 Lua 原子完成 时间窗+限购+扣库存+幂等），QPS 可达 10w+ |
+| 削峰 | Kafka 异步发券落库（本地无 Kafka 时可用 mock-messaging=true 内存队列全链路验证） |
 | 超卖 | Lua 原子扣减 + DB 唯一索引 + 对账任务 三层防线 |
 | 幂等 | requestId（请求层）+ 唯一索引（落库层）+ order_no/coupon_no（发券层） |
-| 一致性 | 抢购最终一致（对账收敛）；锁券/核销/退回强一致（DB 事务+乐观锁） |
+| 一致性 | 抢购最终一致（对账收敛）；锁券/核销/退回强一致（DB 事务+乐观锁+Redis SETNX 第一道闸） |
+| 分表 | flash_sale_order / user_coupon 按 user_id%2 分片（MyBatis-Plus DynamicTableName 简易实现，集成时切 ShardingSphere） |
 | 集成 | 独立微服务 + order-service 契约对接（lock/use/return） |
 
-## 目录规划
+## 目录结构
 
 ```
-├── docs/           # 设计文档
-├── sql/            # 建表脚本
-└── src/            # Spring Boot 3.3 单体应用（实现阶段）
+coupon-seckill/
+├── docs/01-技术设计.md     # 设计文档
+├── sql/schema.sql          # 建表脚本（含分表）
+└── src/
+    ├── main/java/com/couponseckill/
+    │   ├── common/         # Result / ErrorCode / BizException / 全局异常
+    │   ├── config/         # MyBatis-Plus(分表+乐观锁+分页) / Lua 脚本 / RedisKeys / ShardingContext
+    │   ├── controller/     # Manage / FlashSale / Coupon(契约) / UserCoupon
+    │   ├── service/        # Manage / ActivityCache / FlashSaleGrab / CouponIssue / CouponUse / Query
+    │   ├── kafka/          # 消息抽象 + Kafka 实现 + mock 实现 + 消费逻辑
+    │   ├── mapper/ entity/ # 与表对应（对账 SQL 跨分片）
+    │   ├── task/           # ActivityState / Reconcile / IssueTimeout / CouponExpire / Dlt
+    │   └── id/             # 轻量雪花（集成时替换 id-generator-framework）
+    └── resources/
+        ├── application.yml
+        └── lua/            # grab.lua / rollback.lua（外置+预加载）
 ```
 
-## 里程碑
+## 实现进度
 
-M0 设计 → M1 骨架+活动管理 → M2 抢购主链路 → M3 用券闭环+对账 → M4 压测优化 → M5 集成
+| 里程碑 | 内容 | 状态 |
+|--------|------|------|
+| M0 | 技术设计文档 | ✅ |
+| M1 | 单体骨架 + 建表 + 活动管理（创建/发布/预热/下架/调库存） | ✅ |
+| M2 | 抢购主链路：Lua 原子扣减 + 异步发券 + 结果查询 | ✅ |
+| M3 | 用券闭环（锁券/核销/退回）+ 对账/过期/超时/状态推进任务 | ✅ |
+| M4 | 压测优化（复用 benchmark/ 落库率口径） | ⏳ 待做 |
+| M5 | 集成 ticketflow（独立服务 + order-service 对接 + 灰度） | ⏳ 待做 |
+
+## 运行与验证
+
+```bash
+# 前置：本机 MySQL(建 coupon_seckill 库并执行 sql/schema.sql)、Redis
+mvn spring-boot:run                 # 默认 mock-messaging=true，无 Kafka 也可跑通全链路
+mvn test                            # 集成测试（真实 Redis + MySQL）
+```
+
+### 测试覆盖（10/10 通过）
+
+- `FlashSaleGrabIT`：100 并发抢 50 库存零超卖 / requestId 幂等 / 限购 / 售罄 / 全链路发券
+- `CouponUseIT`：锁券→核销 / 退回→重锁 / 20 并发锁券单赢家(防双花) / 重复核销拒绝 / 对账修正 Redis 库存
+
+### 接口一览
+
+| 接口 | 说明 |
+|------|------|
+| POST /manage/template, /manage/activity, /manage/activity/{id}/publish·offline·stock | 管理端 |
+| POST /flash-sale/grab (X-User-Id) | 抢购（同步 Redis，异步发券） |
+| GET /flash-sale/result?activityId= | 抢购结果轮询 |
+| POST /coupon/lock · /use · /return | 用券契约（集成给 order-service） |
+| GET /user/coupons?status= | 我的券列表 |
