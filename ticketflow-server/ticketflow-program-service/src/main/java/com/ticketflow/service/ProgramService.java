@@ -652,20 +652,28 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      * 内部 Redis 不存在时获取 ReentrantLock，二次检查后查 DB 回填，
      * 避免同一个节目在缓存过期瞬间被重复加载（cache stampede）。
      */
-    @ServiceLock(lockType = LockType.Read, name = PROGRAM_LOCK, keys = {"#programId"})
+    @ServiceLock(lockType = LockType.Read, name = PROGRAM_LOCK, keys = {"#programId"})  //分布式读锁
     public ProgramVo getById(Long programId, Long expireTime, TimeUnit timeUnit) {
         ProgramVo programVo =
                 redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId), ProgramVo.class);
         if (Objects.nonNull(programVo)) {
             return programVo;
-        }
+        }  // Redis 命中直接返回
         log.info("查询节目详情 从Redis缓存没有查询到 节目id : {}", programId);
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_PROGRAM_LOCK, new String[]{String.valueOf(programId)});
-        lock.lock();
+        if (!serviceLockTool.tryLock(lock, "GET_PROGRAM_LOCK:" + programId)) {
+            // 等超时：先再查一次缓存（可能刚好被填好），仍没有就快速失败，不无锁重建
+            programVo = redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId),
+                    ProgramVo.class);
+            if (Objects.nonNull(programVo)) {
+                return programVo;
+            }
+            throw new TicketFlowFrameException(BaseCode.CACHE_LOAD_LOCK_TIMEOUT);
+        }
         try {
             return redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId)
                     , ProgramVo.class,
-                    () -> createProgramVo(programId)
+                    () -> createProgramVo(programId)   //查 DB 回填
                     , expireTime,
                     timeUnit);
         } finally {
@@ -694,7 +702,16 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
             return programGroupVo;
         }
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_PROGRAM_LOCK, new String[]{String.valueOf(programGroupId)});
-        lock.lock();
+        if (!serviceLockTool.tryLock(lock, "GET_PROGRAM_GROUP_LOCK:" + programGroupId)) {
+            // 等超时：先再查一次缓存（可能刚好被填好），仍没有就快速失败，不无锁重建
+            programGroupVo = redisCache.get(
+                    RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, programGroupId),
+                    ProgramGroupVo.class);
+            if (Objects.nonNull(programGroupVo)) {
+                return programGroupVo;
+            }
+            throw new TicketFlowFrameException(BaseCode.CACHE_LOAD_LOCK_TIMEOUT);
+        }
         try {
             programGroupVo = redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, programGroupId),
                     ProgramGroupVo.class);

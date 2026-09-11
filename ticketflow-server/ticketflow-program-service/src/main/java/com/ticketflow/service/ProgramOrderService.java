@@ -293,8 +293,57 @@ public class ProgramOrderService {
     }
 
     /**
+     * 确保下单用到的缓存已就绪（座位缓存 + 余票缓存）。
+     * <p>
+     * <b>必须在进入票档本地锁之前调用。</b>座位缓存是一个票档两万个 field 的全量 Hash，
+     * 冷缓存时加载一次要读整张座位表再写进 Redis，是百毫秒级甚至秒级的重活；
+     * 而冷缓存正好发生在开票那一下——把它放在锁内做，第一批请求会把本地锁占满，
+     * 后面所有请求在 tryLock(3 秒) 上排队失败（70005）。
+     * <p>
+     * 这两个加载方法内部各自有防并发：
+     * {@code seatService.selectSeatResolution} 带 {@code @ServiceLock(Read)} +
+     * ReentrantLock(GET_SEAT_LOCK) 双重检查，
+     * {@code getRedisRemainNumberResolution} 也带读锁，
+     * 所以锁外并发调用是安全的：同一个票档只会有一个请求真的去读库，其余直接命中缓存或走双重检查的快路径。
+     *
+     * @param programOrderCreateDto 订单创建参数
+     */
+    public void ensureProgramCacheReady(ProgramOrderCreateDto programOrderCreateDto) {
+        ProgramShowTime programShowTime =
+                programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(programOrderCreateDto.getProgramId());
+        for (TicketCategoryVo ticketCategory : getTicketCategoryList(programOrderCreateDto, programShowTime.getShowTime())) {
+            ensureTicketCategoryCache(programOrderCreateDto.getProgramId(), ticketCategory.getId(),
+                    programShowTime.getShowTime());
+        }
+    }
+
+    /**
+     * 单个票档的缓存就绪检查：缺失才加载，已就绪则只花几次 hasKey 的代价。
+     * <p>
+     * 锁外（{@link #ensureProgramCacheReady}）和锁内（{@link #createOrderOperateProgramCacheResolution}）都会调它：
+     * 锁外是先手，保证正常路径不会在临界区里做重活；锁内那次是兜底，
+     * 防止"预热之后、进锁之前"这一小段里缓存又失效（正常路径下这里只会命中缓存，不走加载）。
+     */
+    private void ensureTicketCategoryCache(Long programId, Long ticketCategoryId, Date showTime) {
+        //座位缓存已预热时跳过全量拉取：该 hash 每档 2 万 field，全量读+JSON 反序列化开销大
+        if (!hasSeatResolutionCache(programId, ticketCategoryId)) {
+            seatService.selectSeatResolution(programId, ticketCategoryId,
+                    DateUtils.countBetweenSecond(DateUtils.now(), showTime), TimeUnit.SECONDS);
+        }
+        //余票缓存已预热时跳过：getRedisRemainNumberResolution 带 @ServiceLock(Read) 分布式读锁，
+        //每次调用会获取 Redisson 读锁；返回值此处未使用，仅需确保缓存存在。
+        if (!redisCache.hasKey(RedisKeyBuild.createRedisKey(
+                RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programId, ticketCategoryId))) {
+            ticketCategoryService.getRedisRemainNumberResolution(programId, ticketCategoryId);
+        }
+    }
+
+    /**
      * 执行 Lua 脚本完成 Redis 缓存原子操作。
-     * 预热票档/座位缓存 → 构造 Lua 参数 → 原子扣减余票 + 锁定座位 + 写入操作记录。
+     * 构造 Lua 参数 → 原子扣减余票 + 锁定座位 + 写入操作记录。
+     * <p>
+     * 缓存就绪由调用方负责（{@link #ensureProgramCacheReady}）——正常路径下这里拿到缓存直接扣减；
+     * 这里仍保留一次兜底检查，但它是防御性的，不应该成为常规路径。
      *
      * @param programOrderCreateDto 订单创建参数
      * @return 包含操作标识与已锁定座位列表的临时数据
@@ -306,22 +355,10 @@ public class ProgramOrderService {
         //查询对应的票档类型
         List<TicketCategoryVo> getTicketCategoryList =
                 getTicketCategoryList(programOrderCreateDto, programShowTime.getShowTime());
-        //遍历得到的票档
+        //锁内兜底：正常路径下 ensureProgramCacheReady 已经把缓存准备好了，这里只会命中缓存
         for (TicketCategoryVo ticketCategory : getTicketCategoryList) {
-            Long ticketCategoryId = ticketCategory.getId();
-            //座位缓存已预热时跳过全量拉取：该 hash 每档 2 万 field，全量读+JSON 反序列化开销大，
-            //在锁内执行会拉长锁持有时间、放大锁竞争失败（70005）。仅缓存缺失时预热。
-            if (!hasSeatResolutionCache(programOrderCreateDto.getProgramId(), ticketCategoryId)) {
-                seatService.selectSeatResolution(programOrderCreateDto.getProgramId(), ticketCategoryId,
-                        DateUtils.countBetweenSecond(DateUtils.now(), programShowTime.getShowTime()), TimeUnit.SECONDS);
-            }
-            //余票缓存已预热时跳过：getRedisRemainNumberResolution 带 @ServiceLock(Read) 分布式读锁，
-            //锁内每次调用会获取 Redisson 读锁拉长锁持有时间；返回值此处未使用，仅需确保缓存存在。
-            if (!redisCache.hasKey(RedisKeyBuild.createRedisKey(
-                    RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programOrderCreateDto.getProgramId(), ticketCategoryId))) {
-                ticketCategoryService.getRedisRemainNumberResolution(
-                        programOrderCreateDto.getProgramId(), ticketCategoryId);
-            }
+            ensureTicketCategoryCache(programOrderCreateDto.getProgramId(), ticketCategory.getId(),
+                    programShowTime.getShowTime());
         }
         Long programId = programOrderCreateDto.getProgramId();
         List<SeatDto> seatDtoList = programOrderCreateDto.getSeatDtoList();
@@ -353,6 +390,12 @@ public class ProgramOrderService {
                 //未售卖座位的hash的key
                 seatDatajsonObject.put("seatNoSoldHashKey", RedisKeyBuild.createRedisKey(
                         RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH, programId, ticketCategoryId).getRelKey());
+                //锁定/已售集合的 key：座位被锁后就会从未售集合里删掉，
+                //Lua 失败时靠这两个 key 把“已被抢”和“不存在”区分开
+                seatDatajsonObject.put("seatLockHashKey", RedisKeyBuild.createRedisKey(
+                        RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH, programId, ticketCategoryId).getRelKey());
+                seatDatajsonObject.put("seatSoldHashKey", RedisKeyBuild.createRedisKey(
+                        RedisKeyManage.PROGRAM_SEAT_SOLD_RESOLUTION_HASH, programId, ticketCategoryId).getRelKey());
                 //座位数据
                 seatDatajsonObject.put("seatDataList", JSON.toJSONString(entry.getValue()));
                 addSeatDatajsonArray.add(seatDatajsonObject);
@@ -414,6 +457,12 @@ public class ProgramOrderService {
                 JSONObject seatDatajsonObject = new JSONObject();
                 seatDatajsonObject.put("seatNoSoldHashKey", RedisKeyBuild.createRedisKey(
                         RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH, programId, ticketCategoryId).getRelKey());
+                //锁定/已售集合的 key：座位被锁后就会从未售集合里删掉，
+                //Lua 失败时靠这两个 key 把“已被抢”和“不存在”区分开
+                seatDatajsonObject.put("seatLockHashKey", RedisKeyBuild.createRedisKey(
+                        RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH, programId, ticketCategoryId).getRelKey());
+                seatDatajsonObject.put("seatSoldHashKey", RedisKeyBuild.createRedisKey(
+                        RedisKeyManage.PROGRAM_SEAT_SOLD_RESOLUTION_HASH, programId, ticketCategoryId).getRelKey());
                 seatDatajsonObject.put("seatDataList", JSON.toJSONString(matchedSeatList.stream()
                         .map(seatVo -> {
                             SeatDto seatDto = new SeatDto();
