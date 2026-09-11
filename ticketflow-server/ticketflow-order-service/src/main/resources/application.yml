@@ -47,17 +47,16 @@ spring:
   cloud:
     nacos:
       discovery:
-        server-addr: 127.0.0.1:8848
-        ip: 127.0.0.1
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        ip: ${NACOS_DISCOVERY_IP:127.0.0.1}
   kafka:
-    bootstrap-servers: 127.0.0.1:9092
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
     consumer:
       #默认的消费组ID
       group-id: create_order_data
-      #是否自动提交offset
-      enable-auto-commit: true
-      #提交offset延时
-      auto-commit-interval: 200
+      #关闭自动提交：改为"一批处理成功后再提交 offset"（见下面 listener.ack-mode）
+      #消费失败由 DefaultErrorHandler 退避重试，重试穷尽后写 DISCARD_ORDER 交对账
+      enable-auto-commit: false
       # 当kafka中没有初始offset或offset超出范围时将自动重置offset
       # earliest:重置为分区中最小的offset;
       # latest:重置为分区中最新的offset(消费分区中新产生的数据);
@@ -66,6 +65,9 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       topic: create_order
+    listener:
+      # 一批消费记录全部处理成功后才提交 offset（至少一次语义），配合错误处理器实现退避重试
+      ack-mode: batch
       
 mybatis-plus:
   mapper-locations: classpath:mapper/*.xml
