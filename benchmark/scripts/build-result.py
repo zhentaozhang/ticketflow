@@ -138,6 +138,12 @@ def main():
     print(f"  业务失败={business_failures} protocol_no_json={no_json} "
           f"对账 gap={gap} 落库差额={order_delta}")
 
+    # 防误读：受理成功但一条都没落库——这在物理上不可能是"性能结果"，一定是环境故障
+    # （典型：order-service 调不通 program-service、座位 CSV 过期、消费端消息被成批丢弃）
+    if ok > 0 and order_delta == 0:
+        print(f"  \u26a0\ufe0f 受理成功 {ok} 条但落库 0 条：先查服务发现/Feign、丢弃队列（discard_order）、"
+              f"座位 CSV 是否与当前数据一致——不要当成性能结论")
+
 
 if __name__ == "__main__":
     main()
