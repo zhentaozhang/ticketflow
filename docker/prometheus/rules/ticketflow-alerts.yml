@@ -1,0 +1,165 @@
+# =============================================================================
+# TicketFlow 业务告警规则（SLO 驱动，分级 P0/P1/P2）
+#
+# 说明：
+#   * 指标口径与 docs/observability/02-指标词典与告警设计.md 同名联动；
+#   * P0 = 资损/正确性风险（库存不一致、对账停摆、支付回调丢失），必须即时人工介入。
+#   加载方式见 docker-compose.yml（prometheus rule_files + rules volume 挂载）。
+#
+# 阈值从哪来（被问“这个阈值怎么定的”时按这三类回答，不要编）：
+#   ① 【推导】从配置算出来的，不是拍的：
+#        - OrderCreateDelayHigh 的 30 秒 = 消费端丢弃闸（MESSAGE_DELAY_TIME = 60s）的一半；
+#   ② 【判据选择】阈值大小不重要、判据类型重要：
+#        - 正确性类（库存守恒、支付回调丢失）用“出现即告警”（increase > 0），因为不存在“轻微不一致”；
+#        - 有正常失败率的（建单失败、Lua 执行异常）才用“持续 + 次数”防抖动；
+#        - “任务根本没跑”用 absent_over_time（不执行就不会产生 error，盯 error 计数是发现不了的）；
+#   ③ 【待校准】下面标了“阈值是初值”的，必须用 benchmark 的压测拐点校准
+#        （compare-report.sh 会标出端到端成功率首次跌破 99% / 95% 的档位）。没校准过就不当基线用。
+# =============================================================================
+groups:
+  - name: ticketflow.business
+    rules:
+      # ---- P0：库存一致性（正确性指标，出现即告警） ----
+      - alert: StockConsistencyViolation
+        expr: increase(ticketflow_v5_stock_consistency_violation[5m]) > 0
+        for: 1m
+        labels:
+          severity: P0
+        annotations:
+          summary: "V5 Redis/DB 库存守恒异常"
+          description: "programId={{ $labels.programId }} 在 5 分钟内出现库存守恒偏差，需立即核对 Redis 流水与 DB 订单（runbook: docs/observability/02-指标词典与告警设计.md）"
+
+      # ---- P0：对账任务报错 或 长时间停摆（补偿链路可能中断） ----
+      - alert: ReconciliationTaskError
+        expr: increase(ticketflow_reconciliation_task_total{result="error"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: P0
+        annotations:
+          summary: "对账任务执行报错"
+          description: "最近 15 分钟对账任务出现错误，补偿链路可能中断，需检查 order-service ReconciliationTask"
+
+      - alert: ReconciliationTaskStalled
+        expr: absent_over_time(ticketflow_reconciliation_task_total[20m])
+        for: 10m
+        labels:
+          severity: P0
+        annotations:
+          summary: "对账任务 20 分钟无任何执行结果"
+          description: "ticketflow_reconciliation_task_total 超过 20 分钟无数据：任务可能未调度或服务异常（每分钟一轮）"
+
+      # ---- P1：单轮被跳过（上一轮还没跑完，任务单线程不排队） ----
+      # 跳一轮本身不丢数据（下一轮扫同一个时间窗口），但连续跳过说明单轮对账耗时超过 1 分钟，补偿在积压
+      - alert: ReconciliationTaskSkipped
+        expr: increase(ticketflow_reconciliation_task_total{result="skipped"}[15m]) > 3
+        for: 5m
+        labels:
+          severity: P1
+        annotations:
+          summary: "对账单轮连续被跳过"
+          description: "15 分钟内有 {{ $value }} 轮被跳过，说明上一轮对账还没跑完就到了下一轮（调度间隔 1 分钟）。需查对账耗时、programClient.select 与下游 DB/Redis"
+
+      # ---- P1：下单链路异常 ----
+      # ---- P1：异步建单失败率偏高 ----
+      # 【待校准】5 次 / 5 分钟是初值：应按真实流量下的正常失败率基线校准。
+      - alert: OrderCreateFailRateHigh
+        expr: increase(ticketflow_order_create_fail_total[5m]) > 5
+        for: 3m
+        labels:
+          severity: P1
+        annotations:
+          summary: "异步建单失败率偏高"
+          description: "5 分钟新增建单失败 {{ $value }} 次（reason={{ $labels.reason }}），查 Kafka 消费与 DISCARD_ORDER（runbook: docs/observability/DEVLOG-可观测性改造日记.md）"
+
+      - alert: StockDeductScriptError
+        expr: increase(ticketflow_program_stock_deduct_total{result="error"}[5m]) > 0
+        for: 3m
+        labels:
+          severity: P1
+        annotations:
+          summary: "Lua 扣减脚本执行异常"
+          description: "{{ $labels.version }} 扣减脚本出现执行异常，检查 Redis 可用性与 Lua 脚本（限购/库存不足属业务正常拒绝，不在此列）"
+
+      # ---- P1：支付对账发现“渠道收了钱但本地订单已取消” ----
+      # 出现就说明回调在丢：钱收了、单却被取消了。已经自动退款，但必须查回调链路。
+      - alert: PaymentCallbackLost
+        expr: increase(ticketflow_payment_reconcile_total{result="refunded"}[30m]) > 0
+        for: 1m
+        labels:
+          severity: P1
+        annotations:
+          summary: "支付回调丢失：已自动退款 {{ $value }} 笔"
+          description: "支付对账发现渠道已收款、本地订单已取消的订单，说明回调在丢。查渠道回调地址、验签日志与网络"
+
+      # ---- P1：支付对账本身处理不了（查渠道失败 / 退款失败） ----
+      - alert: PaymentReconcileFailed
+        expr: increase(ticketflow_payment_reconcile_total{result=~"refund_failed|check_failed"}[30m]) > 0
+        for: 5m
+        labels:
+          severity: P1
+        annotations:
+          summary: "支付对账存在未处理的订单"
+          description: "有 {{ $value }} 笔订单没能完成支付对账（查渠道或退款失败），会持续重试；持续出现需查支付服务与渠道接口"
+
+      # ---- P1：异步下单“端到端落库率”偏低 ----
+      # 分子 = 真的落库了；分母 = 受理成功（Lua 扣减成功）。异步架构下这两个数不是一回事，
+      # 只看受理成功率会得到一个好看但不可信的数字。阈值 99% 是初值，
+      # 要按 benchmark 的“端到端成功率”拐点校准（benchmark/README）。
+      - alert: OrderLandingRateLow
+        expr: |
+          sum(rate(ticketflow_order_created_total[5m]))
+            / sum(rate(ticketflow_program_stock_deduct_total{result="success"}[5m])) < 0.99
+        for: 5m
+        labels:
+          severity: P1
+        annotations:
+          summary: "异步下单端到端落库率低于 99%"
+          description: "受理成功里只有 {{ $value | humanizePercentage }} 落库。查建单失败原因、DISCARD_ORDER 积压与消费延迟"
+
+      # ---- P2：消费延迟逼近丢弃闸 ----
+      # 阈值是“推导”出来的，不是拍的：消费者会在消息延迟超过 60 秒时主动丢弃（MESSAGE_DELAY_TIME），
+      # 所以 p99 到它的一半（30 秒）就该预警——离丢弃只剩一倍余量。
+      - alert: OrderCreateDelayHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(ticketflow_order_create_delay_seconds_bucket[5m]))) > 30
+        for: 5m
+        labels:
+          severity: P2
+        annotations:
+          summary: "建单消息消费延迟 p99 超过 30 秒（丢弃闸是 60 秒）"
+          description: "消息 {{ $value }}s 才被处理，已过一半的丢弃窗口。查消费能力（分区/消费者数）与下游 MySQL 写入"
+
+      # ---- P2：Kafka 消费积压（条数视角） ----
+      # 指标由 Spring Boot 的 Kafka 客户端指标自动导出（Micrometer），标签含 application/topic/partition。
+      # 阈值 1000 条是初值，必须按压测基线与 topic 吞吐校准；它只在消费活跃时报数据，
+      # 空闲时无 series，所以不会在没流量时误报。
+      - alert: KafkaConsumerLagHigh
+        expr: max by (topic) (kafka_consumer_fetch_manager_records_lag_max{application="order-service"}) > 1000
+        for: 5m
+        labels:
+          severity: P2
+        annotations:
+          summary: "建单消费积压超过 1000 条"
+          description: "topic={{ $labels.topic }} 积压 {{ $value }} 条。先看 lag 是否持续上涨，再判断是加消费者、扩分区还是下游变慢"
+
+      # ---- P2：容量预警（阈值需按压测 P99 基线校准） ----
+      # ---- P2：容量预警 ----
+      # 【待校准】100ms 是初值：应按 Lua 扣减 P99 的压测基线校准（当前值只能当“明显异常”的粗筛）。
+      - alert: StockDeductP99High
+        expr: histogram_quantile(0.99, sum(rate(ticketflow_program_stock_deduct_duration_seconds_bucket[5m])) by (le, version)) > 0.1
+        for: 5m
+        labels:
+          severity: P2
+        annotations:
+          summary: "Lua 扣减 P99 超过 100ms"
+          description: "{{ $labels.version }} 扣减 P99={{ $value }}s，疑似 Redis 热点/锁竞争，关注容量拐点"
+
+      # ---- P2：对账补偿量突增 ----
+      # 【待校准】100 个 / 5 分钟是初值；正常基线应接近 0，先当“面在扩大”的信号看，不必纠结具体数字。
+      - alert: ReconciliationCompensateSurge
+        expr: increase(ticketflow_reconciliation_compensate_total[5m]) > 100
+        for: 5m
+        labels:
+          severity: P2
+        annotations:
+          summary: "对账补偿量突增"
+          description: "5 分钟补偿 {{ $value }} 个节目，说明上游积压/丢消息面扩大，建议排查 Kafka 消费与 DISCARD_ORDER 积压"

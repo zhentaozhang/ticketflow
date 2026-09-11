@@ -2,9 +2,12 @@ package com.ticketflow.controller;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.ticketflow.common.ApiResponse;
+import com.ticketflow.domain.OrderTraceResult;
 import com.ticketflow.dto.OrderPageManageDto;
 import com.ticketflow.dto.RecordManageDto;
+import com.ticketflow.dto.OrderGetDto;
 import com.ticketflow.service.OrderManageService;
+import com.ticketflow.service.OrderTraceService;
 import com.ticketflow.vo.DiscardOrderManageVo;
 import com.ticketflow.vo.OrderManageVo;
 import com.ticketflow.vo.RecordOrderManageVo;
@@ -28,6 +31,9 @@ public class OrderManageController {
     @Autowired
     private OrderManageService orderManageService;
 
+    @Autowired
+    private OrderTraceService orderTraceService;
+
     
 
     @Operation(summary  = "操作记录分页列表")
@@ -36,6 +42,12 @@ public class OrderManageController {
         return ApiResponse.ok(orderManageService.recordPage(recordManageDto));
     }
     
+    @Operation(summary  = "单笔订单排查视图（订单/流水/丢弃/待裁决 一次看全）")
+    @PostMapping(value = "/trace")
+    public ApiResponse<OrderTraceResult> trace(@Valid @RequestBody OrderGetDto orderGetDto) {
+        return ApiResponse.ok(orderTraceService.getOrderTrace(orderGetDto.getOrderNumber()));
+    }
+
     @Operation(summary  = "查看订单分页列表")
     @PostMapping(value = "/order/page")
     public ApiResponse<IPage<OrderManageVo>> orderPage(@Valid @RequestBody OrderPageManageDto orderPageManageDto) {
