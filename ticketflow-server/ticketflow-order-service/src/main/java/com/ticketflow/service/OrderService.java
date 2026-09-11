@@ -15,7 +15,10 @@ import com.ticketflow.client.ProgramClient;
 import com.ticketflow.client.UserClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
+import com.ticketflow.domain.DiscardOrder;
 import com.ticketflow.domain.OrderCreateDomain;
+import com.ticketflow.domain.OrderTraceResult;
+import com.ticketflow.domain.PendingOrder;
 import com.ticketflow.domain.OrderCreateMq;
 import com.ticketflow.domain.SeatIdAndTicketUserIdDomain;
 import com.ticketflow.dto.AccountOrderCountDto;
@@ -45,8 +48,10 @@ import com.ticketflow.enums.BusinessStatus;
 import com.ticketflow.enums.OrderStatus;
 import com.ticketflow.enums.PayBillStatus;
 import com.ticketflow.enums.PayChannel;
+import com.ticketflow.enums.PaymentReconcileResult;
 import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.enums.RecordType;
+import com.ticketflow.enums.ReconciliationStatus;
 import com.ticketflow.enums.SellStatus;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.mapper.OrderMapper;
@@ -114,62 +119,62 @@ import static com.ticketflow.core.RepeatExecuteLimitConstants.CREATE_PROGRAM_ORD
 
 /**
  * 订单服务核心逻辑，覆盖完整订单生命周期：
- *   创建（V2/V3 同步/V4 异步三种策略统一入口）
- *   支付回调（支付宝 notify 签名校验 → 状态流转）
- *   取消（延迟队列超时 → 状态回滚）
- *   对账（补偿记录写回、清理过期 lock 占位）
- *   管理（后台批量关闭、重置调度）
+ * 创建（V2/V3 同步/V4 异步三种策略统一入口）
+ * 支付回调（支付宝 notify 签名校验 → 状态流转）
+ * 取消（延迟队列超时 → 状态回滚）
+ * 对账（补偿记录写回、清理过期 lock 占位）
+ * 管理（后台批量关闭、重置调度）
  */
 @Slf4j
 @Service
 public class OrderService extends ServiceImpl<OrderMapper, Order> {
-    
+
     @Autowired
     private UidGenerator uidGenerator;
-    
+
     @Autowired
     private OrderMapper orderMapper;
-    
+
     @Autowired
     private OrderTicketUserMapper orderTicketUserMapper;
-    
+
     @Autowired
     private OrderTicketUserService orderTicketUserService;
-    
+
     @Autowired
     private OrderTicketUserRecordService orderTicketUserRecordService;
-    
+
     @Autowired
     private OrderProgramCacheResolutionOperate orderProgramCacheResolutionOperate;
-    
+
     @Autowired
     private RedisCache redisCache;
-    
+
     @Autowired
     private PayClient payClient;
-    
+
     @Autowired
     private UserClient userClient;
-    
+
     @Autowired
     private OrderProperties orderProperties;
-    
+
     @Lazy
     @Autowired
     private OrderService orderService;
-    
+
     @Autowired
     private ServiceLockTool serviceLockTool;
-    
+
     @Autowired
     private ProgramClient programClient;
-    
+
     @Autowired
     private OrderTicketUserRecordMapper orderTicketUserRecordMapper;
-    
+
     @Autowired
     private OrderProgramMapper orderProgramMapper;
-    
+
     @Autowired
     private DelayOperateProgramDataSend delayOperateProgramDataSend;
 
@@ -179,7 +184,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         BeanUtils.copyProperties(orderCreateDto, orderCreateDomain);
         return doCreate(orderCreateDomain);
     }
-    
+
     @Transactional(rollbackFor = Exception.class)
     public String createByMq(OrderCreateMq orderCreateMq) {
         OrderCreateDomain orderCreateDomain = new OrderCreateDomain();
@@ -197,7 +202,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             throw new TicketFlowFrameException(BaseCode.ORDER_EXIST);
         }
         Order order = new Order();
-        BeanUtil.copyProperties(orderCreateDomain,order);
+        BeanUtil.copyProperties(orderCreateDomain, order);
         order.setId(uidGenerator.getUid());
         order.setDistributionMode("电子票");
         order.setTakeTicketMode("请使用购票人身份证直接入场");
@@ -207,12 +212,12 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         List<OrderTicketUserRecord> orderTicketUserRecordList = new ArrayList<>();
         for (OrderTicketUserCreateDto orderTicketUserCreateDto : orderCreateDomain.getOrderTicketUserCreateDtoList()) {
             OrderTicketUser orderTicketUser = new OrderTicketUser();
-            BeanUtil.copyProperties(orderTicketUserCreateDto,orderTicketUser);
+            BeanUtil.copyProperties(orderTicketUserCreateDto, orderTicketUser);
             orderTicketUser.setId(uidGenerator.getUid());
             orderTicketUserList.add(orderTicketUser);
 
             OrderTicketUserRecord orderTicketUserRecord = new OrderTicketUserRecord();
-            BeanUtil.copyProperties(orderTicketUserCreateDto,orderTicketUserRecord);
+            BeanUtil.copyProperties(orderTicketUserCreateDto, orderTicketUserRecord);
             orderTicketUserRecord.setIdentifierId(orderCreateDomain.getIdentifierId());
             orderTicketUserRecord.setTicketUserOrderId(orderTicketUser.getId());
             orderTicketUserRecord.setRecordTypeCode(RecordType.REDUCE.getCode());
@@ -263,20 +268,21 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         }
         return String.valueOf(order.getOrderNumber());
     }
-    
+
     /**
      * 订单取消（幂等入口）。
+     *
      * @RepeatExecuteLimit 防止相同 orderNumber 重复执行
      * @ServiceLock(Reentrant) 防止并发取消 + 支付同时进入
      */
-    @RepeatExecuteLimit(name = CANCEL_PROGRAM_ORDER,keys = {"#orderCancelDto.orderNumber"})
-    @ServiceLock(name = UPDATE_ORDER_STATUS_LOCK,keys = {"#orderCancelDto.orderNumber"})
+    @RepeatExecuteLimit(name = CANCEL_PROGRAM_ORDER, keys = {"#orderCancelDto.orderNumber"})
+    @ServiceLock(name = UPDATE_ORDER_STATUS_LOCK, keys = {"#orderCancelDto.orderNumber"})
     @Transactional(rollbackFor = Exception.class)
-    public boolean cancel(OrderCancelDto orderCancelDto){
-        updateOrderRelatedData(orderCancelDto.getOrderNumber(),OrderStatus.CANCEL);
+    public boolean cancel(OrderCancelDto orderCancelDto) {
+        updateOrderRelatedData(orderCancelDto.getOrderNumber(), OrderStatus.CANCEL);
         return true;
     }
-    
+
     public String pay(OrderPayDto orderPayDto) {
         Long orderNumber = orderPayDto.getOrderNumber();
         LambdaQueryWrapper<Order> orderLambdaQueryWrapper =
@@ -297,6 +303,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         if (orderPayDto.getPrice().compareTo(order.getOrderPrice()) != 0) {
             throw new TicketFlowFrameException(BaseCode.PAY_PRICE_NOT_EQUAL_ORDER_PRICE);
         }
+        // 发起支付时把渠道落到订单上，否则事后没有任何地方知道“这一单该找哪个渠道对账”。
+        // 这也是支付对账任务能扫出“已取消但钱可能到了”的订单的前提（pay_order_type 之前一直没被写过）。
+        PayChannel payChannel = PayChannel.getByValue(orderPayDto.getChannel());
+        if (Objects.nonNull(payChannel)) {
+            Order updateOrder = new Order();
+            updateOrder.setPayOrderType(payChannel.getCode());
+            try {
+                orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class)
+                        .eq(Order::getOrderNumber, orderNumber));
+            } catch (Exception e) {
+                // 这只是一个用于事后对账的辅助字段，写失败不能阻断支付
+                log.error("支付渠道落库失败 orderNumber : {} channel : {}", orderNumber, orderPayDto.getChannel(), e);
+            }
+        }
         PayDto payDto = getPayDto(orderPayDto, orderNumber);
         ApiResponse<String> payResponse = payClient.commonPay(payDto);
         if (!Objects.equals(payResponse.getCode(), BaseCode.SUCCESS.getCode())) {
@@ -304,7 +324,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         }
         return payResponse.getData();
     }
-    
+
     private PayDto getPayDto(OrderPayDto orderPayDto, Long orderNumber) {
         PayDto payDto = new PayDto();
         payDto.setOrderNumber(String.valueOf(orderNumber));
@@ -321,12 +341,13 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         payDto.setReturnUrl(orderProperties.getOrderPayReturnUrl());
         return payDto;
     }
-    
+
     /**
      * 支付后订单检查，以订单编号加锁，防止多次更新
-     * */
-    @ServiceLock(name = UPDATE_ORDER_STATUS_LOCK,keys = {"#orderPayCheckDto.orderNumber"})
-    public OrderPayCheckVo payCheck(OrderPayCheckDto orderPayCheckDto){
+     *
+     */
+    @ServiceLock(name = UPDATE_ORDER_STATUS_LOCK, keys = {"#orderPayCheckDto.orderNumber"})
+    public OrderPayCheckVo payCheck(OrderPayCheckDto orderPayCheckDto) {
         OrderPayCheckVo orderPayCheckVo = new OrderPayCheckVo();
         LambdaQueryWrapper<Order> orderLambdaQueryWrapper =
                 Wrappers.lambdaQuery(Order.class).eq(Order::getOrderNumber, orderPayCheckDto.getOrderNumber());
@@ -334,7 +355,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         if (Objects.isNull(order)) {
             throw new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST);
         }
-        BeanUtil.copyProperties(order,orderPayCheckVo);
+        BeanUtil.copyProperties(order, orderPayCheckVo);
         if (Objects.equals(order.getOrderStatus(), OrderStatus.CANCEL.getCode())) {
             RefundDto refundDto = new RefundDto();
             refundDto.setOrderNumber(String.valueOf(order.getOrderNumber()));
@@ -347,16 +368,16 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 Order updateOrder = new Order();
                 updateOrder.setEditTime(DateUtils.now());
                 updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
-                orderMapper.update(updateOrder,Wrappers.lambdaUpdate(Order.class).eq(Order::getOrderNumber, order.getOrderNumber()));
+                orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class).eq(Order::getOrderNumber, order.getOrderNumber()));
                 // 退款成功视图才置退款状态，失败保持数据库的取消状态，下次轮询重试退款
                 orderPayCheckVo.setOrderStatus(OrderStatus.REFUND.getCode());
                 orderPayCheckVo.setCancelOrderTime(DateUtils.now());
-            }else {
-                log.error("pay服务退款失败 dto : {} response : {}",JSON.toJSONString(refundDto),JSON.toJSONString(response));
+            } else {
+                log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
             }
             return orderPayCheckVo;
         }
-        
+
         TradeCheckDto tradeCheckDto = new TradeCheckDto();
         tradeCheckDto.setOutTradeNo(String.valueOf(orderPayCheckDto.getOrderNumber()));
         tradeCheckDto.setChannel(Optional.ofNullable(PayChannel.getRc(orderPayCheckDto.getPayChannelType()))
@@ -375,38 +396,38 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 try {
                     if (Objects.equals(payBillStatus, PayBillStatus.PAY.getCode())) {
                         orderPayCheckVo.setPayOrderTime(DateUtils.now());
-                        orderService.updateOrderRelatedData(order.getOrderNumber(),OrderStatus.PAY);
-                    }else if (Objects.equals(payBillStatus, PayBillStatus.CANCEL.getCode())) {
+                        orderService.updateOrderRelatedData(order.getOrderNumber(), OrderStatus.PAY);
+                    } else if (Objects.equals(payBillStatus, PayBillStatus.CANCEL.getCode())) {
                         orderPayCheckVo.setCancelOrderTime(DateUtils.now());
-                        orderService.updateOrderRelatedData(order.getOrderNumber(),OrderStatus.CANCEL);
+                        orderService.updateOrderRelatedData(order.getOrderNumber(), OrderStatus.CANCEL);
                     }
-                }catch (Exception e) {
-                    log.warn("updateOrderRelatedData warn message",e);
+                } catch (Exception e) {
+                    log.warn("updateOrderRelatedData warn message", e);
                 }
             }
-        }else {
+        } else {
             throw new TicketFlowFrameException(BaseCode.PAY_TRADE_CHECK_ERROR);
         }
         return orderPayCheckVo;
     }
-    
-    
+
+
     /**
      * 支付宝异步通知处理。
      * 手动 ReentrantLock（而非 @ServiceLock）：先加锁（订单号已知），
      * 锁内调 payClient.notify() 验签 + 幂等，再执行退款 / updateOrderRelatedData。
      * 如果订单已取消 → 自动退款（延迟订单关闭场景）。
-     *
+     * <p>
      * ALIPAY_NOTIFY_SUCCESS_RESULT = "success"（支付宝要求的明文返回）
      */
-    public String alipayNotify(HttpServletRequest request){
+    public String alipayNotify(HttpServletRequest request) {
 
         Map<String, String> params = new HashMap<>(256);
         if (request instanceof final CustomizeRequestWrapper customizeRequestWrapper) {
             String requestBody = customizeRequestWrapper.getRequestBody();
             params = StringUtil.convertQueryStringToMap(requestBody);
         }
-        log.info("收到支付宝回调通知 params : {}",JSON.toJSONString(params));
+        log.info("收到支付宝回调通知 params : {}", JSON.toJSONString(params));
         String outTradeNo = params.get("out_trade_no");
         if (StringUtil.isEmpty(outTradeNo)) {
             return "failure";
@@ -422,7 +443,10 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
 
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, UPDATE_ORDER_STATUS_LOCK,
                 new String[]{outTradeNo});
-        lock.lock();
+        if (!tryLockOrderLock(lock, outTradeNo)) {
+            // 拿不到锁就不处理：回调线程不能被无限占用，让支付宝按重试阶梯再来
+            return ALIPAY_NOTIFY_FAILURE_RESULT;
+        }
         try {
             Order order = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class).eq(Order::getOrderNumber, orderNumber));
             if (Objects.isNull(order)) {
@@ -444,23 +468,9 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                             JSON.toJSONString(notifyDto), JSON.toJSONString(notifyResponse));
                     return ALIPAY_NOTIFY_FAILURE_RESULT;
                 }
-                RefundDto refundDto = new RefundDto();
-                refundDto.setOrderNumber(outTradeNo);
-                refundDto.setAmount(order.getOrderPrice());
-                refundDto.setChannel("alipay");
-                refundDto.setReason("延迟订单关闭");
-                ApiResponse<String> response = payClient.refund(refundDto);
-                if (response.getCode().equals(BaseCode.SUCCESS.getCode())) {
-                    Order updateOrder = new Order();
-                    updateOrder.setEditTime(DateUtils.now());
-                    updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
-                    orderMapper.update(updateOrder,Wrappers.lambdaUpdate(Order.class).eq(Order::getOrderNumber, outTradeNo));
-                    return ALIPAY_NOTIFY_SUCCESS_RESULT;
-                }else {
-                    log.error("pay服务退款失败 dto : {} response : {}",JSON.toJSONString(refundDto),JSON.toJSONString(response));
-                    // 退款失败返回 failure，让支付宝按重试周期继续回调，重试期间再次发起退款
-                    return ALIPAY_NOTIFY_FAILURE_RESULT;
-                }
+                // 退款失败返回 failure，让支付宝按重试周期继续回调，重试期间再次发起退款
+                return refundClosedOrder(outTradeNo, order.getOrderPrice(), PayChannel.ALIPAY.getValue())
+                        ? ALIPAY_NOTIFY_SUCCESS_RESULT : ALIPAY_NOTIFY_FAILURE_RESULT;
             }
 
 
@@ -478,13 +488,14 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             if (ALIPAY_NOTIFY_SUCCESS_RESULT.equals(notifyResponse.getData().getPayResult())) {
                 try {
                     orderService.updateOrderRelatedData(Long.parseLong(notifyResponse.getData().getOutTradeNo())
-                            ,OrderStatus.PAY);
-                }catch (Exception e) {
-                    log.warn("updateOrderRelatedData warn message",e);
+                            , OrderStatus.PAY);
+                } catch (Exception e) {
+                    return settlePayCallbackFailure(e, orderNumber, PayChannel.ALIPAY.getValue(),
+                            ALIPAY_NOTIFY_SUCCESS_RESULT, ALIPAY_NOTIFY_FAILURE_RESULT);
                 }
             }
             return notifyResponse.getData().getPayResult();
-        }finally {
+        } finally {
             lock.unlock();
         }
 
@@ -535,7 +546,10 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
 
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, UPDATE_ORDER_STATUS_LOCK,
                 new String[]{outTradeNo});
-        lock.lock();
+        if (!tryLockOrderLock(lock, outTradeNo)) {
+            // 拿不到锁就不处理：回调线程不能被无限占用，让微信按重试阶梯再来
+            return WX_NOTIFY_FAILURE_RESULT;
+        }
         try {
             Order order = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class)
                     .eq(Order::getOrderNumber, orderNumber));
@@ -543,139 +557,376 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 throw new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST);
             }
             // 订单已取消：自动退款（延迟订单关闭场景）
+            // 退款失败返回 FAIL，微信会重试回调；返回 SUCCESS 会导致退款永久丢失
             if (Objects.equals(order.getOrderStatus(), OrderStatus.CANCEL.getCode())) {
-                RefundDto refundDto = new RefundDto();
-                refundDto.setOrderNumber(outTradeNo);
-                refundDto.setAmount(order.getOrderPrice());
-                refundDto.setChannel(PayChannel.WX.getValue());
-                refundDto.setReason("延迟订单关闭");
-                ApiResponse<String> response = payClient.refund(refundDto);
-                if (response.getCode().equals(BaseCode.SUCCESS.getCode())) {
-                    Order updateOrder = new Order();
-                    updateOrder.setEditTime(DateUtils.now());
-                    updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
-                    orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class)
-                            .eq(Order::getOrderNumber, orderNumber));
-                } else {
-                    // 退款失败返回 FAIL，微信会重试回调；返回 SUCCESS 会导致退款永久丢失
-                    log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
-                    return WX_NOTIFY_FAILURE_RESULT;
-                }
-                return WX_NOTIFY_SUCCESS_RESULT;
+                return refundClosedOrder(outTradeNo, order.getOrderPrice(), PayChannel.WX.getValue())
+                        ? WX_NOTIFY_SUCCESS_RESULT : WX_NOTIFY_FAILURE_RESULT;
             }
             try {
                 orderService.updateOrderRelatedData(orderNumber, OrderStatus.PAY);
             } catch (Exception e) {
-                log.warn("updateOrderRelatedData warn message", e);
+                return settlePayCallbackFailure(e, orderNumber, PayChannel.WX.getValue(),
+                        WX_NOTIFY_SUCCESS_RESULT, WX_NOTIFY_FAILURE_RESULT);
             }
             return WX_NOTIFY_SUCCESS_RESULT;
         } finally {
             lock.unlock();
         }
     }
-    
+
     /**
-     * 支付/取消的核心编排（事务瘦身版）：
-     * 事务内（本地 DB 写）:
-     * 1. 校验 orderStatus（仅 CANCEL / PAY）
-     * 2. 更新 Order status
-     * 3. 更新 OrderTicketUser status
-     * 4. 写入流水 OrderTicketUserRecord（CHANGE_STATUS / INCREASE）
-     * 事务提交后（afterCommit，失败仅记日志由对账兜底）：
-     * 5. 取消时 Redis 扣减 accountOrderCount
-     * 6. 调用 Lua（V1-V3）或 Lua + Feign（V4/V5）操作座位和库存缓存
-     *
-     * PS：V4/V5 路径走 Feign（programClient.operateProgramData → DB update），
-     * V1-V3 路径靠延迟队列 DelayOperateProgramDataSend 异步更新 DB；
-     * 远程调用全部移出事务：事务不再被 Feign RTT 占住 DB 连接，
-     * Feign 失败也不回滚订单状态流转。
+     * 支付回调获取订单锁的等待上限（秒）。
+     * 锁内只有一次本地事务加少量远程调用，正常在毫秒级；超过这个时间说明另一条流程卡住了。
      */
+    private static final long ORDER_LOCK_WAIT_SECONDS = 3L;
+
+    /**
+     * 支付对账（定时兜底用）：向渠道确认这一笔的真实结果，并只在“渠道确实收了钱”时收尾。
+     * <p>
+     * 要解决的问题：回调丢失时会出现“用户付了钱、订单却被超时取消”，
+     * 而唯一的发现途径就是<b>主动问渠道</b>——渠道侧确实有这笔交易，我们的回调没收到。
+     * <p>
+     * 两个刻意的设计：
+     * <ul>
+     *   <li><b>先查渠道再退款，不做“盲退”</b>。抢票场景里绝大多数被取消的订单是“用户根本没付钱”，
+     *       盲退不但无效（支付服务会因“账单不是已支付”而拒绝），还会把大量无效请求压到支付服务上；</li>
+     *   <li><b>不把订单“补成已支付”</b>。发现“渠道已支付 + 本地已取消”时只走退款：
+     *       这单被取消后座位可能已经卖给别人了，事后补成已支付会变成一票两卖，
+     *       退款是唯一安全的结果（和回调里的处理保持一致）。</li>
+     * </ul>
+     *
+     * @param order 待核对的订单（渠道从 {@code payOrderType} 取）
+     * @return 本次核对的结果，调用方据此更新对账状态与指标
+     */
+    public PaymentReconcileResult reconcilePayment(Order order) {
+        PayChannel payChannel = PayChannel.getRc(order.getPayOrderType());
+        if (Objects.isNull(payChannel)) {
+            // 从没发起过支付（发起支付时才会落 payOrderType），没有渠道可查
+            return PaymentReconcileResult.NO_CHANNEL;
+        }
+        TradeCheckDto tradeCheckDto = new TradeCheckDto();
+        tradeCheckDto.setOutTradeNo(String.valueOf(order.getOrderNumber()));
+        tradeCheckDto.setChannel(payChannel.getValue());
+        ApiResponse<TradeCheckVo> tradeCheckResponse;
+        try {
+            tradeCheckResponse = payClient.tradeCheck(tradeCheckDto);
+        } catch (Exception e) {
+            log.error("支付对账：查渠道异常 orderNumber : {}", order.getOrderNumber(), e);
+            return PaymentReconcileResult.CHECK_FAILED;
+        }
+        TradeCheckVo tradeCheckVo = tradeCheckResponse.getData();
+        if (!Objects.equals(tradeCheckResponse.getCode(), BaseCode.SUCCESS.getCode()) || Objects.isNull(tradeCheckVo)) {
+            log.error("支付对账：查渠道失败 orderNumber : {} response : {}",
+                    order.getOrderNumber(), JSON.toJSONString(tradeCheckResponse));
+            return PaymentReconcileResult.CHECK_FAILED;
+        }
+        // 渠道没收到钱：这是绝大多数“取消了但从未支付”的订单，不用做任何事
+        if (!tradeCheckVo.isSuccess()
+                || !Objects.equals(tradeCheckVo.getPayBillStatus(), PayBillStatus.PAY.getCode())) {
+            return PaymentReconcileResult.NOT_PAID;
+        }
+        // 渠道确实收了钱，而本地这单已经是已取消 —— 回调丢了才会出现的状态，退款
+        log.warn("支付对账：渠道已支付但本地订单已取消，进入退款 orderNumber : {}", order.getOrderNumber());
+        boolean refunded = refundClosedOrder(String.valueOf(order.getOrderNumber()),
+                order.getOrderPrice(), payChannel.getValue());
+        return refunded ? PaymentReconcileResult.REFUNDED : PaymentReconcileResult.REFUND_FAILED;
+    }
+
+    /**
+     * 更新支付对账状态。写入失败不回滚、也不抛异常：它只影响“会不会重复核对一遍”，不影响资金结果。
+     *
+     * @param orderNumber 订单号
+     * @param status      对账状态
+     */
+    public void markPaymentReconciled(Long orderNumber, ReconciliationStatus status) {
+        Order updateOrder = new Order();
+        updateOrder.setPayReconciliationStatus(status.getCode());
+        updateOrder.setEditTime(DateUtils.now());
+        try {
+            orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class)
+                    .eq(Order::getOrderNumber, orderNumber));
+        } catch (Exception e) {
+            log.error("支付对账状态更新失败 orderNumber : {} status : {}", orderNumber, status.getCode(), e);
+        }
+    }
+
+    /**
+     * 用带等待上限的方式拿订单锁。
+     * <p>
+     * 为什么不能 {@code lock.lock()} 无限等：支付回调的线程是<b>渠道的入账入口</b>，
+     * 而锁内还会调支付服务（对账/退款），Redis 慢、或者交易对方卡住时，
+     * 无限等待会把回调线程成片地挂在这里，进而拖垮整个服务的线程池——
+     * 连普通查询和对账任务都会一起受害。
+     * <p>
+     * 拿不到锁就返回 false，让渠道按它自己的重试阶梯再来：
+     * 渠道本来就有重试机制（我们也是靠它兜住“回调丢了”的情况），比我们死等划算。
+     *
+     * @return true = 已持有锁（调用方必须在 finally 里释放）；false = 没拿到，不要释放
+     */
+    private boolean tryLockOrderLock(RLock lock, String outTradeNo) {
+        try {
+            if (lock.tryLock(ORDER_LOCK_WAIT_SECONDS, TimeUnit.SECONDS)) {
+                return true;
+            }
+            log.warn("支付回调等待订单锁超时，交由渠道重试 outTradeNo : {}", outTradeNo);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("支付回调等待订单锁被中断，交由渠道重试 outTradeNo : {}", outTradeNo, e);
+        } catch (Exception e) {
+            log.error("支付回调获取订单锁异常，交由渠道重试 outTradeNo : {}", outTradeNo, e);
+        }
+        return false;
+    }
+
+    /**
+     * 判断异常是否属于“订单状态已经被另一条流程改掉”——这是并发仲裁的正常结果，不是执行失败。
+     * 条件更新没抢到（ORDER_STATUS_CHANGED），或者读到的状态已经不合法
+     * （ORDER_CANCEL / ORDER_PAY / ORDER_REFUND）都归到这一类。
+     */
+    private boolean isOrderStatusAlreadyChanged(Exception e) {
+        if (!(e instanceof TicketFlowFrameException ticketFlowFrameException)) {
+            return false;
+        }
+        Integer code = ticketFlowFrameException.getCode();
+        return Objects.equals(code, BaseCode.ORDER_STATUS_CHANGED.getCode())
+                || Objects.equals(code, BaseCode.ORDER_CANCEL.getCode())
+                || Objects.equals(code, BaseCode.ORDER_PAY.getCode())
+                || Objects.equals(code, BaseCode.ORDER_REFUND.getCode());
+    }
+
+    /**
+     * 支付回调里更新订单状态抛异常时的统一收尾。
+     * <p>
+     * 分两类：
+     * <ul>
+     *   <li>“状态已被另一条流程改掉”→ 按订单最新状态收尾（已取消就退款），应答成功；</li>
+     *   <li>真正的执行失败（事务已回滚，订单根本没更新）→ 应答失败让渠道重试。
+     *       这里不能应答成功：钱已经到账、订单却没动，告诉渠道“成功”等于把这笔支付永久丢掉。</li>
+     * </ul>
+     *
+     * @return 对渠道应答的结果
+     */
+    private String settlePayCallbackFailure(Exception e, Long orderNumber, String channel,
+                                            String successResult, String failureResult) {
+        if (isOrderStatusAlreadyChanged(e)) {
+            return settleWhenOrderStatusChanged(orderNumber, channel) ? successResult : failureResult;
+        }
+        log.error("支付回调更新订单状态失败，等待渠道重试 orderNumber : {} channel : {}", orderNumber, channel, e);
+        return failureResult;
+    }
+
+    /**
+     * 订单状态已经不在“未支付”时的收尾：按订单最新状态决定后续动作。
+     * 渠道刚确认支付成功，所以这里不能只记一条日志——
+     * 订单已被取消（延迟订单关闭）就必须退款，否则就是钱收了、票没给、也没人退。
+     *
+     * @return true = 已妥善处理（可对渠道应答成功）；false = 退款失败，需要渠道重试
+     */
+    private boolean settleWhenOrderStatusChanged(Long orderNumber, String channel) {
+        Order latest;
+        try {
+            latest = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class)
+                    .eq(Order::getOrderNumber, orderNumber));
+        } catch (Exception e) {
+            log.error("支付回调状态已被变更后查询订单失败 orderNumber : {}", orderNumber, e);
+            return false;
+        }
+        if (Objects.isNull(latest)) {
+            log.error("支付回调状态已被变更但订单不存在 orderNumber : {}", orderNumber);
+            return false;
+        }
+        if (Objects.equals(latest.getOrderStatus(), OrderStatus.CANCEL.getCode())) {
+            log.warn("支付已到账但订单已被取消，进入退款 orderNumber : {} channel : {}", orderNumber, channel);
+            return refundClosedOrder(String.valueOf(orderNumber), latest.getOrderPrice(), channel);
+        }
+        // 已被另一条支付回调置为已支付，或已退单：这笔支付已经处理过，不需要再动
+        log.info("支付回调状态已被变更，订单当前状态 {} orderNumber : {}",
+                latest.getOrderStatus(), orderNumber);
+        return true;
+    }
+
+    /**
+     * 对“支付已到账、但订单已关闭（已取消）”的订单发起退款，并把订单置为已退单。
+     * 退款失败必须返回 false 让渠道重试回调——应答成功会让这笔退款永久丢失。
+     */
+    private boolean refundClosedOrder(String outTradeNo, BigDecimal amount, String channel) {
+        RefundDto refundDto = new RefundDto();
+        refundDto.setOrderNumber(outTradeNo);
+        refundDto.setAmount(amount);
+        refundDto.setChannel(channel);
+        refundDto.setReason("延迟订单关闭");
+        ApiResponse<String> response = payClient.refund(refundDto);
+        if (!Objects.equals(response.getCode(), BaseCode.SUCCESS.getCode())) {
+            log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
+            return false;
+        }
+        Order updateOrder = new Order();
+        updateOrder.setEditTime(DateUtils.now());
+        updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
+        orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class)
+                .eq(Order::getOrderNumber, Long.parseLong(outTradeNo)));
+        log.info("订单已关闭，退款完成并置为已退单 outTradeNo : {}", outTradeNo);
+        return true;
+    }
+
+    // 支付/取消核心编排：
+    // 事务内只处理 Order、OrderTicketUser、流水等本地 DB 写操作；
+    // 事务提交后再执行 Redis、Lua、Feign 等非事务操作。
     @Transactional(rollbackFor = Exception.class)
-    public void updateOrderRelatedData(Long orderNumber,OrderStatus orderStatus){
+    public void updateOrderRelatedData(Long orderNumber, OrderStatus orderStatus) {
+
+        // 1. 只允许 PAY / CANCEL 两种状态变更。
         if (!(Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode()) ||
                 Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()))) {
-            throw new TicketFlowFrameException(  BaseCode.OPERATE_ORDER_STATUS_NOT_PERMIT);
+            throw new TicketFlowFrameException(BaseCode.OPERATE_ORDER_STATUS_NOT_PERMIT);
         }
+
+        // 2. 查询订单并校验当前状态是否合法，防止重复支付、重复取消。
         LambdaQueryWrapper<Order> orderLambdaQueryWrapper =
                 Wrappers.lambdaQuery(Order.class).eq(Order::getOrderNumber, orderNumber);
         Order order = orderMapper.selectOne(orderLambdaQueryWrapper);
         checkOrderStatus(order);
+
+        // 条件更新（CAS）的期望状态：本次迁移的前置状态必须仍然是它。
+        // checkOrderStatus 已经把“当前不是未支付”的情况拦掉了，所以这里取到的就是本次迁移的期望值。
+        Integer expectStatus = order.getOrderStatus();
+
+        // 3. 查询订单下的票务用户记录，后续状态更新和流水记录都基于此数据。
         LambdaQueryWrapper<OrderTicketUser> orderTicketUserLambdaQueryWrapper =
-                Wrappers.lambdaQuery(OrderTicketUser.class).eq(OrderTicketUser::getOrderNumber, order.getOrderNumber());
-        List<OrderTicketUser> orderTicketUserList = orderTicketUserMapper.selectList(orderTicketUserLambdaQueryWrapper);
+                Wrappers.lambdaQuery(OrderTicketUser.class)
+                        .eq(OrderTicketUser::getOrderNumber, order.getOrderNumber());
+        List<OrderTicketUser> orderTicketUserList =
+                orderTicketUserMapper.selectList(orderTicketUserLambdaQueryWrapper);
+
         if (CollectionUtil.isEmpty(orderTicketUserList)) {
             throw new TicketFlowFrameException(BaseCode.TICKET_USER_ORDER_NOT_EXIST);
         }
+
+        // 4. 准备 Order 和 OrderTicketUser 的状态更新。
         Order updateOrder = new Order();
         updateOrder.setId(order.getId());
         updateOrder.setOrderStatus(orderStatus.getCode());
+
         OrderTicketUser updateOrderTicketUser = new OrderTicketUser();
         updateOrderTicketUser.setOrderStatus(orderStatus.getCode());
 
         Integer recordTypeCode = RecordType.CHANGE_STATUS.getCode();
         String recordTypeValue = RecordType.CHANGE_STATUS.getValue();
+
         if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())) {
             updateOrder.setPayOrderTime(DateUtils.now());
             updateOrderTicketUser.setPayOrderTime(DateUtils.now());
         } else if (Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
             updateOrder.setCancelOrderTime(DateUtils.now());
             updateOrderTicketUser.setCancelOrderTime(DateUtils.now());
+
+            // 取消订单意味着释放资源，因此流水类型记录为 INCREASE。
             recordTypeCode = RecordType.INCREASE.getCode();
             recordTypeValue = RecordType.INCREASE.getValue();
         }
+
+        // 5. 事务内更新订单和订单票务状态。
+        // 主订单用条件更新：把步骤 2 读到的状态写进 WHERE，让数据库承担最后一道裁决。
+        // 分工：@ServiceLock 负责让同一订单的流程尽量不打架（降低竞争），
+        // 这里的前置状态条件负责最终正确性——即使锁在故障切换的窗口里失效，
+        // 两个状态迁移也不可能同时成功：影响行数为 1 的那个才是赢家。
         LambdaUpdateWrapper<Order> orderLambdaUpdateWrapper =
-                Wrappers.lambdaUpdate(Order.class).eq(Order::getOrderNumber, order.getOrderNumber());
-        int updateOrderResult = orderMapper.update(updateOrder,orderLambdaUpdateWrapper);
+                Wrappers.lambdaUpdate(Order.class)
+                        .eq(Order::getOrderNumber, order.getOrderNumber())
+                        .eq(Order::getOrderStatus, expectStatus);
+        int updateOrderResult = orderMapper.update(updateOrder, orderLambdaUpdateWrapper);
+
         LambdaUpdateWrapper<OrderTicketUser> orderTicketUserLambdaUpdateWrapper =
-                Wrappers.lambdaUpdate(OrderTicketUser.class).eq(OrderTicketUser::getOrderNumber, order.getOrderNumber());
+                Wrappers.lambdaUpdate(OrderTicketUser.class)
+                        .eq(OrderTicketUser::getOrderNumber, order.getOrderNumber());
         int updateTicketUserOrderResult =
-                orderTicketUserMapper.update(updateOrderTicketUser,orderTicketUserLambdaUpdateWrapper);
-        if (updateOrderResult <= 0 || updateTicketUserOrderResult <= 0) {
+                orderTicketUserMapper.update(updateOrderTicketUser, orderTicketUserLambdaUpdateWrapper);
+
+        // 主订单影响行数为 0：本次状态迁移没有抢到（状态已被另一条流程改掉），
+        // 这是并发仲裁的正常结果，不是故障，用独立错误码让调用方按订单最新状态收尾。
+        if (updateOrderResult <= 0) {
+            throw new TicketFlowFrameException(BaseCode.ORDER_STATUS_CHANGED);
+        }
+        // 购票人订单更新失败：数据层面的异常，回滚整个本地事务。
+        if (updateTicketUserOrderResult <= 0) {
             throw new TicketFlowFrameException(BaseCode.ORDER_CANAL_ERROR);
         }
+
+        // 6. 构建状态变更流水，同时记录订单对应的座位信息。
         List<SeatIdAndTicketUserIdDomain> seatIdAndTicketUserIdDomainList = new ArrayList<>();
         List<OrderTicketUserRecord> orderTicketUserRecordList = new ArrayList<>();
+
         for (OrderTicketUser orderTicketUser : orderTicketUserList) {
             OrderTicketUserRecord orderTicketUserRecord = new OrderTicketUserRecord();
-            BeanUtils.copyProperties(orderTicketUser,orderTicketUserRecord);
+            BeanUtils.copyProperties(orderTicketUser, orderTicketUserRecord);
             orderTicketUserRecord.setId(uidGenerator.getUid());
             orderTicketUserRecord.setIdentifierId(order.getIdentifierId());
             orderTicketUserRecord.setTicketUserOrderId(orderTicketUser.getId());
             orderTicketUserRecord.setRecordTypeCode(recordTypeCode);
             orderTicketUserRecord.setRecordTypeValue(recordTypeValue);
+
             orderTicketUserRecordList.add(orderTicketUserRecord);
-            seatIdAndTicketUserIdDomainList.add(new SeatIdAndTicketUserIdDomain(orderTicketUser.getSeatId(),
-                    orderTicketUser.getTicketUserId()));
+
+            seatIdAndTicketUserIdDomainList.add(
+                    new SeatIdAndTicketUserIdDomain(
+                            orderTicketUser.getSeatId(),
+                            orderTicketUser.getTicketUserId()));
         }
+
+        // 流水与订单状态放在同一个本地事务中，保证状态变化和操作记录一致。
         orderTicketUserRecordService.saveBatch(orderTicketUserRecordList);
 
-        //事务内仅保留本地 DB 写入；Redis 计数 / Lua 座位操作 / Feign DB 收敛全部移出事务：
-        // 1) 事务不再被远程 RTT（Feign 10s 超时）占住 DB 连接
-        // 2) Feign/Lua 失败不再回滚订单状态流转（订单状态已提交）
-        // 3) Redis 调用与 DB 事务解耦，事务回滚不产生计数/缓存漂移
-        // 失败容忍：Redis 侧由对账（ProgramRecordHandler/ReconciliationTask）兜底，
-        // DB 侧由投影任务/V5StockConservationTask 观测告警
+        // 7. 提前整理节目维度的座位数据，供事务提交后的缓存/库存操作使用。
         Long programId = order.getProgramId();
+
         Map<Long, List<OrderTicketUser>> orderTicketUserSeatList =
-                orderTicketUserList.stream().collect(Collectors.groupingBy(OrderTicketUser::getTicketCategoryId));
-        Map<Long,List<Long>> seatMap = new HashMap<>(orderTicketUserSeatList.size());
-        orderTicketUserSeatList.forEach((k,v) -> {
-            seatMap.put(k,v.stream().map(OrderTicketUser::getSeatId).collect(Collectors.toList()));
+                orderTicketUserList.stream()
+                        .collect(Collectors.groupingBy(OrderTicketUser::getTicketCategoryId));
+
+        Map<Long, List<Long>> seatMap = new HashMap<>(orderTicketUserSeatList.size());
+        orderTicketUserSeatList.forEach((k, v) -> {
+            seatMap.put(k,
+                    v.stream()
+                            .map(OrderTicketUser::getSeatId)
+                            .collect(Collectors.toList()));
         });
+
+        // 8. 事务提交后执行 Redis / Lua / Feign 等操作。
+        // 订单状态已经提交，后续操作失败不再回滚订单事务，由对账任务最终修复。
         Runnable afterCommitWork = () -> {
             try {
+
+                // 取消订单时回减用户维度的订单数量统计。
                 if (Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
-                    redisCache.incrBy(RedisKeyBuild.createRedisKey(
-                            RedisKeyManage.ACCOUNT_ORDER_COUNT,order.getUserId(),order.getProgramId()),-updateTicketUserOrderResult);
+                    redisCache.incrBy(
+                            RedisKeyBuild.createRedisKey(
+                                    RedisKeyManage.ACCOUNT_ORDER_COUNT,
+                                    order.getUserId(),
+                                    order.getProgramId()),
+                            -updateTicketUserOrderResult);
                 }
-                updateProgramRelatedDataResolution(programId,seatMap,orderStatus,order.getIdentifierId(),order.getUserId(),
-                        seatIdAndTicketUserIdDomainList,order.getOrderVersion());
+
+                // 根据版本执行对应的座位、库存及节目数据更新。
+                // V1-V3：Lua + 延迟任务收敛 DB；
+                // V4/V5：Lua + Feign 直接推动 DB 收敛。
+                updateProgramRelatedDataResolution(
+                        programId,
+                        seatMap,
+                        orderStatus,
+                        order.getIdentifierId(),
+                        order.getUserId(),
+                        seatIdAndTicketUserIdDomainList,
+                        order.getOrderVersion());
+
             } catch (Exception e) {
-                log.error("支付/取消后数据同步失败 订单号 : {} 状态 : {}", orderNumber, orderStatus, e);
+                // afterCommit 失败不能再回滚已提交事务，交由后续对账任务兜底。
+                log.error("支付/取消后数据同步失败 订单号 : {} 状态 : {}",
+                        orderNumber, orderStatus, e);
             }
         };
+
+        // 9. 正常事务场景下注册 afterCommit，确保只有 DB 事务提交成功后才执行后续同步。
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            // 事务提交后执行（afterCommit）：回滚事务不同步，远程调用移出事务
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
@@ -683,12 +934,11 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 }
             });
         } else {
-            // 无事务上下文（自调用/直测）回退为立即执行，等价原行为
+            // 无事务上下文时直接执行，兼容自调用、单元测试等场景。
             afterCommitWork.run();
         }
     }
-
-    public void checkOrderStatus(Order order){
+    public void checkOrderStatus(Order order) {
         if (Objects.isNull(order)) {
             throw new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST);
         }
@@ -702,22 +952,23 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             throw new TicketFlowFrameException(BaseCode.ORDER_REFUND);
         }
     }
-    
+
     /**
      * 构造 4 个 JSON 参数传给 OrderProgramDataResolution.lua：
-     *   data[0] = unLockSeatIdjsonArray   —— 从 LOCK hash 删除的座位
-     *   data[1] = addSeatDatajsonArray     —— 写入 NO_SOLD / SOLD hash 的座位
-     *   data[2] = jsonArray                —— 调整余票数量（cancel 加回 / pay 扣减）
-     *   data[3] = seatIdAndTicketUserIdDomainList —— 购票人关联记录
+     * data[0] = unLockSeatIdjsonArray   —— 从 LOCK hash 删除的座位
+     * data[1] = addSeatDatajsonArray     —— 写入 NO_SOLD / SOLD hash 的座位
+     * data[2] = jsonArray                —— 调整余票数量（cancel 加回 / pay 扣减）
+     * data[3] = seatIdAndTicketUserIdDomainList —— 购票人关联记录
      * V4 路径额外走 Feign 调用 operateProgramData 更新 DB（DB 状态统一切换）。
+     *
      * @param orderVersion 见 ProgramOrderVersion：V1=1, V2=2, V3=3, V4=4
      */
-    public void updateProgramRelatedDataResolution(Long programId,Map<Long,List<Long>> seatMap, OrderStatus orderStatus,Long identifierId, Long userId,
+    public void updateProgramRelatedDataResolution(Long programId, Map<Long, List<Long>> seatMap, OrderStatus orderStatus, Long identifierId, Long userId,
                                                    List<SeatIdAndTicketUserIdDomain> seatIdAndTicketUserIdDomainList,
-                                                   Integer orderVersion){
+                                                   Integer orderVersion) {
         Map<Long, List<SeatVo>> seatVoMap = new HashMap<>(seatMap.size());
-        seatMap.forEach((k,v) -> {
-            seatVoMap.put(k,redisCache.multiGetForHash(
+        seatMap.forEach((k, v) -> {
+            seatVoMap.put(k, redisCache.multiGetForHash(
                     RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH, programId, k),
                     v.stream().map(String::valueOf).collect(Collectors.toList()), SeatVo.class));
         });
@@ -729,11 +980,11 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         List<TicketCategoryCountDto> ticketCategoryCountDtoList = new ArrayList<>(seatVoMap.size());
         JSONArray unLockSeatIdjsonArray = new JSONArray();
         List<Long> unLockSeatIdList = new ArrayList<>();
-        seatVoMap.forEach((k,v) -> {
+        seatVoMap.forEach((k, v) -> {
             JSONObject unLockSeatIdjsonObject = new JSONObject();
             unLockSeatIdjsonObject.put("programSeatLockHashKey", RedisKeyBuild.createRedisKey(
                     RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH, programId, k).getRelKey());
-            unLockSeatIdjsonObject.put("unLockSeatIdList",v.stream()
+            unLockSeatIdjsonObject.put("unLockSeatIdList", v.stream()
                     .map(SeatVo::getId).map(String::valueOf).collect(Collectors.toList()));
             unLockSeatIdjsonArray.add(unLockSeatIdjsonObject);
             JSONObject seatDatajsonObject = new JSONObject();
@@ -744,26 +995,26 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 for (SeatVo seatVo : v) {
                     seatVo.setSellStatus(SellStatus.NO_SOLD.getCode());
                 }
-            }else if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())) {
+            } else if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())) {
                 seatHashKeyAdd = RedisKeyBuild.createRedisKey(
                         RedisKeyManage.PROGRAM_SEAT_SOLD_RESOLUTION_HASH, programId, k).getRelKey();
                 for (SeatVo seatVo : v) {
                     seatVo.setSellStatus(SellStatus.SOLD.getCode());
                 }
             }
-            seatDatajsonObject.put("seatHashKeyAdd",seatHashKeyAdd);
+            seatDatajsonObject.put("seatHashKeyAdd", seatHashKeyAdd);
             List<String> seatDataList = new ArrayList<>();
             for (SeatVo seatVo : v) {
                 seatDataList.add(String.valueOf(seatVo.getId()));
                 seatDataList.add(JSON.toJSONString(seatVo));
             }
-            seatDatajsonObject.put("seatDataList",seatDataList);
+            seatDatajsonObject.put("seatDataList", seatDataList);
             addSeatDatajsonArray.add(seatDatajsonObject);
             JSONObject jsonObject = new JSONObject();
-            jsonObject.put("programTicketRemainNumberHashKey",RedisKeyBuild.createRedisKey(
+            jsonObject.put("programTicketRemainNumberHashKey", RedisKeyBuild.createRedisKey(
                     RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programId, k).getRelKey());
-            jsonObject.put("ticketCategoryId",String.valueOf(k));
-            jsonObject.put("count",v.size());
+            jsonObject.put("ticketCategoryId", String.valueOf(k));
+            jsonObject.put("count", v.size());
             jsonArray.add(jsonObject);
             TicketCategoryCountDto ticketCategoryCountDto = new TicketCategoryCountDto();
             ticketCategoryCountDto.setTicketCategoryId(k);
@@ -785,7 +1036,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         data[1] = JSON.toJSONString(addSeatDatajsonArray);
         data[2] = JSON.toJSONString(jsonArray);
         data[3] = JSON.toJSONString(seatIdAndTicketUserIdDomainList);
-        
+
         ProgramOperateDataDto programOperateDataDto = new ProgramOperateDataDto();
         programOperateDataDto.setProgramId(programId);
         programOperateDataDto.setSeatIdList(unLockSeatIdList);
@@ -794,16 +1045,16 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         //V5 与 V4 一致：走同步 Feign 更新 program 侧 DB（pay/cancel 时 DB 座位/余票收敛）
         boolean isV5 = ProgramOrderVersion.V5_VERSION.getValue().equals(orderVersion);
         //如果创建订单版本是v1，v2，v3
-        if (!orderVersion.equals(ProgramOrderVersion.V4_VERSION.getValue()) && !isV5){
-            orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
+        if (!orderVersion.equals(ProgramOrderVersion.V4_VERSION.getValue()) && !isV5) {
+            orderProgramCacheResolutionOperate.programCacheReverseOperate(keys, data);
             if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())) {
                 programOperateDataDto.setSellStatus(SellStatus.SOLD.getCode());
                 delayOperateProgramDataSend.sendMessage(JSON.toJSONString(programOperateDataDto));
             }
-        }else {
+        } else {
             //V4/V5：先 Lua 收敛 Redis 权威数据（座位三区/余票），再 Feign 收敛 DB 派生数据。
             //Redis 为权威，先更新；DB 为派生，后收敛——Feign 失败仅记日志（DB 滞后由投影/守恒任务观测兜底）
-            orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
+            orderProgramCacheResolutionOperate.programCacheReverseOperate(keys, data);
             if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ||
                     Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
                 programOperateDataDto.setSellStatus(Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ? SellStatus.SOLD.getCode() : SellStatus.NO_SOLD.getCode());
@@ -822,10 +1073,10 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             }
         }
     }
-    
+
     public List<OrderListVo> selectList(OrderListDto orderListDto) {
         List<OrderListVo> orderListVos = new ArrayList<>();
-        LambdaQueryWrapper<Order> orderLambdaQueryWrapper = 
+        LambdaQueryWrapper<Order> orderLambdaQueryWrapper =
                 Wrappers.lambdaQuery(Order.class)
                         .eq(Order::getUserId, orderListDto.getUserId())
                         .orderByDesc(Order::getCreateOrderTime);
@@ -834,18 +1085,18 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             return orderListVos;
         }
         orderListVos = BeanUtil.copyToList(orderList, OrderListVo.class);
-        List<OrderTicketUserAggregate> orderTicketUserAggregateList = 
+        List<OrderTicketUserAggregate> orderTicketUserAggregateList =
                 orderTicketUserMapper.selectOrderTicketUserAggregate(orderList.stream().map(Order::getOrderNumber).
                         collect(Collectors.toList()));
         Map<Long, Integer> orderTicketUserAggregateMap = orderTicketUserAggregateList.stream()
-                .collect(Collectors.toMap(OrderTicketUserAggregate::getOrderNumber, 
+                .collect(Collectors.toMap(OrderTicketUserAggregate::getOrderNumber,
                         OrderTicketUserAggregate::getOrderTicketUserCount, (v1, v2) -> v2));
         for (OrderListVo orderListVo : orderListVos) {
             orderListVo.setTicketCount(orderTicketUserAggregateMap.get(orderListVo.getOrderNumber()));
         }
         return orderListVos;
     }
-    
+
     public OrderGetVo get(OrderGetDto orderGetDto) {
         LambdaQueryWrapper<Order> orderLambdaQueryWrapper =
                 Wrappers.lambdaQuery(Order.class).eq(Order::getOrderNumber, orderGetDto.getOrderNumber());
@@ -853,20 +1104,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         if (Objects.isNull(order)) {
             throw new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST);
         }
-        LambdaQueryWrapper<OrderTicketUser> orderTicketUserLambdaQueryWrapper = 
+        LambdaQueryWrapper<OrderTicketUser> orderTicketUserLambdaQueryWrapper =
                 Wrappers.lambdaQuery(OrderTicketUser.class).eq(OrderTicketUser::getOrderNumber, order.getOrderNumber());
         List<OrderTicketUser> orderTicketUserList = orderTicketUserMapper.selectList(orderTicketUserLambdaQueryWrapper);
         if (CollectionUtil.isEmpty(orderTicketUserList)) {
-            throw new TicketFlowFrameException(BaseCode.TICKET_USER_ORDER_NOT_EXIST);   
+            throw new TicketFlowFrameException(BaseCode.TICKET_USER_ORDER_NOT_EXIST);
         }
-        
+
         OrderGetVo orderGetVo = new OrderGetVo();
-        BeanUtil.copyProperties(order,orderGetVo);
-        
+        BeanUtil.copyProperties(order, orderGetVo);
+
         List<OrderTicketInfoVo> orderTicketInfoVoList = new ArrayList<>();
-        Map<BigDecimal, List<OrderTicketUser>> orderTicketUserMap = 
+        Map<BigDecimal, List<OrderTicketUser>> orderTicketUserMap =
                 orderTicketUserList.stream().collect(Collectors.groupingBy(OrderTicketUser::getOrderPrice));
-        orderTicketUserMap.forEach((k,v) -> {
+        orderTicketUserMap.forEach((k, v) -> {
             OrderTicketInfoVo orderTicketInfoVo = new OrderTicketInfoVo();
             String seatInfo = v.stream()
                     .map(OrderTicketUser::getSeatInfo)
@@ -879,20 +1130,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             orderTicketInfoVo.setPrice(v.get(0).getOrderPrice());
             orderTicketInfoVo.setQuantity(v.size());
             orderTicketInfoVo.setRelPrice(v.stream().map(OrderTicketUser::getOrderPrice)
-                    .reduce(BigDecimal.ZERO,BigDecimal::add));
+                    .reduce(BigDecimal.ZERO, BigDecimal::add));
             orderTicketInfoVoList.add(orderTicketInfoVo);
         });
-        
+
         orderGetVo.setOrderTicketInfoVoList(orderTicketInfoVoList);
-        
+
         UserGetAndTicketUserListDto userGetAndTicketUserListDto = new UserGetAndTicketUserListDto();
         userGetAndTicketUserListDto.setUserId(order.getUserId());
-        ApiResponse<UserGetAndTicketUserListVo> userGetAndTicketUserApiResponse = 
+        ApiResponse<UserGetAndTicketUserListVo> userGetAndTicketUserApiResponse =
                 userClient.getUserAndTicketUserList(userGetAndTicketUserListDto);
-        
+
         if (!Objects.equals(userGetAndTicketUserApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
             throw new TicketFlowFrameException(userGetAndTicketUserApiResponse);
-            
+
         }
         UserGetAndTicketUserListVo userAndTicketUserListVo =
                 Optional.ofNullable(userGetAndTicketUserApiResponse.getData())
@@ -911,30 +1162,30 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 .filter(Objects::nonNull)
                 .toList();
         UserInfoVo userInfoVo = new UserInfoVo();
-        BeanUtil.copyProperties(userAndTicketUserListVo.getUserVo(),userInfoVo);
+        BeanUtil.copyProperties(userAndTicketUserListVo.getUserVo(), userInfoVo);
         UserAndTicketUserInfoVo userAndTicketUserInfoVo = new UserAndTicketUserInfoVo();
         userAndTicketUserInfoVo.setUserInfoVo(userInfoVo);
         userAndTicketUserInfoVo.setTicketUserInfoVoList(BeanUtil.copyToList(filterTicketUserVoList, TicketUserInfoVo.class));
         orderGetVo.setUserAndTicketUserInfoVo(userAndTicketUserInfoVo);
-        
+
         return orderGetVo;
     }
-    
+
     public AccountOrderCountVo accountOrderCount(AccountOrderCountDto accountOrderCountDto) {
         AccountOrderCountVo accountOrderCountVo = new AccountOrderCountVo();
         accountOrderCountVo.setCount(orderMapper.accountOrderCount(accountOrderCountDto.getUserId(),
                 accountOrderCountDto.getProgramId()));
         return accountOrderCountVo;
     }
-    
-    
+
+
     // V4/V41 Kafka 消费者入口：先 Feign 锁定 program 侧的座位+库存，再在本事务建 DB 订单
     // V5：Redis 为唯一库存权威，建单不再同步 Feign 扣 DB（DB 座位/余票由投影任务/支付取消路径异步收敛）
     // 幂等：durationTime=0 不写幂等标记（省 2 次 GET + 1 次 SET，RTT 5→2），
     // 重复消息由 doCreate 的 selectOne 防重 + DB 唯一索引 d_order_order_number_IDX + ORDER_EXIST 幂等特判兜底。
     @RepeatExecuteLimit(name = CREATE_PROGRAM_ORDER_MQ, keys = {"#orderCreateMq.orderNumber"}, durationTime = 0)
     @Transactional(rollbackFor = Exception.class)
-    public String createMq(OrderCreateMq orderCreateMq){
+    public String createMq(OrderCreateMq orderCreateMq) {
         List<OrderTicketUserCreateDto> orderTicketUserCreateDtoList = orderCreateMq.getOrderTicketUserCreateDtoList();
         String orderNumber;
         try {
@@ -985,7 +1236,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         // 建单完成标记：供前端 /order/get/cache 轮询终态，同时支撑 PENDING 对账的"已建单"判定。
         // TTL 10min > 对账 3min 滞后窗口（ReconciliationTask 按 3min 前的 ProgramRecordTask 触发），
         // 确保对账首次裁决该 PENDING 条目时标记尚未过期。
-        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ,orderNumber),orderNumber,10, TimeUnit.MINUTES);
+        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ, orderNumber), orderNumber, 10, TimeUnit.MINUTES);
         return orderNumber;
     }
 
@@ -1017,20 +1268,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             log.error("建单失败反向恢复DB异常 订单号 : {}", orderCreateMq.getOrderNumber(), e);
         }
     }
-    
+
     public String getCache(OrderGetDto orderGetDto) {
-        return redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ,orderGetDto.getOrderNumber()),String.class);
+        return redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ, orderGetDto.getOrderNumber()), String.class);
     }
-    
+
     /**
      * 丢弃订单（消息延迟超时被 CreateOrderConsumer 丢弃）的 Redis 座位回滚。
      * 订单从未入库，DB 座位/余票从未扣减，因此只回滚 Redis 缓存：
-     *   座位 LOCK → NO_SOLD，余票恢复，写入 INCREASE 流水。
+     * 座位 LOCK → NO_SOLD，余票恢复，写入 INCREASE 流水。
      * 安全约束：
-     *   1. 订单已存在（如消息重放）不执行回滚，避免释放已建订单的座位
-     *   2. 座位已不在锁定集合（如缓存重建后复活）自动跳过，避免余票虚增
+     * 1. 订单已存在（如消息重放）不执行回滚，避免释放已建订单的座位
+     * 2. 座位已不在锁定集合（如缓存重建后复活）自动跳过，避免余票虚增
      */
-    public void rollbackProgramSeatByDiscard(OrderCreateMq orderCreateMq){
+    public void rollbackProgramSeatByDiscard(OrderCreateMq orderCreateMq) {
         // 订单已存在（消息重放等）不执行回滚，避免释放已建订单的座位
         Long orderCount = orderMapper.selectCount(Wrappers.lambdaQuery(Order.class)
                 .eq(Order::getOrderNumber, orderCreateMq.getOrderNumber()));
@@ -1044,7 +1295,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 Collectors.mapping(OrderTicketUserCreateDto::getSeatId, Collectors.toList())));
         // 只回滚仍在锁定集合中的座位；缓存重建后已复活的座位跳过，避免余票虚增
         Map<Long, List<SeatVo>> seatVoMap = new HashMap<>(seatMap.size());
-        seatMap.forEach((k,v) -> {
+        seatMap.forEach((k, v) -> {
             List<SeatVo> seatVoList = redisCache.multiGetForHash(
                     RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH,
                             orderCreateMq.getProgramId(), k),
@@ -1060,7 +1311,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         JSONArray unLockSeatIdjsonArray = new JSONArray();
         JSONArray addSeatDatajsonArray = new JSONArray();
         JSONArray jsonArray = new JSONArray();
-        seatVoMap.forEach((k,v) -> {
+        seatVoMap.forEach((k, v) -> {
             JSONObject unLockSeatIdjsonObject = new JSONObject();
             unLockSeatIdjsonObject.put("programSeatLockHashKey", RedisKeyBuild.createRedisKey(
                     RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH, orderCreateMq.getProgramId(), k).getRelKey());
@@ -1102,14 +1353,27 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         data[1] = JSON.toJSONString(addSeatDatajsonArray);
         data[2] = JSON.toJSONString(jsonArray);
         data[3] = JSON.toJSONString(seatIdAndTicketUserIdDomainList);
-        orderProgramCacheResolutionOperate.programCacheReverseOperate(keys,data);
+        orderProgramCacheResolutionOperate.programCacheReverseOperate(keys, data);
+        // V5 对称减回限购计数：正向 Lua 在扣减成功时 INCRBY，回滚后必须减回，
+        // 否则 DISCARD/PENDING 回滚的失败订单会永久占用用户限购配额（与正常取消路径语义对齐）。
+        // 计数按实际回滚的座位数递减；seatVoMap 为空时已提前 return，不会误减。
+        if (Objects.equals(orderCreateMq.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue())) {
+            int rolledBackSeatCount = seatVoMap.values().stream().mapToInt(List::size).sum();
+            try {
+                redisCache.incrBy(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT,
+                        orderCreateMq.getUserId(), orderCreateMq.getProgramId()), -rolledBackSeatCount);
+            } catch (Exception e) {
+                log.error("V5 丢弃订单回滚减回限购计数失败 需人工处理 orderNumber : {}",
+                        orderCreateMq.getOrderNumber(), e);
+            }
+        }
         log.info("丢弃订单回滚Redis座位完成 订单号 : {}", orderCreateMq.getOrderNumber());
     }
-    
-    @RepeatExecuteLimit(name = CANCEL_PROGRAM_ORDER,keys = {"#orderCancelDto.orderNumber"})
-    @ServiceLock(name = UPDATE_ORDER_STATUS_LOCK,keys = {"#orderCancelDto.orderNumber"})
+
+    @RepeatExecuteLimit(name = CANCEL_PROGRAM_ORDER, keys = {"#orderCancelDto.orderNumber"})
+    @ServiceLock(name = UPDATE_ORDER_STATUS_LOCK, keys = {"#orderCancelDto.orderNumber"})
     @Transactional(rollbackFor = Exception.class)
-    public boolean initiateCancel(OrderCancelDto orderCancelDto){
+    public boolean initiateCancel(OrderCancelDto orderCancelDto) {
         Order order = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class)
                 .eq(Order::getOrderNumber, orderCancelDto.getOrderNumber()));
         if (Objects.isNull(order)) {
@@ -1120,15 +1384,15 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         }
         return cancel(orderCancelDto);
     }
-    
-    
-    public void delOrderAndOrderTicketUser(){
+
+
+    public void delOrderAndOrderTicketUser() {
         orderMapper.relDelOrder();
         orderTicketUserMapper.relDelOrderTicketUser();
         orderTicketUserRecordMapper.relDelOrderTicketUserRecord();
         orderProgramMapper.relDelOrderProgram();
     }
-    
+
     public List<OrderListVo> simpleList(OrderSimpleListDto orderSimpleListDto) {
         if (Objects.isNull(orderSimpleListDto.getOrderNumber()) && Objects.isNull(orderSimpleListDto.getUserId())) {
             throw new TicketFlowFrameException(BaseCode.USER_ID_AND_ORDER_NUMBER_NOT_EXIST);
@@ -1136,8 +1400,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         List<OrderListVo> orderListVos = new ArrayList<>();
         LambdaQueryWrapper<Order> orderLambdaQueryWrapper =
                 Wrappers.lambdaQuery(Order.class)
-                        .eq(Objects.nonNull(orderSimpleListDto.getOrderNumber()),Order::getOrderNumber, orderSimpleListDto.getOrderNumber())
-                        .eq(Objects.nonNull(orderSimpleListDto.getUserId()),Order::getUserId, orderSimpleListDto.getUserId())
+                        .eq(Objects.nonNull(orderSimpleListDto.getOrderNumber()), Order::getOrderNumber, orderSimpleListDto.getOrderNumber())
+                        .eq(Objects.nonNull(orderSimpleListDto.getUserId()), Order::getUserId, orderSimpleListDto.getUserId())
                         .orderByDesc(Order::getCreateOrderTime);
         List<Order> orderList = orderMapper.selectList(orderLambdaQueryWrapper);
         if (CollectionUtil.isEmpty(orderList)) {
