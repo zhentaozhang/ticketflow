@@ -13,7 +13,7 @@
 --- ARGV[1]: 票档列表 JSON [{ticketCategoryId, ticketCount, programTicketRemainNumberHashKey}]
 --- ARGV[2]: 座位数据 JSON
 --- ARGV[3]: 购票人 id 列表 JSON
---- ARGV[4]: 幂等标记 TTL（秒）
+--- ARGV[4]: 幂等标记 TTL（秒，ProgramOrderService.V5_IDEMPOTENT_TTL_SECONDS=10）
 --- ARGV[5]: 该用户限购数量 perAccountLimitPurchaseCount（0/null=不限购）
 --- ARGV[6]: 本次购票总数（限购校验与计数累加使用）
 ---

@@ -81,7 +81,8 @@ for f in files:
         "f70005": biz.get("70005", 0),
         "fseat": biz.get("40002", 0) + biz.get("40003", 0),
         "f50009": biz.get("50009", 0),
-        "fother": sum(v for k, v in biz.items() if k not in ("-100", "70005", "40002", "40003", "0", "50009")),
+        "f40035": biz.get("40035", 0),
+        "fother": sum(v for k, v in biz.items() if k not in ("-100", "70005", "40002", "40003", "0", "50009", "40035")),
         "f100": biz.get("-100", 0),
         "delta": od.get("delta"),
         "snapshot": d.get("snapshot", {}),
@@ -101,9 +102,9 @@ def sum_field(rs, key):
 
 
 header = ("| version | mode | rate | 端到端成功率(落库率) | 受理成功率 | p50(ms) | p95(ms) | p99(ms) | "
-          "协议/连接 | 70005 | 40002/3 | 50009 | 其他业务 | 落库差 |")
+          "协议/连接 | 70005 | 40002/3 | 50009 | 40035 | 其他业务 | 落库差 |")
 sep = ("|---------|------|------|---------------------|------------|---------|---------|---------|"
-       "-----------|-------|---------|-------|----------|--------|")
+       "-----------|-------|---------|-------|-------|----------|--------|")
 lines = [header, sep]
 for key in order:
     v, m, r = key
@@ -117,7 +118,7 @@ for key in order:
         f"| {v} | {m} | {r} | {fmt_range(e2e, pct=True)} | {fmt_range(acc, pct=True)} | "
         f"{fmt_range(p50)} | {fmt_range(p95)} | {fmt_range(p99)} | "
         f"{sum_field(rs, 'conn')} | {sum_field(rs, 'f70005')} | {sum_field(rs, 'fseat')} | "
-        f"{sum_field(rs, 'f50009')} | {sum_field(rs, 'fother')} | {sum_field(rs, 'delta')} |"
+        f"{sum_field(rs, 'f50009')} | {sum_field(rs, 'f40035')} | {sum_field(rs, 'fother')} | {sum_field(rs, 'delta')} |"
     )
 
 text = "\n".join(lines)
@@ -179,7 +180,7 @@ with open(out_md, "w") as f:
     f.write("## 公平性声明\n\n")
     f.write("- 压测机 = 被测机（同机压测）：高并发下压测机可能成为瓶颈，协议/连接失败需结合压测机 CPU 判断；跨机压测另行执行\n")
     f.write("- 每档时长默认 60s；多轮结果取中位数与区间，不取最优轮\n")
-    f.write("- 失败分桶：协议/连接=系统过载、70005=锁竞争、40002/3=座位竞争、50009=限购、落库差=异步正确性丢失\n")
+    f.write("- 失败分桶：协议/连接=系统过载、70005=锁竞争、40002/3=座位竞争、50009=限购、40035=幂等拒绝(V5 同一用户 30s 内重复提交)、落库差=异步正确性丢失\n")
 
 print(text)
 print("\n## 容量拐点（端到端成功率跌破阈值）")

@@ -17,17 +17,17 @@ import static com.ticketflow.constant.ProgramOrderConstant.DELAY_OPERATE_PROGRAM
  * 消费来自 DELAY_OPERATE_PROGRAM_DATA_TOPIC 的消息，
  * 调用 ProgramService.operateProgramData() 执行座位状态变更
  * （取消时解锁座位+恢复余票，支付时标记已售）。
- *
+ * <p>
  * 与 DelayOrderCancelSend 配对使用——发送端推送延迟消息，
  * 到达时间后此消费者执行实际数据操作
  */
 @Slf4j
 @Component
 public class DelayOperateProgramDataConsumer implements ConsumerTask {
-    
+
     @Autowired
     private ProgramService programService;
-    
+
     /**
      * 消费延迟队列消息，执行节目数据操作（取消时解锁座位+恢复余票，支付时标记已售）。
      *
@@ -43,7 +43,7 @@ public class DelayOperateProgramDataConsumer implements ConsumerTask {
         ProgramOperateDataDto programOperateDataDto = JSON.parseObject(content, ProgramOperateDataDto.class);
         programService.operateProgramData(programOperateDataDto);
     }
-    
+
     @Override
     public String topic() {
         return SpringUtil.getPrefixDistinctionName() + "-" + DELAY_OPERATE_PROGRAM_DATA_TOPIC;

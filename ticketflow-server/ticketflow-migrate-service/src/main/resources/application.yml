@@ -34,7 +34,7 @@ spring:
   data:
     redis:
       database: 0
-      host: 127.0.0.1
+      host: ${REDIS_HOST:127.0.0.1}
       port: 6379
       timeout: 5000                     # 连接超时时间(5秒)
       jedis:
@@ -46,7 +46,7 @@ spring:
   cloud:
     nacos:
       discovery:
-        server-addr: 127.0.0.1:8848
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
 mybatis-plus:
   mapper-locations: classpath:mapper/*.xml
   global-config:

@@ -51,10 +51,14 @@ spring:
   datasource:
     driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
     url: jdbc:shardingsphere:classpath:shardingsphere-program-${spring.profiles.active}.yaml
+    hikari:
+      maximum-pool-size: 32
+      minimum-idle: 5
+      connection-timeout: 10000
   data:  
     redis:
       database: 0
-      host: 127.0.0.1
+      host: ${REDIS_HOST:127.0.0.1}
       port: 6379
       timeout: 5000                     # 连接超时时间(5秒)
       jedis:
@@ -69,11 +73,11 @@ spring:
   cloud:
     nacos:
       discovery:
-        server-addr: 127.0.0.1:8848
-        ip: 127.0.0.1
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        ip: ${NACOS_DISCOVERY_IP:127.0.0.1}
       eager: true
   kafka:
-    bootstrap-servers: 127.0.0.1:9092
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
     producer:
       retries: 3
       # V5 可靠投递：acks=all + 幂等 producer，保证 Kafka 发送失败可重试且不重复
@@ -158,7 +162,7 @@ jasypt:
     algorithm: PBEWithMD5AndDES
 elasticsearch:
   esSwitch: true                     # ES 功能开关；无 ES 环境部署时改为 false，所有查询自动走 DB 兜底
-  ip: 127.0.0.1:9200
+  ip: ${ES_ADDR:127.0.0.1:9200}
   userName: ${ES_USERNAME:default}   # 等于 default 时不启用认证
   passWord: ${ES_PASSWORD:default}
 delay:

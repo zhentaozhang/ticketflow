@@ -20,6 +20,7 @@ import com.ticketflow.dto.SeatDto;
 import com.ticketflow.entity.ProgramRecordTask;
 import com.ticketflow.entity.ProgramShowTime;
 import com.ticketflow.enums.BaseCode;
+import com.ticketflow.enums.DiscardOrderReason;
 import com.ticketflow.enums.OrderStatus;
 import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.enums.RecordType;
@@ -51,6 +52,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -79,23 +81,36 @@ import static com.ticketflow.constant.Constant.GLIDE_LINE;
 public class ProgramOrderService {
 
     /**
-     * 不选座自动匹配：候选座位被并发订单抢占时的最大重试次数（超出后抛抢占错误码）
+     * 不选座自动匹配：候选座位被并发订单抢占时的最大重试次数（超出后抛抢占错误码）。
+     * 多实例下本地锁只保证单机串行，跨实例抢占只能靠 Lua 40001-3 裁决 + 重试消化，
+     * 重试次数过低会把"系统内部抢座失败"误暴露给用户，故取 3 次。
      */
-    private static final int AUTO_MATCH_RETRY_TIMES = 1;
+    private static final int AUTO_MATCH_RETRY_TIMES = 3;
 
     /**
      * V5 下单幂等标记 TTL（秒）。
-     * 仅防"同一用户同一节目在请求在途/刚提交"窗口内的重复提交，语义对齐 V4 @RepeatExecuteLimit(durationTime=0)
-     * （只排除在途并发，不阻断合法二次购买）。请求侧在途窗口通常 <1s，取 3s 留足余量；
-     * 合法二次购买 3s 后可再次提交；消息重放幂等由消费侧（selectOne + 唯一索引 + ORDER_EXIST 特判）兜底。
+     * 必须覆盖"请求不确定窗口"：Lua 扣减成功 → Kafka 发送（最多等待 KAFKA_SEND_AWAIT_MS）→
+     * 超时降级已受理（写 PENDING）。客户端在未收到明确失败前可能重试，
+     * 若 TTL 短于该窗口，重试会再次走 Lua 成功 → 同一购买意图产生两笔订单（二次扣减/二次计数）。
+     * 取 10s：覆盖常见客户端超时重试（秒级~10s），同时保留"合法二次购买"在 10s 后即可提交；
+     * 同 orderNumber 的消息重放幂等仍由消费侧（selectOne + 唯一索引 + ORDER_EXIST 特判）兜底。
+     * 注意：这是"窗口时长 vs 误伤合法二单"的可调权衡——压测 feeder 用户复用周期需大于本值，
+     * 否则开环压测会把"用户复用"误计为 40035 重复提交（见 benchmark README）。
      */
-    private static final int V5_IDEMPOTENT_TTL_SECONDS = 3;
+    private static final int V5_IDEMPOTENT_TTL_SECONDS = 10;
 
     /**
      * V5 不选座自动匹配的窄粒度本地锁前缀（按 programId+ticketCategoryId 加锁）。
      * 仅保护"读 no_sold + 应用层匹配 + Lua 校验"两步操作，选座路径保持无锁。
      */
     private static final String V5_AUTO_MATCH_LOCK = "v5_auto_match";
+
+    /**
+     * Kafka 发送建单消息的最大等待时间（毫秒）。
+     * 超时降级为"已受理 + PENDING 待确认"（订单终态由对账裁决），
+     * 因此无需长时间阻塞请求线程；500ms 已覆盖正常发送，超时路径不影响正确性。
+     */
+    private static final long KAFKA_SEND_AWAIT_MS = 500L;
 
     @Autowired
     private OrderClient orderClient;
@@ -151,7 +166,7 @@ public class ProgramOrderService {
      * @param seatCount  需要匹配的座位数量
      * @return 匹配到的相邻座位；不足时返回空列表
      */
-    public List<SeatVo> matchAdjacentSeats(List<SeatVo> seatVoList, int seatCount){
+    public List<SeatVo> matchAdjacentSeats(List<SeatVo> seatVoList, int seatCount) {
         if (CollectionUtil.isEmpty(seatVoList) || seatVoList.size() < seatCount) {
             return new ArrayList<>();
         }
@@ -281,9 +296,9 @@ public class ProgramOrderService {
      * Lua 扣减已在调用方（锁内）完成，这里只负责构建参数 + Kafka 发送建单消息 + 投递延迟取消队列。
      * 将 Kafka 同步等待发送确认移出锁，可大幅缩短锁持有时间、降低锁竞争失败率。
      *
-     * @param programOrderCreateDto      订单创建参数
-     * @param createOrderTemporaryData   锁内 Lua 扣减的临时数据（座位/记录标识）
-     * @param orderVersion               订单版本号
+     * @param programOrderCreateDto    订单创建参数
+     * @param createOrderTemporaryData 锁内 Lua 扣减的临时数据（座位/记录标识）
+     * @param orderVersion             订单版本号
      * @return 订单编号（Kafka 中预生成）
      */
     public String createNewAsyncAfterLock(ProgramOrderCreateDto programOrderCreateDto,
@@ -690,7 +705,7 @@ public class ProgramOrderService {
     /**
      * 候选座位被并发订单抢占的错误码：座位不存在(40001)、已锁定(40002)、已售出(40003)。
      */
-    private boolean isSeatRaceError(Integer code){
+    private boolean isSeatRaceError(Integer code) {
         return Objects.equals(code, BaseCode.SEAT_NOT_EXIST.getCode())
                 || Objects.equals(code, BaseCode.SEAT_LOCK.getCode())
                 || Objects.equals(code, BaseCode.SEAT_SOLD.getCode());
@@ -731,32 +746,66 @@ public class ProgramOrderService {
 
     /**
      * 异步创建订单路径。
-     * 构建订单参数 → Kafka 发送建单消息 → 投递延迟取消队列。
-     * order-service consumer 消费消息后完成实际订单创建。
+     * <p>
+     * Redis Lua 完成座位锁定和余票扣减后进入这里：
+     * 1. 构建订单参数
+     * 2. 异步写入节目对账记录
+     * 3. 发送 Kafka 建单消息，由 order-service 异步落库
+     * 4. 投递延迟取消消息，超时未支付后自动取消订单
      */
     private String doCreateV2(ProgramOrderCreateDto programOrderCreateDto,
                               CreateOrderTemporaryData createOrderTemporaryData,
                               Integer orderVersion) {
-        OrderCreateDto orderCreateDto = buildCreateOrderParamV2(programOrderCreateDto.getProgramId(),
-                programOrderCreateDto.getUserId(), createOrderTemporaryData.getPurchaseSeatList(), orderVersion);
+
+        // 第一阶段：构建订单参数。
+        // 此时 Redis 中的座位已经锁定成功，这里根据用户、节目、座位等信息
+        // 组装真正要创建的订单数据，同时生成订单号。
+        OrderCreateDto orderCreateDto = buildCreateOrderParamV2(
+                programOrderCreateDto.getProgramId(),
+                programOrderCreateDto.getUserId(),
+                createOrderTemporaryData.getPurchaseSeatList(),
+                orderVersion);
+
+        // 将订单参数转换成 Kafka 建单消息，并补充本次 Redis 操作对应的唯一标识。
+        // identifierId 后续用于节目库存变更、消息记录以及对账定位。
         OrderCreateMq orderCreateMq = new OrderCreateMq();
         BeanUtils.copyProperties(orderCreateDto, orderCreateMq);
         orderCreateMq.setIdentifierId(createOrderTemporaryData.getIdentifierId());
-        //插入节目记录任务
+
+        // 第二阶段：异步写入节目对账记录。
+        // Redis Lua 已经完成座位锁定和余票扣减，需要留下对应的变更记录，
+        // 后续可以根据这条记录校验 Redis 与数据库之间的数据是否一致。
+        //
+        // 正常情况下异步执行，不阻塞当前下单线程；
+        // 如果线程池已经饱和，则降级为同步执行，避免对账记录直接丢失。
         try {
-            BusinessThreadPool.execute(() -> createProgramRecordTask(orderCreateMq.getProgramId()));
+            BusinessThreadPool.execute(
+                    () -> createProgramRecordTask(orderCreateMq.getProgramId()));
         } catch (RejectedExecutionException e) {
-            // 线程池饱和时降级同步插入：对账记录缺失会使该节目的 Redis 扣减对账失明
-            log.error("节目对账记录任务提交失败，降级同步插入 programId : {}", orderCreateMq.getProgramId(), e);
+            log.error("节目对账记录任务提交失败，降级同步插入 programId : {}",
+                    orderCreateMq.getProgramId(), e);
             createProgramRecordTask(orderCreateMq.getProgramId());
         }
-        //创建订单
-        String orderNumber = createOrderByMq(orderCreateMq, createOrderTemporaryData.getPurchaseSeatList());
+
+        // 第三阶段：发送 Kafka 建单消息。
+        // 当前线程只负责把建单请求发送到 Kafka，不直接操作订单数据库。
+        // 后续由 order-service 消费消息，完成订单、购票人等数据的实际落库。
+        String orderNumber = createOrderByMq(
+                orderCreateMq,
+                createOrderTemporaryData.getPurchaseSeatList());
+
+        // 第四阶段：投递延迟取消消息。
+        // 订单虽然已经进入异步创建流程，但此时用户还没有完成支付，
+        // 因此需要同时设置超时取消机制，避免锁定的座位和余票长期占用。
         DelayOrderCancelDto delayOrderCancelDto = new DelayOrderCancelDto();
         delayOrderCancelDto.setProgramId(orderCreateDto.getProgramId());
         delayOrderCancelDto.setOrderNumber(orderCreateDto.getOrderNumber());
+
+        // 到达指定延迟时间后，由延迟队列消费者触发订单取消，
+        // 进一步执行座位释放、余票回补等操作。
         delayOrderCancelSend.sendMessage(delayOrderCancelDto);
 
+        // 返回订单号，供上层流程继续处理。
         return orderNumber;
     }
 
@@ -881,7 +930,7 @@ public class ProgramOrderService {
 
     /**
      * 通过 Kafka 发送建单消息。
-     * 等待发送确认；超时（2s）降级为已受理并写 PENDING 待确认队列（不抛异常），
+     * 等待发送确认；超时（KAFKA_SEND_AWAIT_MS）降级为已受理并写 PENDING 待确认队列（不抛异常），
      * 订单终态由 PENDING 对账任务裁决；发送失败仍回滚 Redis 缓存并上抛。
      */
     private String createOrderByMq(OrderCreateMq orderCreateMq, List<PurchaseSeat> purchaseSeatList) {
@@ -899,17 +948,38 @@ public class ProgramOrderService {
                 return seatVo;
             }).collect(Collectors.toList());
             try {
-                updateProgramCacheDataResolution(orderCreateMq.getProgramId(), purchaseSeatVoList, OrderStatus.CANCEL);
+                // 幂等保护：仅当座位仍在锁定集合时才回滚。发送超时已降级为已受理（写 PENDING），
+                // PENDING 补偿可能已先回滚（幂等）；若这里仍无条件反向恢复，会把余票二次回补（超卖）。
+                if (isSeatStillLocked(orderCreateMq, purchaseSeatVoList)) {
+                    updateProgramCacheDataResolution(orderCreateMq.getProgramId(), purchaseSeatVoList, OrderStatus.CANCEL);
+                    // V5：正向 Lua 扣减成功时已 INCRBY 限购计数，回滚成功后对称减回，
+                    // 避免"发送失败被回滚的订单"永久占用用户限购配额（与正常取消路径语义对齐）。
+                    if (Objects.equals(orderCreateMq.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue())) {
+                        decrementAccountOrderCount(orderCreateMq, purchaseSeatVoList.size());
+                    }
+                } else {
+                    log.info("创建订单kafka发送失败但座位已不在锁定状态 跳过回滚 orderNumber : {}",
+                            orderCreateMq.getOrderNumber());
+                }
             } catch (Exception rollbackEx) {
-                // 回滚失败不能上抛：回调线程异常会跳过下方 countDown，导致调用线程在 await 处永久阻塞
-                log.error("创建订单kafka发送失败后回滚缓存异常 需人工处理 programId : {} orderNumber : {}",
+                // 回滚失败不能上抛：回调线程异常会跳过下方 countDown，导致调用线程在 await 处永久阻塞。
+                // 写入 DISCARD_ORDER 留痕，由对账任务 discardOrderCompensation（幂等回滚 + V5 计数减回）兜底，
+                // 避免"库存已扣、订单未建、回滚也未成功"的库存黑洞。
+                log.error("创建订单kafka发送失败后回滚缓存异常 写入DISCARD_ORDER待对账 programId : {} orderNumber : {}",
                         orderCreateMq.getProgramId(), orderCreateMq.getOrderNumber(), rollbackEx);
+                try {
+                    redisCache.leftPushForList(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER,
+                            orderCreateMq.getProgramId()), buildRollbackFailDiscardOrder(orderCreateMq, rollbackEx));
+                } catch (Exception discardEx) {
+                    log.error("写入DISCARD_ORDER失败 需人工处理 programId : {} orderNumber : {}",
+                            orderCreateMq.getProgramId(), orderCreateMq.getOrderNumber(), discardEx);
+                }
             }
             createOrderMqDomain.ticketFlowFrameException = new TicketFlowFrameException(ex);
             latch.countDown();
         });
         try {
-            if (!latch.await(2, TimeUnit.SECONDS)) {
+            if (!latch.await(KAFKA_SEND_AWAIT_MS, TimeUnit.MILLISECONDS)) {
                 // 超时降级：不再抛异常。消息大概率已发送（producer retries=3），
                 // 订单终态由 PENDING 对账兜底：已建单则移除，未建单则回滚 Redis 座位。
                 log.warn("创建订单kafka发送消息等待超时 降级为已受理 orderNumber : {}", orderCreateMq.getOrderNumber());
@@ -942,6 +1012,61 @@ public class ProgramOrderService {
             log.error("创建订单kafka发送超时后写入 PENDING 失败 需人工处理 orderNumber : {}",
                     orderCreateMq.getOrderNumber(), e);
         }
+    }
+
+    /**
+     * 判断订单座位是否仍处于 Redis 锁定集合（发送失败回调的回滚守卫）。
+     * <p>
+     * 场景：发送超时降级为已受理（写 PENDING）后，PENDING 补偿可能已把座位回滚（幂等），
+     * 若迟到的失败回调仍无条件反向恢复，余票会被二次回补（超卖）。
+     * 因此回滚前先确认至少有一个座位仍在锁定集合，不在则说明已被其他路径回滚，跳过。
+     */
+    private boolean isSeatStillLocked(OrderCreateMq orderCreateMq, List<SeatVo> purchaseSeatVoList) {
+        try {
+            Map<Long, List<SeatVo>> seatVoMap = purchaseSeatVoList.stream()
+                    .collect(Collectors.groupingBy(SeatVo::getTicketCategoryId));
+            for (Entry<Long, List<SeatVo>> entry : seatVoMap.entrySet()) {
+                List<SeatVo> lockedSeats = redisCache.multiGetForHash(
+                        RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH,
+                                orderCreateMq.getProgramId(), entry.getKey()),
+                        entry.getValue().stream().map(SeatVo::getId).map(String::valueOf).collect(Collectors.toList()),
+                        SeatVo.class);
+                if (CollectionUtil.isNotEmpty(lockedSeats)) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            // 查询失败时保守回滚（多数场景座位仍在锁定集合），回滚 Lua 本身 hdel/hset 幂等
+            log.warn("查询座位锁定状态失败 按保守回滚处理 orderNumber : {}", orderCreateMq.getOrderNumber(), e);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * V5 回滚后对称减回限购计数（正向 Lua INCRBY 的反向操作）。
+     * 仅限购计数，不影响余票/座位（由回滚 Lua 负责）。
+     */
+    private void decrementAccountOrderCount(OrderCreateMq orderCreateMq, int ticketCount) {
+        try {
+            redisCache.incrBy(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT,
+                    orderCreateMq.getUserId(), orderCreateMq.getProgramId()), -ticketCount);
+        } catch (Exception e) {
+            log.error("V5 回滚减回限购计数失败 需人工处理 orderNumber : {}", orderCreateMq.getOrderNumber(), e);
+        }
+    }
+
+    /**
+     * 构建"回滚失败待补偿订单"（JSON 结构对齐 order-service 的 DiscardOrder：
+     * orderCreateMq / discardOrderReason / errorMsg 三个字段），
+     * 由对账任务 discardOrderCompensation 反序列化后执行幂等回滚 + V5 计数减回。
+     */
+    private Map<String, Object> buildRollbackFailDiscardOrder(OrderCreateMq orderCreateMq, Exception rollbackEx) {
+        Map<String, Object> discardOrder = new HashMap<>(4);
+        discardOrder.put("orderCreateMq", orderCreateMq);
+        discardOrder.put("discardOrderReason", DiscardOrderReason.ROLLBACK_FAIL.getCode());
+        discardOrder.put("errorMsg", String.valueOf(rollbackEx.getMessage()));
+        return discardOrder;
     }
 
     /**

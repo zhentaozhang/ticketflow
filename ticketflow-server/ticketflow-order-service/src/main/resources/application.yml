@@ -32,10 +32,15 @@ spring:
   datasource:
     driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
     url: jdbc:shardingsphere:classpath:shardingsphere-order-${spring.profiles.active}.yaml
+    # 外层 Hikari 逻辑连接池：create_order 消费并发 48，池必须 ≥48，否则消费线程抢连接超时丢单
+    hikari:
+      maximum-pool-size: 64
+      minimum-idle: 10
+      connection-timeout: 10000
   data:
     redis:
       database: 0
-      host: 127.0.0.1
+      host: ${REDIS_HOST:127.0.0.1}
       port: 6379
       timeout: 5000                     # 连接超时时间(5秒)
       jedis:

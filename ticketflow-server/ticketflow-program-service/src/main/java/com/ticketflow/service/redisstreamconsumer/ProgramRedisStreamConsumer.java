@@ -11,16 +11,16 @@ import org.springframework.stereotype.Component;
  * Redis Stream 消费者：监听节目数据变更，失效本地缓存。
  * 当节目数据通过后台维护或订单操作变更时，program-service 向 Redis Stream 写入
  * 节目 ID → ProgramRedisStreamConsumer 消费 → 调用 programService.delLocalCache()
- *
+ * <p>
  * 保证集群模式下所有实例的本地 Caffeine 缓存最终一致。
  */
 @Slf4j
 @Component
 public class ProgramRedisStreamConsumer implements MessageConsumer {
-    
+
     @Autowired
     private ProgramService programService;
-    
+
     /**
      * 消费 Redis Stream 消息，失效指定节目的本地 Caffeine 缓存。
      * 当节目数据变更时，其他服务写入 Redis Stream → 本消费者收到消息 →
@@ -30,7 +30,8 @@ public class ProgramRedisStreamConsumer implements MessageConsumer {
      */
     @Override
     public void accept(ObjectRecord<String, String> message) {
+        // 消息 value 就是节目ID（invalid() 里 push 的 String.valueOf(programId)）
         Long programId = Long.parseLong(message.getValue());
-        programService.delLocalCache(programId);
+        programService.delLocalCache(programId);  // 删除本实例的本地缓存
     }
 }

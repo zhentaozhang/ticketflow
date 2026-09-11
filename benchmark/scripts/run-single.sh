@@ -116,6 +116,33 @@ wait_for_consumer_drain() {
 }
 
 # ---------------------------------------------------------------
+# PENDING 排空：等发送超时降级订单（ORDER_CREATE_PENDING 列表）裁决完成
+# 端到端落库率统计必须等 PENDING 排空：列表非空时可能存在"消息实际已发出、订单即将落库"
+# 或"未建单待回滚"的在途订单，过早计数会高估/低估落库差。V1-V3 同步路径无 PENDING，立即返回。
+# 依赖 redis-cli（单机 127.0.0.1 / 双机 TARGET_HOST）；无 redis-cli 时告警跳过。
+# ---------------------------------------------------------------
+wait_for_pending_drain() {
+  if ! command -v redis-cli >/dev/null 2>&1; then
+    echo "  ⚠️ 无 redis-cli，跳过 PENDING 排空等待（落库差可能包含在途 PENDING 订单）"
+    return
+  fi
+  local PENDING_KEY="ticketflow-d_mai_order_create_pending_9999"
+  local max_wait=90 waited=0 len=""
+  while [ "$waited" -lt "$max_wait" ]; do
+    len=$(redis-cli -h "$TARGET_HOST" -p 6379 LLEN "$PENDING_KEY" 2>/dev/null | tr -d '\r')
+    if [ -z "$len" ] || [ "$len" = "0" ]; then
+      break
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  echo "  PENDING 排空等待 ${waited}s，最终 PENDING 数: ${len:-0}"
+  if [ -n "$len" ] && [ "$len" != "0" ]; then
+    echo "  ⚠️ PENDING 未在 ${max_wait}s 内排空（${len}），落库差可能仍包含在途订单"
+  fi
+}
+
+# ---------------------------------------------------------------
 # 单轮压测（round 从 1 开始；每轮内部完成 reset+预热+压测+冷却+落库统计）
 # ---------------------------------------------------------------
 run_round() {
@@ -269,6 +296,8 @@ run_round() {
   # 6. 落库对账：等 mq 消费完（lag=0）再计数
   echo "[6/7] 冷却：等 create_order 消费组 lag=0 后落库计数..."
   wait_for_consumer_drain
+  # V4/V5 异步路径：等 PENDING 发送超时订单裁决完成后再计数（V1-V3 无 PENDING 立即返回）
+  wait_for_pending_drain
   ORDERS_AFTER=$(count_orders)
   echo "  压测后 d_order 总量: $ORDERS_AFTER"
 

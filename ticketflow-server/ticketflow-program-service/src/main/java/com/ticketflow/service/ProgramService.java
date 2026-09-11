@@ -66,6 +66,7 @@ import com.ticketflow.service.cache.local.LocalCacheTicketCategory;
 import com.ticketflow.service.constant.ProgramTimeType;
 import com.ticketflow.service.es.ProgramEs;
 import com.ticketflow.service.lua.ProgramDelCacheData;
+import com.ticketflow.service.stock.ProgramLocalStockGate;
 import com.ticketflow.service.tool.TokenExpireManager;
 import com.ticketflow.servicelock.LockType;
 import com.ticketflow.servicelock.annotion.ServiceLock;
@@ -204,6 +205,9 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
 
     @Autowired
     private SeatService seatService;
+
+    @Autowired
+    private ProgramLocalStockGate programLocalStockGate;
 
     /**
      * 添加节目
@@ -594,7 +598,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      */
     public ProgramVo getByIdMultipleCache(Long programId, Date showTime) {
         return localCacheProgram.getCache(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId).getRelKey(),
-                key -> {
+                key -> {    // 加载函数，只有 miss 才执行
                     log.info("查询节目详情 从本地缓存没有查询到 节目id : {}", programId);
                     ProgramVo programVo = getById(programId, DateUtils.countBetweenSecond(DateUtils.now(), showTime),
                             TimeUnit.SECONDS);
@@ -1156,6 +1160,9 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     @Transactional(rollbackFor = Exception.class)
     public Boolean resetExecute(ProgramResetExecuteDto programResetExecuteDto) {
         Long programId = programResetExecuteDto.getProgramId();
+        // 清空本地库存闸门：reset 后余票/座位全部还原，旧预估余票（可能为 0/售罄态）
+        // 若不清理，压测/重开后前 2s 内请求会被旧闸门误拒（假售罄）
+        programLocalStockGate.clear(programId);
         //查出该节目下锁定和已售卖的座位
         LambdaQueryWrapper<Seat> seatQueryWrapper =
                 Wrappers.lambdaQuery(Seat.class).eq(Seat::getProgramId, programId)
@@ -1232,12 +1239,12 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     public Boolean invalid(final ProgramInvalidDto programInvalidDto) {
         Program program = new Program();
         program.setId(programInvalidDto.getId());
-        program.setProgramStatus(BusinessStatus.NO.getCode());
+        program.setProgramStatus(BusinessStatus.NO.getCode());  // ① 更新 DB：状态改为下架
         int result = programMapper.updateById(program);
         if (result > 0) {
-            delRedisData(programInvalidDto.getId());
-            redisStreamPushHandler.push(String.valueOf(programInvalidDto.getId()));
-            programEs.deleteByProgramId(programInvalidDto.getId());
+            delRedisData(programInvalidDto.getId());  // ② 删 Redis 所有相关 key
+            redisStreamPushHandler.push(String.valueOf(programInvalidDto.getId()));  // ③ 广播失效事件
+            programEs.deleteByProgramId(programInvalidDto.getId());  // ④ 删 ES 索引
             return true;
         } else {
             return false;

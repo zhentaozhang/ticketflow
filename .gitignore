@@ -45,3 +45,5 @@ benchmark/src/test/resources/data/seats-*.csv
 ### Python 编译缓存 ###
 __pycache__/
 *.pyc
+# OpenTelemetry javaagent（体积大不入库；docker/otel/ 整体已被 docker/ 规则忽略，此条仅为意图声明）
+docker/otel/opentelemetry-javaagent.jar*

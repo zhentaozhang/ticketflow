@@ -20,95 +20,104 @@ import java.util.stream.Collectors;
 
 /**
  * 节目下单基础逻辑（本地锁模板）。
- * 按 ticketCategoryId 加本地锁（ReentrantLock per ticketCategoryId），
- * 回调中是否叠加分布式锁由策略实现决定；并发安全的最终底线是带校验的 Lua。
- * 被 V2/V3/V4 策略实现类调用
+ * 按 programId + ticketCategoryId 进行细粒度加锁，
+ * 具体策略是否叠加分布式锁由 LockTask 决定。
  */
 @Slf4j
 @Component
 public class BaseProgramOrder {
 
+    // 本地锁最多等待 3 秒，避免线程长时间阻塞。
     private static final long LOCK_WAIT_TIME = 3L;
 
     @Autowired
     private LocalLockCache localLockCache;
-    
+
     /**
-     * 本地锁（按 ticketCategoryId 加 ReentrantLock），回调中由策略决定是否叠加分布式锁。
-     * 本地锁先于分布式锁获取，后于分布式锁释放，形成相反的释放顺序，
-     * 避免分布式锁释放后其他线程立即重入，本地锁还未释放导致的并发问题。
-     *
-     * @param lockKeyPrefix          锁 key 前缀（区分不同策略版本）
-     * @param programOrderCreateDto  订单创建请求参数（含座位/票档信息）
-     * @param lockTask               下单回调（策略实现类中的实际下单逻辑）
-     * @return 订单编号
+     * 本地锁下单入口。
      */
     public String localLockCreateOrder(String lockKeyPrefix, ProgramOrderCreateDto programOrderCreateDto,
-                                            LockTask<String> lockTask){
+                                       LockTask<String> lockTask) {
         return localLockExecute(lockKeyPrefix, programOrderCreateDto, lockTask);
     }
 
     /**
-     * 本地锁（按 ticketCategoryId 加 ReentrantLock）泛型模板，回调结果类型由调用方指定。
-     * 锁内只应保留必须互斥的临界操作（如 Lua 扣减），耗时操作（如 Kafka 发送）应放在锁外，
-     * 以缩短锁持有时间、降低锁竞争失败率。
-     *
-     * @param lockKeyPrefix          锁 key 前缀（区分不同策略版本）
-     * @param programOrderCreateDto  订单创建请求参数（含座位/票档信息）
-     * @param lockTask               锁内回调，返回任意类型结果
-     * @param <T>                    回调返回类型
-     * @return 锁内回调的执行结果
+     * 通用本地锁模板：
+     * 先获取所有需要的本地锁，再执行下单逻辑，最后统一释放。
      */
     public <T> T localLockExecute(String lockKeyPrefix, ProgramOrderCreateDto programOrderCreateDto,
-                                      LockTask<T> lockTask){
-        // 第一步：提取不重复的票价档位 ID（选座时从 seatDtoList 提取，不选座时直接取 ticketCategoryId）
+                                  LockTask<T> lockTask) {
+
+        // 第一步：获取本次请求涉及的所有票档 ID。
+        // 选座场景从座位列表中提取并去重；不选座场景直接使用 ticketCategoryId。
         List<SeatDto> seatDtoList = programOrderCreateDto.getSeatDtoList();
         List<Long> ticketCategoryIdList = new ArrayList<>();
+
         if (CollectionUtil.isNotEmpty(seatDtoList)) {
+            // 按 ticketCategoryId 去重并排序，保证多个锁始终按照固定顺序获取，避免死锁。
             ticketCategoryIdList =
-                    seatDtoList.stream().map(SeatDto::getTicketCategoryId).distinct().sorted().collect(Collectors.toList());
-        }else {
+                    seatDtoList.stream()
+                            .map(SeatDto::getTicketCategoryId)
+                            .distinct()
+                            .sorted()
+                            .collect(Collectors.toList());
+        } else {
             ticketCategoryIdList.add(programOrderCreateDto.getTicketCategoryId());
         }
-        // 第二步：为每个档位构建本地锁 key，存入列表（此时尚未加锁）
+
+        // 第二步：根据 programId + ticketCategoryId 获取对应的本地锁。
+        // 锁粒度细化到票档，避免整个节目共用一把大锁。
         List<ReentrantLock> localLockList = new ArrayList<>(ticketCategoryIdList.size());
         List<ReentrantLock> localLockSuccessList = new ArrayList<>(ticketCategoryIdList.size());
+
         for (Long ticketCategoryId : ticketCategoryIdList) {
-            String lockKey = StrUtil.join("-",lockKeyPrefix,
-                    programOrderCreateDto.getProgramId(),ticketCategoryId);
-            ReentrantLock localLock = localLockCache.getLock(lockKey,false);
+            String lockKey = StrUtil.join("-",
+                    lockKeyPrefix,
+                    programOrderCreateDto.getProgramId(),
+                    ticketCategoryId);
+
+            ReentrantLock localLock = localLockCache.getLock(lockKey, false);
             localLockList.add(localLock);
         }
-        // 第三步：逐个加锁（限时等待），任一本地锁超时/中断则停止获取并快速失败，不执行下单
+
+        // 第三步：按固定顺序依次加锁，最多等待 3 秒。
         boolean localLockFail = false;
+
         for (ReentrantLock reentrantLock : localLockList) {
             try {
                 if (reentrantLock.tryLock(LOCK_WAIT_TIME, TimeUnit.SECONDS)) {
+                    // 记录实际获取成功的锁，后续只释放这些锁。
                     localLockSuccessList.add(reentrantLock);
                 } else {
                     localLockFail = true;
                     break;
                 }
             } catch (InterruptedException e) {
+                // 被中断时恢复中断标记，并按获取锁失败处理。
                 Thread.currentThread().interrupt();
                 localLockFail = true;
                 break;
             }
         }
+
         try {
+            // 有任意一把锁获取失败，就不执行下单逻辑。
             if (localLockFail) {
                 throw new TicketFlowFrameException(BaseCode.SERVICE_LOCK_FAIL);
             }
-            // 第四步：执行回调——是否叠加分布式锁由策略实现类在 lockTask 中决定
+
+            // 第四步：执行具体下单逻辑。
+            // 是否叠加 Redis 分布式锁，由具体策略在 LockTask 中决定。
             return lockTask.execute();
-        }finally {
-            // 第五步：反向释放（后加的先释放），防止锁依赖顺序不一致导致死锁
+
+        } finally {
+            // 第五步：按后加先释放的顺序释放锁，保证资源正确回收。
             for (int i = localLockSuccessList.size() - 1; i >= 0; i--) {
                 ReentrantLock reentrantLock = localLockSuccessList.get(i);
                 try {
                     reentrantLock.unlock();
-                }catch (Exception e) {
-                    log.error("local lock unlock error",e);
+                } catch (Exception e) {
+                    log.error("local lock unlock error", e);
                 }
             }
         }

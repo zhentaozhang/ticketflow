@@ -667,6 +667,10 @@ class ProgramOrderServiceTest {
                 return null;
             }).when(createOrderSend).sendMessage(anyString(), any(), any());
 
+            // 回滚守卫：发送失败回调先确认座位仍在锁定集合（PENDING 已回滚时跳过，避免余票二次回补）
+            when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(
+                    List.of(createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID)));
+
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programOrderService.createNewAsync(dto, ProgramOrderVersion.V4_VERSION.getValue()));
 
@@ -723,7 +727,7 @@ class ProgramOrderServiceTest {
     class CreateNewAsyncV5 {
 
         @Test
-        void v5Lua幂等标记TTL为3秒() {
+        void v5Lua幂等标记TTL为10秒() {
             ProgramOrderCreateDto dto = createDtoWithSeats(1);
 
             when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
@@ -752,10 +756,10 @@ class ProgramOrderServiceTest {
 
             programOrderService.createOrderOperateProgramCacheResolutionV5(dto);
 
-            // 幂等标记 TTL 通过 ARGV[4]（data[3]）传入 V5 Lua，必须为 3 秒
+            // 幂等标记 TTL 通过 ARGV[4]（data[3]）传入 V5 Lua，必须覆盖"请求不确定窗口"（10 秒）
             ArgumentCaptor<String[]> dataCaptor = ArgumentCaptor.forClass(String[].class);
             verify(programCacheCreateOrderV5ResolutionOperate).programCacheOperate(anyList(), dataCaptor.capture());
-            assertEquals("3", dataCaptor.getValue()[3]);
+            assertEquals("10", dataCaptor.getValue()[3]);
         }
 
         @Test

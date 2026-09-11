@@ -5,16 +5,16 @@ dataSources:
     jdbcUrl: jdbc:mysql://127.0.0.1:3306/ticketflow_order_0?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
     username: root
     password: root
-    maxPoolSize: 20
-    minPoolSize: 5
+    maximumPoolSize: 50
+    minimumIdle: 5
   ds_1:
     dataSourceClassName: com.zaxxer.hikari.HikariDataSource
     driverClassName: com.mysql.cj.jdbc.Driver
     jdbcUrl: jdbc:mysql://127.0.0.1:3306/ticketflow_order_1?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
     username: root
     password: root
-    maxPoolSize: 20
-    minPoolSize: 5
+    maximumPoolSize: 50
+    minimumIdle: 5
 
 rules:
   - !SHARDING

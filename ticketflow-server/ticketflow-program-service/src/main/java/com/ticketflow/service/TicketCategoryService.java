@@ -122,9 +122,18 @@ public class TicketCategoryService extends ServiceImpl<TicketCategoryMapper, Tic
         if (CollectionUtil.isNotEmpty(ticketCategoryVoList)) {
             return ticketCategoryVoList;
         }
-        RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_TICKET_CATEGORY_LOCK, 
+        RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_TICKET_CATEGORY_LOCK,
                 new String[]{String.valueOf(programId)});
-        lock.lock();
+        if (!serviceLockTool.tryLock(lock, "GET_TICKET_CATEGORY_LOCK:" + programId)) {
+            // 等超时：先再查一次缓存（可能刚好被填好），仍没有就快速失败，不无锁重建
+            ticketCategoryVoList = redisCache.getValueIsList(
+                    RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_TICKET_CATEGORY_LIST, programId),
+                    TicketCategoryVo.class);
+            if (CollectionUtil.isNotEmpty(ticketCategoryVoList)) {
+                return ticketCategoryVoList;
+            }
+            throw new TicketFlowFrameException(BaseCode.CACHE_LOAD_LOCK_TIMEOUT);
+        }
         try {
             return redisCache.getValueIsList(
                     RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_TICKET_CATEGORY_LIST, programId),
@@ -171,7 +180,16 @@ public class TicketCategoryService extends ServiceImpl<TicketCategoryMapper, Tic
         // 第二层：手动 ReentrantLock + 二次 Redis 检查（双检锁模式防缓存击穿）
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_REMAIN_NUMBER_LOCK,
                 new String[]{String.valueOf(programId),String.valueOf(ticketCategoryId)});
-        lock.lock();
+        if (!serviceLockTool.tryLock(lock, "GET_REMAIN_NUMBER_LOCK:" + programId + ":" + ticketCategoryId)) {
+            // 等超时：先再查一次缓存（可能刚好被填好），仍没有就快速失败，不无锁重建
+            ticketCategoryRemainNumber =
+                    redisCache.getAllMapForHash(RedisKeyBuild.createRedisKey(
+                            RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programId,ticketCategoryId), Long.class);
+            if (CollectionUtil.isNotEmpty(ticketCategoryRemainNumber)) {
+                return ticketCategoryRemainNumber;
+            }
+            throw new TicketFlowFrameException(BaseCode.CACHE_LOAD_LOCK_TIMEOUT);
+        }
         try {
             // 双检：获取锁后再次查询 Redis，防止等待期间其他线程已回填
             ticketCategoryRemainNumber =
