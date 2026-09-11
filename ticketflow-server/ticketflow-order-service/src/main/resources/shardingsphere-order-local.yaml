@@ -54,7 +54,11 @@ rules:
         databaseStrategy:
           complex:
             shardingColumns: order_number
-            shardingAlgorithmName: database-order-complex-2t
+            # 库算法必须和另外三张订单表用同一个（table-sharding-count = 8 → 取 bit3）。
+            # 库索引的位移量由 table-sharding-count 决定，用 -2t 会变成取 bit1，
+            # 于是同一个订单号会有 50% 的概率落到不同库，建单的本地事务就不成立了。
+            # 它自己的分表数仍是 2（见下面 table-order-complex-2t），本地事务只要求同库、不要求同表。
+            shardingAlgorithmName: database-order-complex
         tableStrategy:
           complex:
             shardingColumns: order_number
@@ -78,13 +82,6 @@ rules:
           strategy: complex
           algorithmClassName: com.ticketflow.shardingsphere.TableOrderComplexGeneArithmetic
           sharding-count: 8
-      database-order-complex-2t:
-        type: CLASS_BASED
-        props:
-          strategy: complex
-          algorithmClassName: com.ticketflow.shardingsphere.DatabaseOrderComplexGeneArithmetic
-          sharding-count: 2
-          table-sharding-count: 2
       table-order-complex-2t:
         type: CLASS_BASED
         props:
