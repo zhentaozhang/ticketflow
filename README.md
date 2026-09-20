@@ -26,6 +26,8 @@
     <img src="https://img.shields.io/badge/Kafka-3.6-231F20?logo=apachekafka&style=flat-square" alt="Kafka 3.6">
     <img src="https://img.shields.io/badge/ShardingSphere-5.3-4479A1?logo=apache&style=flat-square" alt="ShardingSphere 5.3">
     <img src="https://img.shields.io/badge/Elasticsearch-8.11-005571?logo=elasticsearch&style=flat-square" alt="Elasticsearch 8.11">
+    <img src="https://github.com/zhentaozhang/ticketflow/actions/workflows/ci.yml/badge.svg" alt="CI">
+    <img src="https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&style=flat-square" alt="Docker Compose">
   </p>
 </div>
 
@@ -204,7 +206,7 @@ sequenceDiagram
 
 - 单机容量拐点约 **2,600/s**（2800/s 起过载，p99 飙至 351ms），安全容量建议 ≤ 2,000/s
 - 优化关键：**Kafka topic 分区数需 ≥ 消费者并发**（3→8 分区，拐点从 2000/s 右移至 2600/s，+30%）
-- 压测脚本与完整数据见 `coupon-seckill/benchmark/` 与 `coupon-seckill/docs/03-M4-压测报告.md`
+- 压测脚本与完整数据见 `coupon-seckill/`（独立模块，设计文档随模块本地维护）
 
 ---
 
@@ -271,6 +273,7 @@ flowchart TB
     %% ==================== 可观测性 ====================
     subgraph Observability[可观测性]
         PG[Prometheus + Grafana]:::monitor
+        JG[Jaeger<br/>OTel Trace]:::monitor
         BA[Spring Boot Admin]:::monitor
     end
 
@@ -334,7 +337,7 @@ flowchart TB
 | **搜索引擎** | Elasticsearch | 8.11.0 |
 | **认证授权** | Sa-Token + JWT | 1.43.0 |
 | **支付** | 支付宝 SDK | 4.38.197.ALL |
-| **监控** | Spring Boot Admin / Prometheus / Grafana | — |
+| **监控** | Spring Boot Admin / Prometheus / Grafana / OpenTelemetry + Jaeger（Trace） | — |
 | **API 文档** | Knife4j + SpringDoc OpenAPI 3 | 4.3.0 |
 
 ### 前端
@@ -454,6 +457,9 @@ flowchart LR
 | **Migrate 迁移服务** | 6088 | 数据迁移、CSV 导入、路由映射刷新 |
 | **Admin 监控** | 10082 | Spring Boot Admin 健康检查、JVM 监控 |
 
+> `Coupon 优惠券服务` 对应独立模块 `coupon-seckill/`（服务名 `ticketflow-coupon-service`，端口 8090）；
+> 网关已配置其路由，但尚未纳入 `docker/docker-compose.yml`，需单独启动。
+
 ---
 
 ## 前端功能矩阵
@@ -491,34 +497,65 @@ flowchart LR
 | Java | 17+（推荐 Corretto） |
 | Maven | 3.8+ |
 | Node.js | 20+ |
-| npm / pnpm | npm 9+ / pnpm 9+ |
+| pnpm | 9+ |
 | Docker & Docker Compose | 最新稳定版 |
+| GNU Make（可选） | 用于 `make` 快捷命令 |
 
-### 启动基础设施
+### 一键容器化启动（推荐）
+
+> 全部微服务与基础设施容器化运行。`make up`（等价 `./docker/build.sh`）一条命令完成
+> **宿主机 Maven 打包 → 暂存 fat-jar（按容器网络改写 ShardingSphere 地址）→ 构建镜像 → compose 启动**。
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
+make up                  # 构建并启动整套系统
+make ps                  # 容器状态
+make logs SVC=program    # 查看某服务日志
+make down                # 停止（数据卷保留）
 ```
 
-启动后包含以下 9 个容器：
+不使用 `make` 时，可直接调用脚本：
+
+```bash
+./docker/build.sh           # 打包 + 构建镜像 + 启动
+./docker/build.sh images    # 只打包 + 构建镜像，不启动
+./docker/build.sh down      # 停止
+./docker/build.sh logs order
+```
+
+- 应用镜像统一由 `docker/app/Dockerfile` 构建（`build args: SVC / PORT`），基础镜像
+  `eclipse-temurin:17-jre-jammy`，以非 root 运行。
+- 容器化的业务服务（9 个）：`gateway`、`user`、`base-data`、`customize`、`program`、`order`、`pay`、`admin`、`migrate`。
+- 支付密钥不入库：首次由 `docker/app/pay.env.example` 生成 `docker/app/pay.env`（已 gitignore），真实密钥请替换该文件。
+- Trace 可选：`./docker/otel/download-agent.sh` 下载 agent 后，compose 会挂载到容器 `/otel`。
+
+### 启动基础设施（裸机开发模式）
+
+> `docker compose` 已升级为“基础设施 + 全部业务服务”的统一编排；若只在本机 IDE 跑应用、仅把中间件放容器：
+
+```bash
+docker compose -f docker/docker-compose.yml up -d mysql redis kafka nacos elasticsearch sentinel
+```
+
+基础设施镜像与端口：
 
 | 服务 | 镜像 | 端口 | 账号/密码 |
 |------|------|------|----------|
 | **MySQL** | mysql:8.0 | 3306 | `root` / `root` |
 | **Redis 7** | redis:7 | 6379 | 无密码 |
-| **Kafka** (KRaft) | bitnami/kafka:3.6 | 9092 | 无认证 |
+| **Kafka** (KRaft) | bitnami/kafka:3.6 | 9092（宿主 19092） | 无认证 |
 | **Nacos** | nacos/nacos-server:v2.4.0 | 8848 (9848) | 无认证（单机模式） |
 | **Elasticsearch** | docker.elastic.co/elasticsearch/elasticsearch:8.11.0 | 9200 (9300) | 无认证 |
 | **Sentinel** | bladex/sentinel-dashboard:1.8.8 | 8082 | `sentinel` / `sentinel` |
 | **Prometheus** | prom/prometheus:v2.53.0 | 9090 | 无认证 |
 | **Grafana** | grafana/grafana:11.0.0 | 3000 | `admin` / `admin` |
-| **Seata** | seataio/seata-server:1.8.0 | 8091 | 无认证 |
+| **Jaeger** | jaegertracing/all-in-one:1.76.0 | 16686 / 4318 | 无认证 |
 
-> Docker 数据卷持久化：`docker_mysql-data`, `docker_redis-data`, `docker_kafka-data`, `docker_nacos-data`, `docker_es-data`, `docker_prometheus-data`, `docker_grafana-data`, `docker_seata-data`
+> 数据卷：`docker_mysql-data`、`docker_redis-data`、`docker_kafka-data`、`docker_nacos-data`、`docker_es-data`、`docker_prometheus-data`、`docker_grafana-data`。
 
 ### 构建后端
 
 ```bash
+make build                          # 等价 mvn -DskipTests -T 4 package
 # 全量构建（-T 4 启用 4 线程并行编译）
 mvn clean install -DskipTests -T 4
 
@@ -560,8 +597,8 @@ curl -s http://localhost:6085/actuator/health
 ```bash
 # 用户端 (Vue 3)
 cd vue3
-npm install --legacy-peer-deps
-npm run dev
+pnpm install
+pnpm run dev
 # → http://localhost:5173
 
 # 管理端 (Vben Admin)
@@ -570,6 +607,18 @@ pnpm install
 pnpm dev:ele
 # → http://localhost:5555
 ```
+
+### 常用命令（Makefile）
+
+| 命令 | 说明 |
+|------|------|
+| `make up` / `make images` / `make down` | 启动整套 / 只构建镜像 / 停止 |
+| `make ps` / `make logs SVC=program` / `make restart SVC=order` | 状态 / 日志 / 重启 |
+| `make build` / `make test` / `make itest` | 后端打包 / 单元测试 / 集成测试 |
+| `make coupon-test` / `make front-build` | coupon-seckill 单测 / 前端构建 |
+| `make lint` / `make ci` / `make clean` | 静态门禁（编译）/ 本地等价 CI / 清理 |
+
+> `make help` 可查看全部目标。
 
 ### 访问入口一览
 
@@ -583,6 +632,7 @@ pnpm dev:ele
 | Sentinel | `http://localhost:8082` | 限流熔断控制台 |
 | Prometheus | `http://localhost:9090` | 指标采集 |
 | Grafana | `http://localhost:3000` | 监控看板 |
+| Jaeger | `http://localhost:16686` | 链路追踪（Trace） |
 | Spring Boot Admin | `http://localhost:10082` | 服务健康监控（admin/admin） |
 
 ---
@@ -621,6 +671,22 @@ Apifox 支持通过 URL 直接导入 OpenAPI 格式的接口文档。各服务�
 
 ---
 
+## 持续集成
+
+使用 GitHub Actions（`.github/workflows/ci.yml`），push 到 `master` 或发起 PR 时触发：
+
+| Job | 内容 |
+|-----|------|
+| **Backend unit tests** | `mvn -B test`（全部后端模块单元测试） |
+| **Integration tests (Testcontainers)** | `mvn -B verify -pl order,program -am` |
+| **coupon-seckill tests** | `mvn -B -f coupon-seckill/pom.xml test -Dtest='*Test'` |
+| **Build application images** | `bash ./docker/build.sh images`（验证 Dockerfile / build.sh / patch-jar 链路） |
+| **Frontend build** | vue3 与 admin（pnpm 安装 + 构建） |
+
+本地等价校验：`make ci`。
+
+---
+
 ## 项目结构
 
 ```
@@ -646,7 +712,9 @@ ticketflow/
 ├── ticketflow-thread-pool-framework/          # 线程池透传
 ├── ticketflow-captcha-manage-framework/       # 验证码框架
 ├── sql/                                       # 数据库 DDL
-├── docker/                                    # Docker Compose
+├── docker/                                    # Compose 编排 + 统一 Dockerfile + OTel 接入
+├── Makefile                                   # 常用命令（构建 / 测试 / 容器）
+├── .github/workflows/                         # GitHub Actions CI
 ├── vue3/                                      # 用户端前端
 ├── ticketflow-front-manage/                   # 管理端前端
 ├── coupon-seckill/                            # 优惠券秒杀（独立单体验证 → ticketflow-coupon-service）
@@ -665,7 +733,7 @@ ticketflow/
 | 超时取消 | 延迟队列 | 基于 Redisson 实现，避免轮询数据库 |
 | 分布式事务 | 最终一致性 + 补偿 | 避免 Seata 带来的性能开销，延迟队列兜底 |
 | ID 生成 | 雪花算法 + 基因法 | 全局唯一 + 单调递增 + 天然支持分片路由 |
-| 可观测性 | Prometheus + Grafana + Spring Boot Admin | 指标采集、可视化监控、服务健康检查 |
+| 可观测性 | Prometheus + Grafana + Spring Boot Admin + OpenTelemetry（OTLP→Jaeger） | 指标采集、可视化监控、服务健康检查、全链路 Trace |
 | 优惠券抢购 | Redis Lua 原子扣减 + Kafka 异步发券 | 同步路径纯 Redis 扛峰值，DB 异步化削峰，唯一索引 + 对账兜底幂等与超卖 |
 | 用券一致性 | 锁券强一致 + 抢购最终一致 | 锁券/核销走 DB 事务与乐观锁，抢购结果由对账任务收敛 |
 
