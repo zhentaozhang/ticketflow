@@ -37,10 +37,13 @@ vue3/components.d.ts
 .playwright-mcp/
 .opencode/
 
-### Docs ###
+### Docs / Markdown ###
+# 项目约定：Markdown 不入库（学习/设计/说明文档一律留本地），仅保留 README 作为项目说明。
 docs/
 ticketflow-study-plan.md
-!coupon-seckill/docs/
+*.md
+!README.md
+!**/README.md
 
 ### Generated benchmark outputs ###
 benchmark/results/
