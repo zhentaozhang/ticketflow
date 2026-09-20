@@ -132,9 +132,19 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
                 }
             }
         } catch (TicketFlowFrameException e) {
-            // TicketFlowFrameException 表示程序层已处理（如订单已支付/已取消），视为消费成功
-            if (Objects.nonNull(updateMessageConsumerRecordDto)) {
-                updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
+            // 只有"订单已处于终态 / 已被并发流程改掉"才视为消费成功；
+            // 其余业务失败（如订单暂不可见 ORDER_NOT_EXIST、状态不允许取消）应标记失败保留重试，
+            // 否则一次瞬时失败就被永久吞掉、订单再也不会被取消。
+            if (isTerminalOrderState(e.getCode())) {
+                if (Objects.nonNull(updateMessageConsumerRecordDto)) {
+                    updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
+                }
+            } else {
+                log.warn("延迟订单取消业务失败，保留重试 orderNumber : {} code : {}", orderNumber, e.getCode());
+                if (Objects.nonNull(updateMessageConsumerRecordDto)) {
+                    updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_FAIL.getCode());
+                    updateMessageConsumerRecordDto.setMessageConsumerException(e.getMessage());
+                }
             }
         } catch (Exception e) {
             if (Objects.nonNull(updateMessageConsumerRecordDto)) {
@@ -149,6 +159,17 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
                 log.error("更新消息消费记录失败 id : {}", updateMessageConsumerRecordDto.getId(), e);
             }
         }
+    }
+
+    /**
+     * 订单已处于终态 / 已被并发流程改掉的错误码：这类失败重试也无意义，按消费成功处理。
+     * 其余业务失败（订单不存在、状态不允许等）保留重试。
+     */
+    private boolean isTerminalOrderState(Integer code) {
+        return Objects.equals(code, BaseCode.ORDER_CANCEL.getCode())
+                || Objects.equals(code, BaseCode.ORDER_PAY.getCode())
+                || Objects.equals(code, BaseCode.ORDER_REFUND.getCode())
+                || Objects.equals(code, BaseCode.ORDER_STATUS_CHANGED.getCode());
     }
 
     @Override

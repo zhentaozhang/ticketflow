@@ -243,3 +243,11 @@ LOCK TABLES `d_user_mobile_1` WRITE;
 INSERT INTO `d_user_mobile_1` VALUES (1863459316141400067,5,'280a7288b94ca19418b4ed5b710617a8','2026-02-06 16:58:17','2026-02-06 16:58:17',1);
 /*!40000 ALTER TABLE `d_user_mobile_1` ENABLE KEYS */;
 UNLOCK TABLES;
+
+--
+-- 唯一约束：手机号唯一（应用层布隆过滤器判重的兜底）
+--
+ALTER TABLE `d_user_0` ADD UNIQUE KEY `uk_mobile` (`mobile`);
+ALTER TABLE `d_user_1` ADD UNIQUE KEY `uk_mobile` (`mobile`);
+ALTER TABLE `d_user_mobile_0` ADD UNIQUE KEY `uk_mobile` (`mobile`);
+ALTER TABLE `d_user_mobile_1` ADD UNIQUE KEY `uk_mobile` (`mobile`);

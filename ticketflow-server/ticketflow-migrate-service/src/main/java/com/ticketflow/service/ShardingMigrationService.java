@@ -16,6 +16,7 @@ import org.apache.shardingsphere.infra.hint.HintManager;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -50,6 +51,13 @@ public class ShardingMigrationService {
 
     @Autowired
     private OrderTicketUserRecordMapper orderTicketUserRecordMapper;
+
+    /**
+     * 显式事务模板：insertToTarget / deleteFromSource 通过 this 调用，@Transactional 会因自调用失效，
+     * 因此用 TransactionTemplate 把"插入目标表 + 删除源表"包在一个事务里，避免中途失败导致数据重复。
+     */
+    @Autowired
+    private TransactionTemplate transactionTemplate;
 
     /**
      * 单张分片表的迁移上下文
@@ -216,11 +224,11 @@ public class ShardingMigrationService {
                     int targetTableIndex = Integer.parseInt(parts[1]);
                     List<T> toMigrate = entry.getValue();
 
-                    // 插入到目标表
-                    insertToTarget(table, targetDbIndex, targetTableIndex, toMigrate);
-
-                    // 从源表删除
-                    deleteFromSource(table, sourceDbIndex, sourceTableIndex, toMigrate);
+                    // 插入目标表 + 删除源表在同一事务内完成（自调用 @Transactional 失效，故显式开事务）
+                    transactionTemplate.executeWithoutResult(status -> {
+                        insertToTarget(table, targetDbIndex, targetTableIndex, toMigrate);
+                        deleteFromSource(table, sourceDbIndex, sourceTableIndex, toMigrate);
+                    });
 
                     result.migratedCount += toMigrate.size();
                 }

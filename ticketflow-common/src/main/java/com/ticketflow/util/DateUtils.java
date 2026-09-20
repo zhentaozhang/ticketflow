@@ -785,9 +785,11 @@ public class DateUtils {
         if (Objects.isNull(date1) || Objects.isNull(date2)) {
             return -1;
         }
-        // 直接计算毫秒差并转换为秒  
-        long diffInMilliseconds = Math.abs(date2.getTime() - date1.getTime());
-        return diffInMilliseconds / 1000;
+        // 有符号差值：date2 早于 date1（目标时间已过）时返回 0。
+        // 不能用 Math.abs：否则"演出已开始"会被算成"还剩很久"，调用方拿它当 Redis/本地缓存 TTL，
+        // 过期数据会一直缓存下去（本地缓存有 5 分钟上界兜底，Redis 没有）。
+        long diffInMilliseconds = date2.getTime() - date1.getTime();
+        return Math.max(0L, diffInMilliseconds / 1000);
     }
     
  

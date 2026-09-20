@@ -228,20 +228,33 @@ class ProgramServiceTest {
         void V1版本成功_置已售并扣库存() {
             when(seatMapper.selectList(any(LambdaQueryWrapper.class)))
                     .thenReturn(List.of(seat(SEAT_ID_1, SellStatus.NO_SOLD.getCode()), seat(SEAT_ID_2, SellStatus.NO_SOLD.getCode())));
-            when(ticketCategoryMapper.batchUpdateRemainNumber(anyList(), anyLong())).thenReturn(1);
+            when(ticketCategoryMapper.reduceRemainNumber(anyLong(), anyLong(), anyLong())).thenReturn(1);
 
             Boolean result = programService.operateProgramData(operateDataDto(SellStatus.SOLD.getCode(), ProgramOrderVersion.V1_VERSION.getValue()));
 
             assertTrue(result);
             verify(seatMapper).update(any(Seat.class), any(LambdaUpdateWrapper.class));
-            verify(ticketCategoryMapper).batchUpdateRemainNumber(anyList(), anyLong());
+            verify(ticketCategoryMapper).reduceRemainNumber(2L, TICKET_CATEGORY_ID, PROGRAM_ID);
+        }
+
+        @Test
+        void V1版本取消_置未售并归还库存() {
+            when(seatMapper.selectList(any(LambdaQueryWrapper.class)))
+                    .thenReturn(List.of(seat(SEAT_ID_1, SellStatus.NO_SOLD.getCode()), seat(SEAT_ID_2, SellStatus.NO_SOLD.getCode())));
+            when(ticketCategoryMapper.increaseRemainNumber(anyLong(), anyLong(), anyLong())).thenReturn(1);
+
+            Boolean result = programService.operateProgramData(operateDataDto(SellStatus.NO_SOLD.getCode(), ProgramOrderVersion.V1_VERSION.getValue()));
+
+            assertTrue(result);
+            verify(seatMapper).update(any(Seat.class), any(LambdaUpdateWrapper.class));
+            verify(ticketCategoryMapper).increaseRemainNumber(2L, TICKET_CATEGORY_ID, PROGRAM_ID);
         }
 
         @Test
         void V1版本库存更新失败_抛异常() {
             when(seatMapper.selectList(any(LambdaQueryWrapper.class)))
                     .thenReturn(List.of(seat(SEAT_ID_1, SellStatus.NO_SOLD.getCode()), seat(SEAT_ID_2, SellStatus.NO_SOLD.getCode())));
-            when(ticketCategoryMapper.batchUpdateRemainNumber(anyList(), anyLong())).thenReturn(0);
+            when(ticketCategoryMapper.reduceRemainNumber(anyLong(), anyLong(), anyLong())).thenReturn(0);
 
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programService.operateProgramData(operateDataDto(SellStatus.SOLD.getCode(), ProgramOrderVersion.V1_VERSION.getValue())));
@@ -268,7 +281,7 @@ class ProgramServiceTest {
             assertTrue(result);
             verify(seatMapper).update(any(Seat.class), any(LambdaUpdateWrapper.class));
             // 锁定阶段已扣库存，支付成功不再操作库存
-            verify(ticketCategoryMapper, never()).batchUpdateRemainNumber(anyList(), anyLong());
+            verify(ticketCategoryMapper, never()).reduceRemainNumber(anyLong(), anyLong(), anyLong());
             verify(ticketCategoryMapper, never()).increaseRemainNumber(anyLong(), anyLong(), anyLong());
         }
 
@@ -354,13 +367,13 @@ class ProgramServiceTest {
         void 订单版本为空_不抛NPE_按非V4处理() {
             when(seatMapper.selectList(any(LambdaQueryWrapper.class)))
                     .thenReturn(List.of(seat(SEAT_ID_1, SellStatus.NO_SOLD.getCode()), seat(SEAT_ID_2, SellStatus.NO_SOLD.getCode())));
-            when(ticketCategoryMapper.batchUpdateRemainNumber(anyList(), anyLong())).thenReturn(1);
+            when(ticketCategoryMapper.reduceRemainNumber(anyLong(), anyLong(), anyLong())).thenReturn(1);
 
             Boolean result = programService.operateProgramData(operateDataDto(SellStatus.SOLD.getCode(), null));
 
             // orderVersion=null 不应 NPE，按 V1-V3（非 V4）语义处理
             assertTrue(result);
-            verify(ticketCategoryMapper).batchUpdateRemainNumber(anyList(), anyLong());
+            verify(ticketCategoryMapper).reduceRemainNumber(2L, TICKET_CATEGORY_ID, PROGRAM_ID);
         }
     }
 

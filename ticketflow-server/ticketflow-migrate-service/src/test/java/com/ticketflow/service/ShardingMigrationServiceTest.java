@@ -14,6 +14,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.Collections;
 import java.util.HashSet;
@@ -26,6 +28,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeast;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -53,6 +58,9 @@ class ShardingMigrationServiceTest {
     @Mock
     private OrderTicketUserRecordMapper orderTicketUserRecordMapper;
 
+    @Mock
+    private TransactionTemplate transactionTemplate;
+
     @InjectMocks
     private ShardingMigrationService shardingMigrationService;
 
@@ -70,6 +78,12 @@ class ShardingMigrationServiceTest {
         // 另外两张订单主表返回空批次，避免 selectList 返回 null 触发 NPE
         when(orderTicketUserMapper.selectList(any())).thenReturn(Collections.emptyList());
         when(orderTicketUserRecordMapper.selectList(any())).thenReturn(Collections.emptyList());
+        // TransactionTemplate 在单测里直接执行回调，等价于同步事务（dry-run 用例不使用，故 lenient）
+        lenient().doAnswer(invocation -> {
+            java.util.function.Consumer<TransactionStatus> action = invocation.getArgument(0);
+            action.accept(mock(TransactionStatus.class));
+            return null;
+        }).when(transactionTemplate).executeWithoutResult(any());
     }
 
     private Order order(long id, long orderNumber) {

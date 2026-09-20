@@ -332,6 +332,9 @@ public class UserService extends ServiceImpl<UserMapper, User> {
             updateUserMobile.setMobile(userUpdateMobileDto.getMobile());
             userMobileMapper.update(updateUserMobile, userMobileLambdaUpdateWrapper);
         }
+        // 新手机号加入布隆过滤器：register 时才会 add，改绑路径漏了，
+        // 否则后续 doExist 因布隆不含新号而跳过 DB 判重，可导致两个用户绑定同一手机号。
+        bloomFilterHandler.add(userUpdateMobileDto.getMobile());
     }
 
     @Transactional(rollbackFor = Exception.class)

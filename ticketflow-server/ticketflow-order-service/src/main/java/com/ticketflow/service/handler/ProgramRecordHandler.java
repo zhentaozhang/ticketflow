@@ -23,6 +23,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.HashSet;
 import java.util.List;
@@ -60,63 +61,79 @@ public class ProgramRecordHandler {
     
     @Autowired
     private OrderProgramMapper orderProgramMapper;
-    
+
     /**
-     * 向redis中添加补偿的记录，从未完成记录中转移到完整的记录。
-     * 重试机制：最大 5 次，失败时 sleep(1s) 后递归重试。
-     * 注意：@Transactional 只管 DB，Redis 操作在外部，失败会进 catch 重试。
+     * DB 落库用显式事务模板：每次重试开启独立事务，且 sleep/重试都在事务外完成，
+     * 避免旧实现（@Transactional + 自调用递归 + 事务内 Thread.sleep）长时间占用 Hikari 连接，
+     * 以及"失败后事务已 rollback-only、重试写不进去"的问题。
+     */
+    @Autowired
+    private TransactionTemplate transactionTemplate;
+
+    /**
+     * 向 redis 中添加补偿的记录，从未完成记录中转移到完整的记录。
+     * 重试机制：最大 5 次，失败时 sleep(1s) 后重试（每次重试独立事务）。
      * */
-    @Transactional(rollbackFor = Exception.class)
-    public void add(int retryCount,Long programId,
+    public void add(int retryCount, Long programId,
                     Map<String, ProgramRecord> completeRedisCordMap,
-                    Map<String, String> totalProgramRecordMap){
+                    Map<String, String> totalProgramRecordMap) {
         int maxRetryCount = 5;
-        if (retryCount > maxRetryCount) {
-            log.error("添加记录流水失败超过最大重试次数,retryCount:{} programId:{}, completeRedisCordMap:{}, " +
-                    "totalProgramRecordMap:{}", retryCount,programId, completeRedisCordMap, totalProgramRecordMap);
-            throw new TicketFlowFrameException(BaseCode.MAX_RETRY_COUNT);
-        }
-        try {
-            Set<String> keyList = new HashSet<>();
-            //把数据库中的订单、购票人订单、购票人订单记录都修改成对账完成状态
-            addKeyList(keyList,completeRedisCordMap);
-            addKeyList(keyList,totalProgramRecordMap);
-            for (final String key : keyList) {
-                String[] split = SplitUtil.toSplit(key);
-                Long identifierId = Long.valueOf(split[0]);
-                Long userId = Long.valueOf(split[1]);
-                int result = updateDbOrderTicketUserRecordStatus(programId, identifierId, userId,
-                        ReconciliationStatus.RECONCILIATION_SUCCESS);
-                log.info("修改数据库记录流水成功, programId:{}, identifierId:{}, userId:{}, result:{}", 
-                        programId, identifierId, userId, result);
-            }
-            if (CollectionUtil.isNotEmpty(totalProgramRecordMap)) {
-                //从旧地记录中删除
-                redisCache.delForHash(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_RECORD, programId),
-                        totalProgramRecordMap.keySet());
-            }
-            if (CollectionUtil.isNotEmpty(totalProgramRecordMap)) {
-                //目前所有的记录添加到完成的记录中 key：记录类型_记录标识_用户id value：记录标识
-                redisCache.putHash(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_RECORD_FINISH, programId), 
-                        totalProgramRecordMap);
-            }
-            if (CollectionUtil.isNotEmpty(completeRedisCordMap)) {
-                //将新补充的记录添加到redis对比完成的记录中
-                redisCache.putHash(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_RECORD_FINISH, programId), 
-                        completeRedisCordMap);
-                log.info("添加记录流水成功, programId:{}, completeRedisCordMap:{}, totalProgramRecordMap:{}", 
-                        programId, completeRedisCordMap, totalProgramRecordMap);
-            }
-        }catch (Exception e) {
-            log.warn("添加记录流水失败进行重试, programId:{}, completeRedisCordMap:{}, totalProgramRecordMap:{}", 
-                    programId, completeRedisCordMap, totalProgramRecordMap, e);
+        int attempt = retryCount;
+        while (true) {
             try {
-                Thread.sleep(1000);
-            } catch (InterruptedException ex) {
-                log.error("Thread sleep interrupted", ex);
+                transactionTemplate.executeWithoutResult(status ->
+                        doAdd(programId, completeRedisCordMap, totalProgramRecordMap));
+                return;
+            } catch (Exception e) {
+                attempt++;
+                log.warn("添加记录流水失败, programId:{}, attempt:{}, completeRedisCordMap:{}, totalProgramRecordMap:{}",
+                        programId, attempt, completeRedisCordMap, totalProgramRecordMap, e);
+                if (attempt > maxRetryCount) {
+                    log.error("添加记录流水失败超过最大重试次数,retryCount:{} programId:{}", attempt, programId);
+                    throw new TicketFlowFrameException(BaseCode.MAX_RETRY_COUNT);
+                }
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    throw new TicketFlowFrameException(BaseCode.MAX_RETRY_COUNT);
+                }
             }
-            retryCount++;
-            add(retryCount, programId, completeRedisCordMap, totalProgramRecordMap);
+        }
+    }
+
+    private void doAdd(Long programId,
+                       Map<String, ProgramRecord> completeRedisCordMap,
+                       Map<String, String> totalProgramRecordMap) {
+        Set<String> keyList = new HashSet<>();
+        //把数据库中的订单、购票人订单、购票人订单记录都修改成对账完成状态
+        addKeyList(keyList, completeRedisCordMap);
+        addKeyList(keyList, totalProgramRecordMap);
+        for (final String key : keyList) {
+            String[] split = SplitUtil.toSplit(key);
+            Long identifierId = Long.valueOf(split[0]);
+            Long userId = Long.valueOf(split[1]);
+            int result = updateDbOrderTicketUserRecordStatus(programId, identifierId, userId,
+                    ReconciliationStatus.RECONCILIATION_SUCCESS);
+            log.info("修改数据库记录流水成功, programId:{}, identifierId:{}, userId:{}, result:{}",
+                    programId, identifierId, userId, result);
+        }
+        if (CollectionUtil.isNotEmpty(totalProgramRecordMap)) {
+            //从旧地记录中删除
+            redisCache.delForHash(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_RECORD, programId),
+                    totalProgramRecordMap.keySet());
+        }
+        if (CollectionUtil.isNotEmpty(totalProgramRecordMap)) {
+            //目前所有的记录添加到完成的记录中 key：记录类型_记录标识_用户id value：记录标识
+            redisCache.putHash(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_RECORD_FINISH, programId),
+                    totalProgramRecordMap);
+        }
+        if (CollectionUtil.isNotEmpty(completeRedisCordMap)) {
+            //将新补充的记录添加到redis对比完成的记录中
+            redisCache.putHash(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_RECORD_FINISH, programId),
+                    completeRedisCordMap);
+            log.info("添加记录流水成功, programId:{}, completeRedisCordMap:{}, totalProgramRecordMap:{}",
+                    programId, completeRedisCordMap, totalProgramRecordMap);
         }
     }
     
@@ -144,25 +161,27 @@ public class ProgramRecordHandler {
                 .eq(Order::getIdentifierId, identifierId)
                 .eq(Order::getUserId, userId)
                 .eq(Order::getReconciliationStatus, ReconciliationStatus.RECONCILIATION_NO.getCode()));
-        Long orderNumber = orderList.get(0).getOrderNumber();
+        // 同一 (programId, identifierId, userId) 可能命中多笔订单：
+        // 子表更新必须覆盖全部 orderNumber，只更新首单会让其余订单的子表永远停留在未对账状态。
+        List<Long> orderNumbers = orderList.stream().map(Order::getOrderNumber).distinct().toList();
         //将购票人订单的对账状态更新为已对账
         OrderTicketUser updateOrderTicketUser = new OrderTicketUser();
         updateOrderTicketUser.setReconciliationStatus(reconciliationStatus.getCode());
         orderTicketUserMapper.update(updateOrderTicketUser,Wrappers.lambdaUpdate(OrderTicketUser.class)
-                .eq(OrderTicketUser::getOrderNumber, orderNumber)
+                .in(OrderTicketUser::getOrderNumber, orderNumbers)
                 .eq(OrderTicketUser::getReconciliationStatus, ReconciliationStatus.RECONCILIATION_NO.getCode()));
         //将订单节目的对账状态更新为已对账
         OrderProgram updateOrderProgram = new OrderProgram();
         updateOrderProgram.setHandleStatus(HandleStatus.YES_HANDLE.getCode());
         orderProgramMapper.update(updateOrderProgram,Wrappers.lambdaUpdate(OrderProgram.class)
-                .eq(OrderProgram::getOrderNumber, orderNumber)
+                .in(OrderProgram::getOrderNumber, orderNumbers)
                 .eq(OrderProgram::getHandleStatus, HandleStatus.NO_HANDLE.getCode())
                 .eq(OrderProgram::getProgramId, programId));
         //将购票人订单记录的对账状态更新为已对账
         OrderTicketUserRecord updateOrderTicketUserRecord = new OrderTicketUserRecord();
         updateOrderTicketUserRecord.setReconciliationStatus(reconciliationStatus.getCode());
         return orderTicketUserRecordMapper.update(updateOrderTicketUserRecord,Wrappers.lambdaUpdate(OrderTicketUserRecord.class)
-                .eq(OrderTicketUserRecord::getOrderNumber, orderNumber)
+                .in(OrderTicketUserRecord::getOrderNumber, orderNumbers)
                 .eq(OrderTicketUserRecord::getReconciliationStatus, ReconciliationStatus.RECONCILIATION_NO.getCode()));
     }
 }

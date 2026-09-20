@@ -1,7 +1,6 @@
 package com.ticketflow.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.ticketflow.dto.TicketCategoryCountDto;
 import com.ticketflow.entity.TicketCategory;
 import com.ticketflow.entity.TicketCategoryAggregate;
 import org.apache.ibatis.annotations.Param;
@@ -11,11 +10,13 @@ import java.util.List;
 /**
  * 票档表 Mapper 接口。
  *
- * 除了继承 BaseMapper 的基础 CRUD 外，这个接口重点关注 4 个自定义 SQL：
+ * 除了继承 BaseMapper 的基础 CRUD 外，这个接口重点关注 3 个自定义 SQL：
  * 1. selectAggregateList  — 统计每个节目最低价~最高价（列表页展示价格区间）
  * 2. reduceRemainNumber   — 下单时扣减某票档的库存（核心！含不超卖保护）
  * 3. increaseRemainNumber — 取消订单时归还某票档的库存（不能超还）
- * 4. batchUpdateRemainNumber — 批量扣减（历史版本用，V4 已不用）
+ *
+ * 已移除 batchUpdateRemainNumber：其 XML 用 &lt;foreach&gt; 拼接多条 UPDATE，多票档时是
+ * 非法 SQL 且没有余票下限保护；调用方改为逐票档调用上面的单条 SQL。
  *
  * 注意：@Param 注解必须加，否则 XML 里拿不到参数名。
  *      比如 @Param("amount") Long amount，XML 里用 #{amount} 引用。
@@ -64,17 +65,4 @@ public interface TicketCategoryMapper extends BaseMapper<TicketCategory> {
     int increaseRemainNumber(@Param("amount") Long amount,
                              @Param("id") Long id,
                              @Param("programId") Long programId);
-
-    /**
-     * 批量扣减多个票档的库存（V1-V3 版本订单用，V4 已废弃）。
-     * 直接 UPDATE 不改 sellStatus，没有 LOCK 中间态。
-     *
-     * @param ticketCategoryCountDtoList 每个票档要扣的数量
-     * @param programId                  节目 ID
-     * @return 总影响行数
-     */
-    int batchUpdateRemainNumber(@Param("ticketCategoryCountDtoList")
-                                List<TicketCategoryCountDto> ticketCategoryCountDtoList,
-                                @Param("programId")
-                                Long programId);
 }
