@@ -57,8 +57,9 @@ jobs:
           java-version: '17'
           cache: maven
 
+      # 该模块 surefire 显式包含 *IT（需完整 Spring 上下文/基础设施），CI 只跑单元测试
       - name: Run coupon-seckill tests
-        run: mvn -B -f coupon-seckill/pom.xml test
+        run: mvn -B -f coupon-seckill/pom.xml test -Dtest='*Test'
 
   docker-images:
     name: Build application images

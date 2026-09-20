@@ -66,7 +66,7 @@ itest:
 	mvn -B verify -pl ticketflow-server/ticketflow-order-service,ticketflow-server/ticketflow-program-service -am
 
 coupon-test:
-	mvn -B -f coupon-seckill/pom.xml test
+	mvn -B -f coupon-seckill/pom.xml test -Dtest='*Test'
 
 front-build:
 	cd vue3 && npm install --legacy-peer-deps && npm run build
