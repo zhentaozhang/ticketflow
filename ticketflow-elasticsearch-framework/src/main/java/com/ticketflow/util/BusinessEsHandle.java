@@ -103,7 +103,7 @@ public class BusinessEsHandle {
         String source = indexRequest.source().utf8ToString();
         log.info("create index execute dsl : {}", source);
         HttpEntity entity = new NStringEntity(source, ContentType.APPLICATION_JSON);
-        execute("PUT", "/" + indexName, entity);
+        consumeQuietly(execute("PUT", "/" + indexName, entity));
     }
 
     /**
@@ -125,7 +125,9 @@ public class BusinessEsHandle {
                 path = "/" + indexName + "/_mapping";
             }
             Response response = execute("GET", path, null);
-            return response.getStatusLine().getStatusCode() == RestStatus.OK.getStatus();
+            boolean exists = response.getStatusLine().getStatusCode() == RestStatus.OK.getStatus();
+            consumeQuietly(response);
+            return exists;
         } catch (Exception e) {
             if (e instanceof ResponseException && ((ResponseException) e).getResponse().getStatusLine().getStatusCode() == RestStatus.NOT_FOUND.getStatus()) {
                 log.warn("index not exist ! indexName:{}, indexType:{}", indexName, indexType);
@@ -148,7 +150,9 @@ public class BusinessEsHandle {
         }
         try {
             Response response = execute("DELETE", "/" + indexName, null);
-            return response.getStatusLine().getStatusCode() == RestStatus.OK.getStatus();
+            boolean deleted = response.getStatusLine().getStatusCode() == RestStatus.OK.getStatus();
+            consumeQuietly(response);
+            return deleted;
         } catch (Exception e) {
             log.error("deleteIndex error", e);
         }
@@ -211,6 +215,7 @@ public class BusinessEsHandle {
             log.info("add dsl : {}", jsonString);
             Response indexResponse = execute(method, endpoint, entity);
             int statusCode = indexResponse.getStatusLine().getStatusCode();
+            consumeQuietly(indexResponse);
             return statusCode == 201 || statusCode == 200;
         } catch (Exception e) {
             log.error("add error", e);
@@ -484,6 +489,7 @@ public class BusinessEsHandle {
         try {
             Response response = execute("DELETE", "/" + index + "/_doc/" + documentId, null);
             log.info("deleteByDocumentId result : {}", response.getStatusLine().getReasonPhrase());
+            consumeQuietly(response);
         } catch (Exception e) {
             log.error("deleteByDocumentId error", e);
         }
@@ -498,5 +504,18 @@ public class BusinessEsHandle {
             request.setEntity(entity);
         }
         return restClient.performRequest(request);
+    }
+
+    /**
+     * 释放低层 RestClient 的响应实体。
+     * <p>
+     * RestClient 的连接在实体被消费/关闭前不会归还连接池：只读状态码而不消费实体的调用
+     * 会逐个泄漏连接，累计后连接池耗尽。仅读状态码的调用一律在读完状态后调用本方法。
+     */
+    private void consumeQuietly(Response response) {
+        if (Objects.isNull(response)) {
+            return;
+        }
+        EntityUtils.consumeQuietly(response.getEntity());
     }
 }

@@ -42,6 +42,7 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -106,14 +107,16 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
     @Override
     public Mono<Void> filter(final ServerWebExchange exchange, final GatewayFilterChain chain) {
         if (rateLimiterProperty.getRateSwitch()) {
+            rateLimiter.acquire();
             try {
-                rateLimiter.acquire();
-            } catch (InterruptedException e) {
-                log.error("interrupted error", e);
-                throw new TicketFlowFrameException(BaseCode.THREAD_INTERRUPTED);
+                return doFilter(exchange, chain)
+                        .doFinally(signalType -> rateLimiter.release());
+            } catch (Throwable e) {
+                // doFilter 可能同步抛出（如非 JSON 路径）时 doFinally 还没挂上，
+                // 不释放会让许可泄漏、信号量被逐步耗尽直到网关整体拒绝服务
+                rateLimiter.release();
+                throw e;
             }
-            return doFilter(exchange, chain)
-                    .doFinally(signalType -> rateLimiter.release());
         } else {
             return doFilter(exchange, chain);
         }
@@ -134,13 +137,18 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
         if (Objects.nonNull(contentType) && contentType.toString().toLowerCase().contains(MediaType.APPLICATION_JSON_VALUE.toLowerCase())) {
             return readBody(exchange, chain, headMap);
         } else {
-            Map<String, String> map = doExecute("", exchange);
-            map.remove(REQUEST_BODY);
-            map.putAll(headMap);
-            request.mutate().headers(httpHeaders -> {
-                map.forEach(httpHeaders::set);
-            });
-            return chain.filter(exchange);
+            // doExecute 内含同步 RSA/Redis/Feign，放到弹性线程池执行，避免阻塞 WebFlux 事件循环
+            return Mono.fromCallable(() -> {
+                        Map<String, String> map = doExecute("", exchange);
+                        map.remove(REQUEST_BODY);
+                        map.putAll(headMap);
+                        return map;
+                    })
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .flatMap(map -> {
+                        request.mutate().headers(httpHeaders -> map.forEach(httpHeaders::set));
+                        return chain.filter(exchange);
+                    });
         }
     }
 
@@ -150,10 +158,14 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
 
         // WebFlux 反应式 body 读取：bodyToMono → execute() 验签/解密/注入参数 → 缓存 body 供下游读取
         ServerRequest serverRequest = ServerRequest.create(exchange, serverCodecConfigurer.getReaders());
+        // execute() 内含同步 RSA/Redis/Feign（ChannelDataService 还会 future.get），
+        // 必须切到弹性线程池，否则整段校验会在事件循环线程上阻塞
         Mono<String> modifiedBody = serverRequest
                 .bodyToMono(String.class)
-                .flatMap(originalBody -> Mono.just(execute(requestTemporaryWrapper, originalBody, exchange)))
-                .switchIfEmpty(Mono.defer(() -> Mono.just(execute(requestTemporaryWrapper, "", exchange))));
+                .flatMap(originalBody -> Mono.fromCallable(() -> execute(requestTemporaryWrapper, originalBody, exchange))
+                        .subscribeOn(Schedulers.boundedElastic()))
+                .switchIfEmpty(Mono.defer(() -> Mono.fromCallable(() -> execute(requestTemporaryWrapper, "", exchange))
+                        .subscribeOn(Schedulers.boundedElastic())));
 
         // 将处理后的 body 写入 CachedBodyOutputMessage（必须移除 Content-Length 让 WebFlux 重新计算 chunked 或新长度）
         BodyInserter bodyInserter = BodyInserters.fromPublisher(modifiedBody, String.class);

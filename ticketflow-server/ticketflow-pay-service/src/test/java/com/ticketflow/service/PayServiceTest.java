@@ -33,12 +33,15 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_FAILURE_RESULT;
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_SUCCESS_RESULT;
@@ -52,6 +55,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -75,6 +80,9 @@ class PayServiceTest {
     @Mock
     private UidGenerator uidGenerator;
 
+    @Mock
+    private TransactionTemplate transactionTemplate;
+
     @InjectMocks
     private PayService payService;
 
@@ -83,6 +91,12 @@ class PayServiceTest {
         when(payStrategyContext.get(anyString())).thenReturn(payStrategyHandler);
         when(uidGenerator.getUid()).thenReturn(1000L);
         when(refundBillMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(new ArrayList<>());
+        // TransactionTemplate 在单测里直接执行回调，等价于同步事务
+        doAnswer(invocation -> {
+            Consumer<TransactionStatus> action = invocation.getArgument(0);
+            action.accept(mock(TransactionStatus.class));
+            return null;
+        }).when(transactionTemplate).executeWithoutResult(any());
     }
 
     private PayBill payBill(Integer status) {

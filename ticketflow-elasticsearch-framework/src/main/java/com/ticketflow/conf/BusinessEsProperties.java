@@ -29,4 +29,10 @@ public class BusinessEsProperties {
     private Integer connectionRequestTimeOut = 40000;
 
     private Integer maxConnectNum = 400;
+
+    /**
+     * ES 异步 IO reactor 线程数（不等于连接数）。
+     * 默认按 CPU 核数 *2，避免沿用 maxConnectNum(400) 造成线程过度创建。
+     */
+    private Integer ioThreadCount = Runtime.getRuntime().availableProcessors() * 2;
 }

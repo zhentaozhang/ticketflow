@@ -397,9 +397,24 @@ public class UserService extends ServiceImpl<UserMapper, User> {
         return userGetAndTicketUserListVo;
     }
 
-    public List<String> getAllMobile() {
-        QueryWrapper<User> lambdaQueryWrapper = Wrappers.emptyWrapper();
-        List<User> users = userMapper.selectList(lambdaQueryWrapper);
-        return users.stream().map(User::getMobile).collect(Collectors.toList());
+    /** 布隆过滤器初始化分页大小。 */
+    public static final int BLOOM_FILTER_PAGE_SIZE = 1000;
+
+    /**
+     * 按 id 键集分页拉取用户（布隆过滤器初始化专用）。
+     * 用 {@code id > lastId ... limit size} 而不是一次性 selectList，
+     * 避免全表加载到内存（用户量增长后尤其明显）。
+     *
+     * @param lastId 上一页最后一个用户 id（首页传 null）
+     * @param size   每页大小
+     * @return 本页用户列表（按 id 升序）
+     */
+    public List<User> selectUserBatch(Long lastId, int size) {
+        QueryWrapper<User> queryWrapper = Wrappers.query();
+        if (Objects.nonNull(lastId)) {
+            queryWrapper.gt("id", lastId);
+        }
+        queryWrapper.orderByAsc("id").last("limit " + size);
+        return userMapper.selectList(queryWrapper);
     }
 }

@@ -27,14 +27,12 @@ public class ApiDataMessageConsumer {
 
     @KafkaListener(topics = {SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "${spring.kafka.topic:save_api_data}"})
     public void consumerOrderMessage(ConsumerRecord<String, String> consumerRecord) {
-        try {
-            Optional.ofNullable(consumerRecord.value()).map(String::valueOf).ifPresent(value -> {
-                log.info("consumerOrderMessage message:{}", value);
-                ApiData apiData = JSON.parseObject(value, ApiData.class);
-                apiDataService.saveApiData(apiData);
-            });
-        } catch (Exception e) {
-            log.error("consumerApiDataMessage error", e);
-        }
+        // 不再吞异常：offset 已关闭自动提交（listener.ack-mode=record），
+        // 处理失败必须抛出，让容器 error handler 重试；吞掉会导致 offset 照常提交、审计数据静默丢失。
+        Optional.ofNullable(consumerRecord.value()).map(String::valueOf).ifPresent(value -> {
+            log.info("consumerOrderMessage message:{}", value);
+            ApiData apiData = JSON.parseObject(value, ApiData.class);
+            apiDataService.saveApiData(apiData);
+        });
     }
 }

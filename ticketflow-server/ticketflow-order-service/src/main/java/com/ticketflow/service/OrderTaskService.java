@@ -91,6 +91,13 @@ public class OrderTaskService {
      */
     private static final long PENDING_WINDOW_MS = 60_000L;
 
+    /**
+     * 单轮补偿最多处理的条数。避免一次把整个 DISCARD_ORDER / PENDING 列表 load 进内存
+     * （高积压时可达数十万条），也把逐条 LREM 的 O(N^2) 限制在每轮一个固定上限内。
+     * 未处理完的条目留到下一轮对账继续。
+     */
+    private static final int COMPENSATION_BATCH_SIZE = 200;
+
     // ==================== 对账任务入口 ====================
     
     /**
@@ -160,7 +167,8 @@ public class OrderTaskService {
         if (length == null || length <= 0) {
             return;
         }
-        List<DiscardOrder> discardOrderList = redisCache.rangeForList(discardOrderKey, 0, length - 1, DiscardOrder.class);
+        List<DiscardOrder> discardOrderList = redisCache.rangeForList(discardOrderKey, 0,
+                Math.min(length, COMPENSATION_BATCH_SIZE) - 1, DiscardOrder.class);
         if (CollectionUtil.isEmpty(discardOrderList)) {
             return;
         }
@@ -202,7 +210,8 @@ public class OrderTaskService {
         if (length == null || length <= 0) {
             return;
         }
-        List<PendingOrder> pendingOrderList = redisCache.rangeForList(pendingOrderKey, 0, length - 1, PendingOrder.class);
+        List<PendingOrder> pendingOrderList = redisCache.rangeForList(pendingOrderKey, 0,
+                Math.min(length, COMPENSATION_BATCH_SIZE) - 1, PendingOrder.class);
         if (CollectionUtil.isEmpty(pendingOrderList)) {
             return;
         }

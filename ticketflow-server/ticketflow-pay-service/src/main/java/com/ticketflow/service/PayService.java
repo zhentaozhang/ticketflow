@@ -34,6 +34,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -70,11 +71,17 @@ public class PayService {
     private UidGenerator uidGenerator;
 
     /**
+     * 显式事务模板：渠道 HTTP 调用（支付/退款）刻意放在事务外，避免远程调用期间占用 DB 连接与拉长锁持有时间；
+     * 只有本地账单写操作放进 TransactionTemplate。
+     */
+    @Autowired
+    private TransactionTemplate transactionTemplate;
+
+    /**
      * 通用支付，用订单号加锁防止多次支付成功，不依赖第三方支付的幂等性
      *
      */
     @ServiceLock(name = COMMON_PAY, keys = {"#payDto.orderNumber"})
-    @Transactional(rollbackFor = Exception.class)
     public String commonPay(PayDto payDto) {
         // 查询已有账单：非 NO_PAY 状态表示已支付/已取消/已退款，拒绝重复支付
         LambdaQueryWrapper<PayBill> payBillLambdaQueryWrapper =
@@ -83,31 +90,35 @@ public class PayService {
         if (Objects.nonNull(payBill) && !Objects.equals(payBill.getPayBillStatus(), PayBillStatus.NO_PAY.getCode())) {
             throw new TicketFlowFrameException(BaseCode.PAY_BILL_IS_NOT_NO_PAY);
         }
-        // 委托支付渠道（当前为支付宝）执行支付，返回支付表单/URL
+        // 委托支付渠道（当前为支付宝）执行支付，返回支付表单/URL。HTTP 调用放在事务外。
         PayStrategyHandler payStrategyHandler = payStrategyContext.get(payDto.getChannel());
         PayResult pay = payStrategyHandler.pay(String.valueOf(payDto.getOrderNumber()), payDto.getPrice(),
                 payDto.getSubject(), payDto.getNotifyUrl(), payDto.getReturnUrl());
         if (pay.isSuccess()) {
-            if (Objects.isNull(payBill)) {
-                // 首次支付：插入新账单记录（状态为 NO_PAY，等待异步通知确认）
-                payBill = new PayBill();
-                payBill.setId(uidGenerator.getUid());
-                payBill.setOutOrderNo(String.valueOf(payDto.getOrderNumber()));
-                payBill.setPayChannel(payDto.getChannel());
-                payBill.setPayScene("生产");
-                payBill.setSubject(payDto.getSubject());
-                payBill.setPayAmount(payDto.getPrice());
-                payBill.setPayBillType(payDto.getPayBillType());
-                payBill.setPayBillStatus(PayBillStatus.NO_PAY.getCode());
-                payBill.setPayTime(DateUtils.now());
-                payBillMapper.insert(payBill);
-            } else {
-                // 重复调起支付：仅更新支付时间（非幂等重试，而是重新生成支付链接）
-                PayBill updatePayBill = new PayBill();
-                updatePayBill.setId(payBill.getId());
-                updatePayBill.setPayTime(DateUtils.now());
-                payBillMapper.updateById(updatePayBill);
-            }
+            final boolean firstPay = Objects.isNull(payBill);
+            final PayBill existBill = payBill;
+            transactionTemplate.executeWithoutResult(status -> {
+                if (firstPay) {
+                    // 首次支付：插入新账单记录（状态为 NO_PAY，等待异步通知确认）
+                    PayBill newBill = new PayBill();
+                    newBill.setId(uidGenerator.getUid());
+                    newBill.setOutOrderNo(String.valueOf(payDto.getOrderNumber()));
+                    newBill.setPayChannel(payDto.getChannel());
+                    newBill.setPayScene("生产");
+                    newBill.setSubject(payDto.getSubject());
+                    newBill.setPayAmount(payDto.getPrice());
+                    newBill.setPayBillType(payDto.getPayBillType());
+                    newBill.setPayBillStatus(PayBillStatus.NO_PAY.getCode());
+                    newBill.setPayTime(DateUtils.now());
+                    payBillMapper.insert(newBill);
+                } else {
+                    // 重复调起支付：仅更新支付时间（非幂等重试，而是重新生成支付链接）
+                    PayBill updatePayBill = new PayBill();
+                    updatePayBill.setId(existBill.getId());
+                    updatePayBill.setPayTime(DateUtils.now());
+                    payBillMapper.updateById(updatePayBill);
+                }
+            });
         }
 
         return pay.getBody();
@@ -236,7 +247,6 @@ public class PayService {
     }
 
     @ServiceLock(name = COMMON_PAY, keys = {"#refundDto.orderNumber"})
-    @Transactional(rollbackFor = Exception.class)
     public String refund(RefundDto refundDto) {
         // 校验：账单存在 → 账单已支付 → 累计已退+本次退款不超过支付金额（支持部分退款）
         PayBill payBill = payBillMapper.selectOne(Wrappers.lambdaQuery(PayBill.class)
@@ -289,35 +299,38 @@ public class PayService {
         if (!refundResult.isSuccess()) {
             throw new TicketFlowFrameException(BaseCode.REFUND_ERROR.getCode(), refundResult.getMessage());
         }
-        // 落退款记录：refundStatus 1=渠道已受理处理中，2=已退款成功
-        RefundBill refundBill = new RefundBill();
-        refundBill.setId(uidGenerator.getUid());
-        refundBill.setOutOrderNo(payBill.getOutOrderNo());
-        refundBill.setPayBillId(payBill.getId());
-        refundBill.setOutRefundNo(outRefundNo);
-        refundBill.setRefundAmount(refundDto.getAmount());
-        refundBill.setRefundStatus(refundResult.getRefundStatus());
-        refundBill.setRefundTime(DateUtils.now());
-        refundBill.setReason(refundDto.getReason());
+        // 本地落库放进独立事务（渠道 HTTP 调用已在事务外完成）：
+        // 降退款记录 refundStatus 1=渠道已受理处理中，2=已退款成功；并按累计到账决定是否置账单 REFUND。
         try {
-            refundBillMapper.insert(refundBill);
+            transactionTemplate.executeWithoutResult(status -> {
+                RefundBill refundBill = new RefundBill();
+                refundBill.setId(uidGenerator.getUid());
+                refundBill.setOutOrderNo(payBill.getOutOrderNo());
+                refundBill.setPayBillId(payBill.getId());
+                refundBill.setOutRefundNo(outRefundNo);
+                refundBill.setRefundAmount(refundDto.getAmount());
+                refundBill.setRefundStatus(refundResult.getRefundStatus());
+                refundBill.setRefundTime(DateUtils.now());
+                refundBill.setReason(refundDto.getReason());
+                refundBillMapper.insert(refundBill);
+                // 渠道已确认成功（refundStatus=2）且已确认到账累计（含本次）达到支付金额才将账单置为 REFUND；
+                // 渠道处理中（refundStatus=1，常见于微信）保持 PAY，由 RefundCheckTask 确认成功后翻转；
+                // 部分退款保持 PAY 可继续退；条件更新兜底并发：0 行说明账单状态已被其他流程更新，不覆盖
+                if (Objects.equals(refundResult.getRefundStatus(), 2)
+                        && confirmedRefundedAmount.add(refundDto.getAmount()).compareTo(payBill.getPayAmount()) >= 0) {
+                    PayBill updatePayBill = new PayBill();
+                    updatePayBill.setPayBillStatus(PayBillStatus.REFUND.getCode());
+                    LambdaUpdateWrapper<PayBill> payBillLambdaUpdateWrapper =
+                            Wrappers.lambdaUpdate(PayBill.class)
+                                    .eq(PayBill::getOutOrderNo, payBill.getOutOrderNo())
+                                    .eq(PayBill::getPayBillStatus, PayBillStatus.PAY.getCode());
+                    payBillMapper.update(updatePayBill, payBillLambdaUpdateWrapper);
+                }
+            });
         } catch (DuplicateKeyException e) {
             // 并发下同一幂等键落库：渠道侧同 outRefundNo 已去重，本地按幂等成功返回
             log.warn("退款单已存在（并发重复），幂等返回 outRefundNo : {}", outRefundNo);
             return outRefundNo;
-        }
-        // 渠道已确认成功（refundStatus=2）且已确认到账累计（含本次）达到支付金额才将账单置为 REFUND；
-        // 渠道处理中（refundStatus=1，常见于微信）保持 PAY，由 RefundCheckTask 确认成功后翻转；
-        // 部分退款保持 PAY 可继续退；条件更新兜底并发：0 行说明账单状态已被其他流程更新，不覆盖
-        if (Objects.equals(refundResult.getRefundStatus(), 2)
-                && confirmedRefundedAmount.add(refundDto.getAmount()).compareTo(payBill.getPayAmount()) >= 0) {
-            PayBill updatePayBill = new PayBill();
-            updatePayBill.setPayBillStatus(PayBillStatus.REFUND.getCode());
-            LambdaUpdateWrapper<PayBill> payBillLambdaUpdateWrapper =
-                    Wrappers.lambdaUpdate(PayBill.class)
-                            .eq(PayBill::getOutOrderNo, payBill.getOutOrderNo())
-                            .eq(PayBill::getPayBillStatus, PayBillStatus.PAY.getCode());
-            payBillMapper.update(updatePayBill, payBillLambdaUpdateWrapper);
         }
         return outRefundNo;
     }

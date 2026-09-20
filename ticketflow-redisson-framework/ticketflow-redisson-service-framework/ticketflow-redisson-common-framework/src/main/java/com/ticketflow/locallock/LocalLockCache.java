@@ -30,10 +30,18 @@ public class LocalLockCache {
      * */
     @Value("${durationTime:48}")
     private Integer durationTime;
-    
+
+    /**
+     * 本地锁缓存上限。锁按 programId-ticketCategoryId / userId-programId 等键生成，
+     * 长时间高基数场景下只靠过期驱逐会持续增长，故加显式上限防止内存膨胀。
+     */
+    @Value("${localLock.maximumSize:100000}")
+    private Long maximumSize;
+
     @PostConstruct
     public void localLockCacheInit(){
         localLockCache = Caffeine.newBuilder()
+                .maximumSize(maximumSize)
                 .expireAfterAccess(durationTime, TimeUnit.HOURS)
                 .build();
     }

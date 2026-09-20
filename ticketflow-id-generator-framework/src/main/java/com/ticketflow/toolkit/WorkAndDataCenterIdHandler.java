@@ -9,6 +9,7 @@ import org.springframework.scripting.support.ResourceScriptSource;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * WorkId/DataCenterId处理器。使用Redis+Lua脚本生成和管理雪花算法的数据中心ID和机器ID。
@@ -45,7 +46,14 @@ public class WorkAndDataCenterIdHandler {
             data[0] = String.valueOf(IdGeneratorConstant.MAX_WORKER_ID);
             data[1] = String.valueOf(IdGeneratorConstant.MAX_DATA_CENTER_ID);
             String result = stringRedisTemplate.execute(redisScript, keys, data);
-            workDataCenterId = JSON.parseObject(result, WorkDataCenterId.class);
+            // 仅当结果有效时才覆盖占位对象：result 为 null/空 时 JSON.parseObject 返回 null，
+            // 会把 workDataCenterId 覆盖成 null，后续 SnowflakeIdGenerator 构造时 NPE。
+            if (Objects.nonNull(result) && !result.isBlank()) {
+                WorkDataCenterId parsed = JSON.parseObject(result, WorkDataCenterId.class);
+                if (Objects.nonNull(parsed)) {
+                    workDataCenterId = parsed;
+                }
+            }
         } catch (Exception e) {
             log.error("getWorkAndDataCenterId error", e);
         }

@@ -32,6 +32,21 @@ public class BusinessThreadPool {
             new BusinessNameThreadFactory(),
             new ThreadPoolRejectedExecutionHandler.BusinessAbortPolicy());
 
+    static {
+        // 静态池没有 Spring 生命周期回调：注册 JVM shutdown hook 优雅收尾，避免线程悬挂
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            execute.shutdown();
+            try {
+                if (!execute.awaitTermination(5, TimeUnit.SECONDS)) {
+                    execute.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                execute.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }, "business-thread-pool-shutdown"));
+    }
+
 
     public static void execute(Runnable r) {
         execute.execute(BaseThreadPool.wrapTask(r, BaseThreadPool.getContextForTask(), BaseThreadPool.getContextForHold()));

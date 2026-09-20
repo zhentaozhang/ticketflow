@@ -1,7 +1,9 @@
 package com.ticketflow.service.init;
 
 import cn.hutool.core.collection.CollectionUtil;
+import cn.hutool.core.util.StrUtil;
 import com.ticketflow.BusinessThreadPool;
+import com.ticketflow.entity.User;
 import com.ticketflow.handler.BloomFilterHandler;
 import com.ticketflow.initialize.base.AbstractApplicationPostConstructHandler;
 import com.ticketflow.service.UserService;
@@ -32,9 +34,23 @@ public class UserBloomFilterInitData extends AbstractApplicationPostConstructHan
     @Override
     public void executeInit(final ConfigurableApplicationContext context) {
         BusinessThreadPool.execute(() -> {
-            List<String> allMobile = userService.getAllMobile();
-            if (CollectionUtil.isNotEmpty(allMobile)) {
-                allMobile.forEach(mobile -> bloomFilterHandler.add(mobile));
+            // 键集分页逐批加载，避免一次性把整张用户表（含全部字段）读进内存
+            int pageSize = UserService.BLOOM_FILTER_PAGE_SIZE;
+            Long lastId = null;
+            while (true) {
+                List<User> userBatch = userService.selectUserBatch(lastId, pageSize);
+                if (CollectionUtil.isEmpty(userBatch)) {
+                    break;
+                }
+                for (User user : userBatch) {
+                    if (StrUtil.isNotBlank(user.getMobile())) {
+                        bloomFilterHandler.add(user.getMobile());
+                    }
+                }
+                lastId = userBatch.get(userBatch.size() - 1).getId();
+                if (userBatch.size() < pageSize) {
+                    break;
+                }
             }
         });
     }
