@@ -61,7 +61,9 @@ spring:
       host: ${REDIS_HOST:127.0.0.1}
       port: 6379
       timeout: 5000                     # 连接超时时间(5秒)
-      jedis:
+      # 项目实际使用 Lettuce（classpath 无 Jedis），连接池配置必须挂在 lettuce 下才生效；
+      # 原先写在 jedis 下是静默失效的哑配置。
+      lettuce:
         pool:
           max-active: 500               # 最大活跃连接数
           max-idle: 100                 # 最大空闲连接数

@@ -31,7 +31,14 @@ public class ProgramRedisStreamConsumer implements MessageConsumer {
     @Override
     public void accept(ObjectRecord<String, String> message) {
         // 消息 value 就是节目ID（invalid() 里 push 的 String.valueOf(programId)）
-        Long programId = Long.parseLong(message.getValue());
+        // 容错：广播消费链路里一条坏消息不能把后续节目失效全部带崩，解析失败只记日志跳过
+        Long programId;
+        try {
+            programId = Long.parseLong(message.getValue());
+        } catch (NumberFormatException e) {
+            log.error("节目本地缓存失效消息解析失败，已跳过 value : {}", message.getValue(), e);
+            return;
+        }
         programService.delLocalCache(programId);  // 删除本实例的本地缓存
     }
 }

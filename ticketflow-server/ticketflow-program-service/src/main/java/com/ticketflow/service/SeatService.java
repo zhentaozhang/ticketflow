@@ -252,6 +252,9 @@ public class SeatService extends ServiceImpl<SeatMapper, Seat> {
 
 
         int rowIndex = 0;
+        // 先攒批再一次性写入：原实现逐条 insert，一个大型演出（数千~上万座位）就是同等次数的
+        // DB 往返；改为 saveBatch 后按批提交，减少网络与事务开销。
+        List<Seat> seatList = new ArrayList<>();
         for (SeatBatchRelateInfoAddDto seatBatchRelateInfoAddDto : seatBatchRelateInfoAddDtoList) {
             Long ticketCategoryId = seatBatchRelateInfoAddDto.getTicketCategoryId();
             BigDecimal price = seatBatchRelateInfoAddDto.getPrice();
@@ -271,11 +274,11 @@ public class SeatService extends ServiceImpl<SeatMapper, Seat> {
                     seat.setSeatType(1);
                     seat.setPrice(price);
                     seat.setSellStatus(SellStatus.NO_SOLD.getCode());
-                    seatMapper.insert(seat);
+                    seatList.add(seat);
                 }
             }
         }
 
-        return true;
+        return saveBatch(seatList);
     }
 }

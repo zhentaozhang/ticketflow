@@ -50,7 +50,10 @@ import org.springframework.beans.BeanUtils;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -148,6 +151,12 @@ class OrderServiceTest {
         orderTicketUserRecordMapper = mock(OrderTicketUserRecordMapper.class);
         orderProgramMapper = mock(OrderProgramMapper.class);
         delayOperateProgramDataSend = mock(DelayOperateProgramDataSend.class);
+        // createMq 用 TransactionTemplate 显式圈建单事务；单测里直接执行回调，等价于无事务语义
+        TransactionTemplate transactionTemplate = mock(TransactionTemplate.class);
+        when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+            TransactionCallback<?> callback = invocation.getArgument(0);
+            return callback.doInTransaction(mock(TransactionStatus.class));
+        });
         lock = mock(RLock.class);
         when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(lock);
         // 回调里的订单锁改成带等待上限的 tryLock：默认拿得到锁，走原有的处理链路
@@ -169,6 +178,7 @@ class OrderServiceTest {
         ReflectionTestUtils.setField(orderService, "orderTicketUserRecordMapper", orderTicketUserRecordMapper);
         ReflectionTestUtils.setField(orderService, "orderProgramMapper", orderProgramMapper);
         ReflectionTestUtils.setField(orderService, "delayOperateProgramDataSend", delayOperateProgramDataSend);
+        ReflectionTestUtils.setField(orderService, "transactionTemplate", transactionTemplate);
     }
 
     // ==================== 创建 doCreate/create/createByMq ====================

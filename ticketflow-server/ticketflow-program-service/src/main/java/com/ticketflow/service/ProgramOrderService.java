@@ -88,6 +88,12 @@ public class ProgramOrderService {
     private static final int AUTO_MATCH_RETRY_TIMES = 3;
 
     /**
+     * 座位排序规则：先排号再列号。抽成常量，保证自动匹配路径只排序一次。
+     */
+    private static final Comparator<SeatVo> SEAT_ROW_COL_COMPARATOR =
+            Comparator.comparing(SeatVo::getRowCode).thenComparing(SeatVo::getColCode);
+
+    /**
      * V5 下单幂等标记 TTL（秒）。
      * 必须覆盖"请求不确定窗口"：Lua 扣减成功 → Kafka 发送（最多等待 KAFKA_SEND_AWAIT_MS）→
      * 超时降级已受理（写 PENDING）。客户端在未收到明确失败前可能重试，
@@ -171,8 +177,24 @@ public class ProgramOrderService {
             return new ArrayList<>();
         }
         List<SeatVo> sortedSeatList = seatVoList.stream()
-                .sorted(Comparator.comparing(SeatVo::getRowCode).thenComparing(SeatVo::getColCode))
+                .sorted(SEAT_ROW_COL_COMPARATOR)
                 .toList();
+        return matchAdjacentSeatsSorted(sortedSeatList, seatCount);
+    }
+
+    /**
+     * 在<b>已按排号/列号排序</b>的座位列表上做滑动窗口匹配。
+     * 自动匹配路径会复用同一份排序结果（并发抢占时只剔除被抢座位再匹配），
+     * 避免每次重试都重排整档座位。
+     *
+     * @param sortedSeatList 已排序的未售座位列表
+     * @param seatCount      需要匹配的座位数量
+     * @return 匹配到的相邻座位；不足时返回空列表
+     */
+    private List<SeatVo> matchAdjacentSeatsSorted(List<SeatVo> sortedSeatList, int seatCount) {
+        if (CollectionUtil.isEmpty(sortedSeatList) || sortedSeatList.size() < seatCount) {
+            return new ArrayList<>();
+        }
         for (int i = 0; i <= sortedSeatList.size() - seatCount; i++) {
             boolean adjacent = true;
             for (int j = 0; j < seatCount - 1; j++) {
@@ -340,15 +362,25 @@ public class ProgramOrderService {
      * 防止"预热之后、进锁之前"这一小段里缓存又失效（正常路径下这里只会命中缓存，不走加载）。
      */
     private void ensureTicketCategoryCache(Long programId, Long ticketCategoryId, Date showTime) {
-        //座位缓存已预热时跳过全量拉取：该 hash 每档 2 万 field，全量读+JSON 反序列化开销大
-        if (!hasSeatResolutionCache(programId, ticketCategoryId)) {
+        //一次 pipeline 拿齐座位三区 + 余票共 4 个 key 的存在性，替代最多 4 次串行 hasKey（每单省 1~3 次 Redis 往返）
+        List<Boolean> existsList = redisCache.hasKeys(List.of(
+                RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH, programId, ticketCategoryId),
+                RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH, programId, ticketCategoryId),
+                RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_SOLD_RESOLUTION_HASH, programId, ticketCategoryId),
+                RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programId, ticketCategoryId)));
+        //座位三区任一存在即视为已预热，跳过全量拉取：该 hash 每档 2 万 field，全量读+JSON 反序列化开销大。
+        //必须三区联合判断：仅查 no_sold 会在 no_sold 扣空（hash 自动删除）但 lock 仍有座位时误判未预热，
+        //触发 DB 回写导致已锁座位复活（超卖）。
+        boolean seatCached = Boolean.TRUE.equals(existsList.get(0))
+                || Boolean.TRUE.equals(existsList.get(1))
+                || Boolean.TRUE.equals(existsList.get(2));
+        if (!seatCached) {
             seatService.selectSeatResolution(programId, ticketCategoryId,
                     DateUtils.countBetweenSecond(DateUtils.now(), showTime), TimeUnit.SECONDS);
         }
         //余票缓存已预热时跳过：getRedisRemainNumberResolution 带 @ServiceLock(Read) 分布式读锁，
         //每次调用会获取 Redisson 读锁；返回值此处未使用，仅需确保缓存存在。
-        if (!redisCache.hasKey(RedisKeyBuild.createRedisKey(
-                RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programId, ticketCategoryId))) {
+        if (!Boolean.TRUE.equals(existsList.get(3))) {
             ticketCategoryService.getRedisRemainNumberResolution(programId, ticketCategoryId);
         }
     }
@@ -456,15 +488,20 @@ public class ProgramOrderService {
             programCacheCreateOrderData = programCacheCreateOrderResolutionOperate.programCacheOperate(keys, data);
         } else {
             // 不选座：应用层匹配出的候选座位由 Lua 原子校验+锁定；
-            // 候选被并发订单抢占（40001/40002/40003）时重新匹配并重试
+            // 候选被并发订单抢占（40001/40002/40003）时，从本地剩余座位里重新匹配并重试。
+            // 读一次 no_sold 全量 + 排一次序，重试只在本地剔除被抢座位；
+            // 原实现每轮重试都 HGETALL + O(N log N) 重排，是自动匹配路径的主要开销。
             Long ticketCategoryId = programOrderCreateDto.getTicketCategoryId();
             Integer ticketCount = programOrderCreateDto.getTicketCount();
+            Map<String, SeatVo> noSoldSeatMap = redisCache.getAllMapForHash(
+                    RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH,
+                            programId, ticketCategoryId), SeatVo.class);
+            List<SeatVo> sortedNoSoldSeatList = noSoldSeatMap.values().stream()
+                    .sorted(SEAT_ROW_COL_COMPARATOR)
+                    .collect(Collectors.toCollection(ArrayList::new));
             programCacheCreateOrderData = null;
             for (int attempt = 0; attempt <= AUTO_MATCH_RETRY_TIMES; attempt++) {
-                Map<String, SeatVo> noSoldSeatMap = redisCache.getAllMapForHash(
-                        RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH,
-                                programId, ticketCategoryId), SeatVo.class);
-                List<SeatVo> matchedSeatList = matchAdjacentSeats(new ArrayList<>(noSoldSeatMap.values()), ticketCount);
+                List<SeatVo> matchedSeatList = matchAdjacentSeatsSorted(sortedNoSoldSeatList, ticketCount);
                 if (matchedSeatList.size() < ticketCount) {
                     throw new TicketFlowFrameException(BaseCode.SEAT_OCCUPY);
                 }
@@ -491,6 +528,9 @@ public class ProgramOrderService {
                 programCacheCreateOrderData = programCacheCreateOrderResolutionOperate.programCacheOperate(keys, data);
                 // 仅对"候选座位被并发抢占"重试；其他错误（余票不足/价格不一致等）直接失败
                 if (isSeatRaceError(programCacheCreateOrderData.getCode())) {
+                    // 本轮候选已被并发订单占用：本地同步剔除后从剩余座位重新匹配。
+                    // 只删本轮候选（它们在 Redis 里已离开 no_sold），不会误删仍在售的座位。
+                    sortedNoSoldSeatList.removeAll(matchedSeatList);
                     log.info("自动匹配座位被并发抢占 重试中 节目id : {} 票档id : {} 尝试次数 : {}", programId, ticketCategoryId, attempt + 1);
                     continue;
                 }

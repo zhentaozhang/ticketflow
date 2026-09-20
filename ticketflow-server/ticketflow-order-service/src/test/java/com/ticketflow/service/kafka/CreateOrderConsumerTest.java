@@ -203,8 +203,7 @@ class CreateOrderConsumerTest {
         assertEquals(ORDER_NUMBER, discardCaptor.getValue().getOrderCreateMq().getOrderNumber());
         assertEquals(DiscardOrderReason.CREATE_ORDER_FAIL.getCode(), discardCaptor.getValue().getDiscardOrderReason());
         verify(meterRegistry).counter(eq(Metrics.ORDER_CREATE_FAIL_TOTAL),
-                eq(Metrics.REASON), eq(Metrics.REASON_CREATE_ORDER_FAIL),
-                eq(Metrics.PROGRAM_ID), eq(String.valueOf(PROGRAM_ID)));
+                eq(Metrics.REASON), eq(Metrics.REASON_CREATE_ORDER_FAIL));
     }
 
     @Test

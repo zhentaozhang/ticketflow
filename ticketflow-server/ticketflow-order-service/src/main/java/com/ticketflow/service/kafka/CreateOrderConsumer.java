@@ -81,7 +81,11 @@ public class CreateOrderConsumer {
         long currentTimeTimestamp = System.currentTimeMillis();
         long delayTime = currentTimeTimestamp - createOrderTimeTimestamp;
 
-        log.info("消费到kafka的创建订单消息 消息体: {} 延迟时间 : {} 毫秒", value, delayTime);
+        // 热路径只打关键字段：完整消息体是高并发下的日志放大源，需要时开 debug
+        log.info("消费到kafka的创建订单消息 订单号 : {} 延迟时间 : {} 毫秒", orderCreateMq.getOrderNumber(), delayTime);
+        if (log.isDebugEnabled()) {
+            log.debug("消费到kafka的创建订单消息 消息体 : {}", value);
+        }
 
         // 消费延迟是“离丢弃闸（MESSAGE_DELAY_TIME）还有多远”的直接度量，
         // 比“积压条数”更贴近业务，所以每个版本都记一笔

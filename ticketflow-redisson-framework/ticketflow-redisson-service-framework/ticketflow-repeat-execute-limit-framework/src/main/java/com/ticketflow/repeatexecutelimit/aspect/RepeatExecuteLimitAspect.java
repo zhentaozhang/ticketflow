@@ -131,7 +131,8 @@ public class RepeatExecuteLimitAspect {
             //加锁成功执行
             if (result) {
                 try {
-                    //再次获取幂等标识
+                    //再次获取幂等标识（锁内二次校验）：GET 在锁外与拿到锁之间可能被并发请求置位，
+                    //该语义有测试契约（successFlagSetBetweenLocksShouldRejectInsideDistributedLock）保护，保留。
                     if (needIdempotentCheck) {
                         String flagObject = redissonDataHandle.get(repeatFlagName);
                         //如果幂等标识的值为success，说明已经有请求在执行了，这次请求直接结束

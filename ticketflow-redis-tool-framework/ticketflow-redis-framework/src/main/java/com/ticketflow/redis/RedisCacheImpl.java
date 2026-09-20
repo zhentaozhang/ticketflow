@@ -4,10 +4,12 @@ import com.alibaba.fastjson.JSON;
 import com.ticketflow.util.StringUtil;
 import lombok.AllArgsConstructor;
 import org.springframework.data.redis.core.DefaultTypedTuple;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -96,6 +98,24 @@ public class RedisCacheImpl implements RedisCache {
         CacheUtil.checkNotBlank(redisKeyBuild);
         String key = redisKeyBuild.getRelKey();
         return redisTemplate.hasKey(key);
+    }
+
+    @Override
+    public List<Boolean> hasKeys(Collection<RedisKeyBuild> redisKeyBuildList) {
+        CacheUtil.checkNotEmpty(redisKeyBuildList);
+        List<RedisKeyBuild> keyList = new ArrayList<>(redisKeyBuildList);
+        // 用 pipeline 把 N 次 EXISTS 合并成一次网络往返，结果顺序与命令下发顺序一致
+        List<Object> results = redisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+            for (RedisKeyBuild keyBuild : keyList) {
+                connection.keyCommands().exists(keyBuild.getRelKey().getBytes(StandardCharsets.UTF_8));
+            }
+            return null;
+        });
+        List<Boolean> existsList = new ArrayList<>(results.size());
+        for (Object result : results) {
+            existsList.add(Boolean.TRUE.equals(result));
+        }
+        return existsList;
     }
 
     @Override

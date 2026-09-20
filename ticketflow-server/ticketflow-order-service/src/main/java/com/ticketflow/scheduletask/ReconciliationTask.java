@@ -177,7 +177,7 @@ public class ReconciliationTask {
             programRecordTaskUpdateDto.setAfterHandleStatus(HandleStatus.YES_HANDLE.getCode());
             programRecordTaskUpdateDto.setCreateTimeSet(createTimeSet);
             ApiResponse<Integer> updateApiResponse = programClient.update(programRecordTaskUpdateDto);
-            if (!Objects.equals(listApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
+            if (!Objects.equals(updateApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
                 log.error("更新节目对账记录任务失败 dto : {} message: {}", JSON.toJSONString(programRecordTaskUpdateDto), updateApiResponse.getMessage());
             }
             BusinessMetrics.increment(meterRegistry, Metrics.RECONCILIATION_TASK_TOTAL,

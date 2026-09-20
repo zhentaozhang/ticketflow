@@ -42,7 +42,9 @@ public class CreateOrderSend {
      */
     public void sendMessage(String message, SuccessCallback<SendResult<String, String>> successCallback,
                             FailureCallback failureCallback) {
-        log.info("创建订单kafka发送消息 消息体 : {}", message);
+        if (log.isDebugEnabled()) {
+            log.debug("创建订单kafka发送消息 消息体 : {}", message);
+        }
         CompletableFuture<SendResult<String, String>> completableFuture =
                 kafkaTemplate.send(SpringUtil.getPrefixDistinctionName() + "-" + kafkaTopic.getTopic(), message);
         completableFuture.whenComplete((result, ex) -> {

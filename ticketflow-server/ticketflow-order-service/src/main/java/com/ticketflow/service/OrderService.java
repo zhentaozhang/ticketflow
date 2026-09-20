@@ -92,6 +92,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -174,6 +175,9 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
 
     @Autowired
     private OrderProgramMapper orderProgramMapper;
+
+    @Autowired
+    private TransactionTemplate transactionTemplate;
 
     @Autowired
     private DelayOperateProgramDataSend delayOperateProgramDataSend;
@@ -1183,15 +1187,17 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     // V5：Redis 为唯一库存权威，建单不再同步 Feign 扣 DB（DB 座位/余票由投影任务/支付取消路径异步收敛）
     // 幂等：durationTime=0 不写幂等标记（省 2 次 GET + 1 次 SET，RTT 5→2），
     // 重复消息由 doCreate 的 selectOne 防重 + DB 唯一索引 d_order_order_number_IDX + ORDER_EXIST 幂等特判兜底。
+    //
+    // 事务边界：Feign 扣 DB 是网络 IO，刻意放在本地事务之外执行，避免远程调用期间占用 Hikari 连接；
+    // 只有订单落库段（createByMq）用 TransactionTemplate 圈事务，失败时事务回滚再走反向恢复。
     @RepeatExecuteLimit(name = CREATE_PROGRAM_ORDER_MQ, keys = {"#orderCreateMq.orderNumber"}, durationTime = 0)
-    @Transactional(rollbackFor = Exception.class)
     public String createMq(OrderCreateMq orderCreateMq) {
         List<OrderTicketUserCreateDto> orderTicketUserCreateDtoList = orderCreateMq.getOrderTicketUserCreateDtoList();
         String orderNumber;
         try {
             if (Objects.equals(orderCreateMq.getOrderVersion(), ProgramOrderVersion.V5_VERSION.getValue())) {
                 // V5：无第二权威，直接建单；Redis 已在请求侧完成扣减，消费侧不再重复扣 DB
-                orderNumber = createByMq(orderCreateMq);
+                orderNumber = createOrderInTransaction(orderCreateMq);
             } else {
                 //使用 Stream API 按 ticketCategoryId 分组并计数
                 Map<Long, Long> countMap = orderTicketUserCreateDtoList.stream()
@@ -1200,7 +1206,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 List<TicketCategoryCountDto> ticketCountList = countMap.entrySet().stream()
                         .map(entry -> new TicketCategoryCountDto(entry.getKey(), entry.getValue()))
                         .toList();
-                //修改节目服务中的座位状态和扣减库存
+                //修改节目服务中的座位状态和扣减库存（事务外：网络 IO 不占本地 DB 连接）
                 ReduceRemainNumberDto reduceRemainNumberDto = new ReduceRemainNumberDto();
                 reduceRemainNumberDto.setProgramId(orderCreateMq.getProgramId());
                 reduceRemainNumberDto.setSellStatus(SellStatus.LOCK.getCode());
@@ -1212,8 +1218,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                     throw new TicketFlowFrameException(programApiResponse);
                 }
                 try {
-                    //真正地创建订单
-                    orderNumber = createByMq(orderCreateMq);
+                    //真正地创建订单（独立事务）
+                    orderNumber = createOrderInTransaction(orderCreateMq);
                 } catch (Exception e) {
                     //Feign 已扣减 DB（座位 LOCK + 余票扣减）但本地建单失败（事务回滚，订单不存在）：
                     //远程扣减不受本地事务回滚影响，需显式反向恢复 DB（内部对"订单已存在"自动跳过）
@@ -1235,9 +1241,17 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         }
         // 建单完成标记：供前端 /order/get/cache 轮询终态，同时支撑 PENDING 对账的"已建单"判定。
         // TTL 10min > 对账 3min 滞后窗口（ReconciliationTask 按 3min 前的 ProgramRecordTask 触发），
-        // 确保对账首次裁决该 PENDING 条目时标记尚未过期。
+        // 确保对账首次裁决该 PENDING 条目时标记尚未过期。放在事务提交之后写，避免回滚也留标记。
         redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ, orderNumber), orderNumber, 10, TimeUnit.MINUTES);
         return orderNumber;
+    }
+
+    /**
+     * 在独立事务中完成订单落库（createByMq）。
+     * 用 TransactionTemplate 显式圈事务，使调用方可以在事务外先做 Feign 网络调用。
+     */
+    private String createOrderInTransaction(OrderCreateMq orderCreateMq) {
+        return transactionTemplate.execute(status -> createByMq(orderCreateMq));
     }
 
     /**

@@ -45,9 +45,10 @@ public class CreateOrderDiscardRecorder implements ConsumerRecordRecoverer {
         redisCache.leftPushForList(
                 RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER, orderCreateMq.getProgramId()),
                 new DiscardOrder(orderCreateMq, reason.getCode(), errorMsg));
+        // 只保留 reason 标签：programId 无界，作为 Prometheus 标签会导致时间线爆炸。
+        // 需要按节目定位丢弃原因时，从 DISCARD_ORDER 记录里取（key 已带 programId）。
         meterRegistry.counter(Metrics.ORDER_CREATE_FAIL_TOTAL,
-                        Metrics.REASON, reasonMetric(reason),
-                        Metrics.PROGRAM_ID, String.valueOf(orderCreateMq.getProgramId()))
+                        Metrics.REASON, reasonMetric(reason))
                 .increment();
     }
 
