@@ -259,7 +259,9 @@ services:
       <<: *app-env
       OTEL_SERVICE_NAME: gateway
       SPRING_PROFILES_ACTIVE: pro
-      JAVA_OPTS: "-Xms192m -Xmx384m -XX:MaxMetaspaceSize=256m"
+      JAVA_OPTS: "-Xms192m -Xmx384m -XX:MaxMetaspaceSize:256m"
+      # 关闭非签名普通访问：客户端 no_verify=true 不能跳过验签/token（application-pro.yml 亦已置 false）
+      ALLOW_NORMAL_ACCESS: "false"
       # Sentinel 控制台地址（容器内 8858；宿主机访问 http://localhost:8082）
       SENTINEL_DASHBOARD_ADDR: sentinel:8858
     volumes:
@@ -417,6 +419,8 @@ services:
       OTEL_SERVICE_NAME: order
       SPRING_PROFILES_ACTIVE: local
       JAVA_OPTS: "-Xms256m -Xmx512m -XX:MaxMetaspaceSize=300m"
+      # 演示数据重置任务默认关闭，避免容器环境每晚清空全量订单；需要演示时改为 "true"
+      TICKETFLOW_DEMO_RESET_ENABLED: "false"
     volumes:
       - ../logs/container:/app/logs
       - ./otel:/otel:ro

@@ -94,4 +94,11 @@ spring:
           filters:
             - StripPrefix=2
           metadata:
-            title: 监听服务    
+            title: 监听服务
+
+# 生产/容器：关闭"非签名普通访问"。
+# 否则任意客户端只要带请求头 no_verify=true 即可跳过 RSA 验签与 token 校验。
+# 需要放行非签名访问（如内网管理端）时显式置 true，或用环境变量 ALLOW_NORMAL_ACCESS=true 覆盖。
+allow:
+  normal:
+    access: false

@@ -31,6 +31,7 @@ import com.ticketflow.vo.PayBillVo;
 import com.ticketflow.vo.TradeCheckVo;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -212,6 +213,15 @@ public class PayService {
         }
         // 状态不一致时以支付渠道为准，同步更新本地账单状态
         if (!Objects.equals(payBill.getPayBillStatus(), payBillStatus)) {
+            // 终态保护：账单已退单/已取消时不允许被渠道轮询结果回退。
+            // 典型场景：支付宝退款后 trade_status 仍是 TRADE_SUCCESS，会被映射成 PAY，
+            // 若直接覆盖则 REFUND 被改回 PAY，重新打开退款入口导致二次退款。
+            if (Objects.equals(payBill.getPayBillStatus(), PayBillStatus.REFUND.getCode())
+                    || Objects.equals(payBill.getPayBillStatus(), PayBillStatus.CANCEL.getCode())) {
+                log.warn("账单已处于终态({})，忽略渠道状态({})回写 tradeCheckDto : {}",
+                        payBill.getPayBillStatus(), payBillStatus, JSON.toJSONString(tradeCheckDto));
+                return tradeCheckVo;
+            }
             log.warn("支付渠道和库中账单交易状态不一致 支付渠道payBillStatus : {}, 库中payBillStatus : {}, tradeCheckDto : {}",
                     payBillStatus, payBill.getPayBillStatus(), JSON.toJSONString(tradeCheckDto));
             PayBill updatePayBill = new PayBill();
@@ -258,8 +268,20 @@ public class PayService {
             throw new TicketFlowFrameException(BaseCode.REFUND_AMOUNT_GREATER_THAN_PAY_AMOUNT);
         }
 
-        // 每笔退款独立生成退款单号，作为渠道侧幂等键与退款状态查询依据
-        String outRefundNo = String.valueOf(uidGenerator.getUid());
+        // 退款单号：优先用调用方传入的幂等键（同一退款意图重试复用同一单号），
+        // 作为渠道侧幂等键（out_request_no）与 d_refund_bill.out_refund_no 唯一键；
+        // 未提供时退化为每次生成新单号（旧行为，不幂等）。
+        String outRefundNo = (Objects.isNull(refundDto.getRefundRequestId())
+                || refundDto.getRefundRequestId().isBlank())
+                ? String.valueOf(uidGenerator.getUid())
+                : refundDto.getRefundRequestId();
+        // 同一幂等键已受理过：直接返回，避免重复调用渠道（覆盖"上次已调渠道但进程在落库前崩溃"的重试）
+        RefundBill existRefund = refundBillMapper.selectOne(
+                Wrappers.lambdaQuery(RefundBill.class).eq(RefundBill::getOutRefundNo, outRefundNo));
+        if (Objects.nonNull(existRefund)) {
+            log.info("退款幂等命中，直接返回 outRefundNo : {}", outRefundNo);
+            return outRefundNo;
+        }
         // 调用支付渠道退款
         PayStrategyHandler payStrategyHandler = payStrategyContext.get(refundDto.getChannel());
         RefundResult refundResult = payStrategyHandler.refund(refundDto.getOrderNumber(), refundDto.getAmount(),
@@ -277,7 +299,13 @@ public class PayService {
         refundBill.setRefundStatus(refundResult.getRefundStatus());
         refundBill.setRefundTime(DateUtils.now());
         refundBill.setReason(refundDto.getReason());
-        refundBillMapper.insert(refundBill);
+        try {
+            refundBillMapper.insert(refundBill);
+        } catch (DuplicateKeyException e) {
+            // 并发下同一幂等键落库：渠道侧同 outRefundNo 已去重，本地按幂等成功返回
+            log.warn("退款单已存在（并发重复），幂等返回 outRefundNo : {}", outRefundNo);
+            return outRefundNo;
+        }
         // 渠道已确认成功（refundStatus=2）且已确认到账累计（含本次）达到支付金额才将账单置为 REFUND；
         // 渠道处理中（refundStatus=1，常见于微信）保持 PAY，由 RefundCheckTask 确认成功后翻转；
         // 部分退款保持 PAY 可继续退；条件更新兜底并发：0 行说明账单状态已被其他流程更新，不覆盖

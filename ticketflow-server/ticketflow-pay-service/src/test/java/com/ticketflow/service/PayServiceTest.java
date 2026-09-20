@@ -367,6 +367,29 @@ class PayServiceTest {
         verify(payBillMapper).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
     }
 
+    @Test
+    void tradeCheck_已退款终态_渠道返回PAY不回退() {
+        // 支付宝退款后 trade_status 仍可能映射为 PAY，终态 REFUND 不允许被回写
+        when(payStrategyHandler.queryTrade(anyString()))
+                .thenReturn(tradeResult(true, PayBillStatus.PAY.getCode(), new BigDecimal("100.00")));
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.REFUND.getCode()));
+
+        payService.tradeCheck(tradeCheckDto());
+
+        verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+    }
+
+    @Test
+    void tradeCheck_已取消终态_渠道返回PAY不回退() {
+        when(payStrategyHandler.queryTrade(anyString()))
+                .thenReturn(tradeResult(true, PayBillStatus.PAY.getCode(), new BigDecimal("100.00")));
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.CANCEL.getCode()));
+
+        payService.tradeCheck(tradeCheckDto());
+
+        verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+    }
+
     // ==================== refund ====================
 
     private RefundDto refundDto() {
@@ -461,6 +484,22 @@ class PayServiceTest {
         // 已确认累计 60 + 本次成功 40 = 100 达全额，置 REFUND
         verify(payBillMapper).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
         verify(refundBillMapper).insert(any(RefundBill.class));
+    }
+
+    @Test
+    void refund_同幂等键重复_命中已有退款单不重复调用渠道() {
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
+        RefundDto dto = refundDto();
+        dto.setRefundRequestId("closed-refund:20260804000000000001:50.00");
+        RefundBill existed = new RefundBill();
+        existed.setOutRefundNo(dto.getRefundRequestId());
+        when(refundBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(existed);
+
+        String outRefundNo = payService.refund(dto);
+
+        assertEquals("closed-refund:20260804000000000001:50.00", outRefundNo);
+        verify(payStrategyHandler, never()).refund(anyString(), any(), any(), anyString(), anyString());
+        verify(refundBillMapper, never()).insert(any(RefundBill.class));
     }
 
     @Test

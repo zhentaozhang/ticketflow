@@ -367,6 +367,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             refundDto.setChannel(Optional.ofNullable(PayChannel.getRc(orderPayCheckDto.getPayChannelType()))
                     .map(PayChannel::getValue).orElseThrow(() -> new TicketFlowFrameException(BaseCode.PAY_CHANNEL_NOT_EXIST)));
             refundDto.setReason("延迟订单关闭");
+            // 稳定幂等键：同一订单的关闭退款重试复用同一 outRefundNo，避免二次退款
+            refundDto.setRefundRequestId("closed-refund:" + order.getOrderNumber() + ":" + order.getOrderPrice().toPlainString());
             ApiResponse<String> response = payClient.refund(refundDto);
             if (response.getCode().equals(BaseCode.SUCCESS.getCode())) {
                 Order updateOrder = new Order();
@@ -759,6 +761,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         refundDto.setAmount(amount);
         refundDto.setChannel(channel);
         refundDto.setReason("延迟订单关闭");
+        // 稳定幂等键：同一订单 + 金额的关闭退款重试复用同一 outRefundNo，避免二次退款
+        refundDto.setRefundRequestId("closed-refund:" + outTradeNo + ":" + amount.toPlainString());
         ApiResponse<String> response = payClient.refund(refundDto);
         if (!Objects.equals(response.getCode(), BaseCode.SUCCESS.getCode())) {
             log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
