@@ -17,7 +17,7 @@ import java.util.function.Function;
 
 /**
  * 节目详情本地缓存（Caffeine）。
- * 过期策略：expireAfterCreate = 演出时间 - 当前时间（到演出开始自动过期）。
+ * 过期策略：取“演出开始时间”和“本地缓存最长存活时间”里较小的那个（见 {@link LocalCacheTtl}）。
  * 配合 Redis Stream 的 delLocalCache() 实现主动失效。
  * <p>
  * ProgramService.getById() 的三级缓存之一：
@@ -40,8 +40,8 @@ public class LocalCacheProgram {
     private Long maximumSize;
 
     /**
-     * 初始化 Caffeine 缓存，按演出开始时间动态计算过期时长。
-     * 更新/读取不重置过期时间，确保演出结束后缓存自动失效。
+     * 初始化 Caffeine 缓存，按演出开始时间动态计算过期时长（并受本地缓存上界限制）。
+     * 更新/读取不重置过期时间。
      */
     @PostConstruct
     public void localLockCacheInit() {
@@ -51,19 +51,25 @@ public class LocalCacheProgram {
                     @Override
                     public long expireAfterCreate(@NonNull final String key, @NonNull final ProgramVo value,
                                                   final long currentTime) {
-                        return TimeUnit.MILLISECONDS.toNanos(DateUtils.countBetweenSecond(DateUtils.now(), value.getShowTime()));
+                        // 业务上的自然到期：演出开始后就没人看了；
+                        // 但仍然要受“本地缓存最长存活时间”封顶——失效通知是尽力而为的，
+                        // 漏一条最多让数据旧 LocalCacheTtl.CACHE_TTL_CAP_SECONDS 秒。
+                        // （顺带修了一个单位 bug：countBetweenSecond 返回的是秒，
+                        //   原来用 MILLISECONDS.toNanos 包它，等于把秒当毫秒，TTL 小了 1000 倍。）
+                        return LocalCacheTtl.capNanos(
+                                DateUtils.countBetweenSecond(DateUtils.now(), value.getShowTime()));
                     }
 
                     @Override
                     public long expireAfterUpdate(@NonNull final String key, @NonNull final ProgramVo value,
                                                   final long currentTime, @NonNegative final long currentDuration) {
-                        return currentDuration;
+                        return currentDuration; // 更新不重置
                     }
 
                     @Override
                     public long expireAfterRead(@NonNull final String key, @NonNull final ProgramVo value,
                                                 final long currentTime, @NonNegative final long currentDuration) {
-                        return currentDuration;
+                        return currentDuration; // 读取不重置
                     }
                 })
                 .build();

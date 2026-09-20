@@ -3,7 +3,6 @@ package com.ticketflow.filter;
 
 import cn.hutool.core.collection.CollectionUtil;
 import com.alibaba.fastjson.JSON;
-import com.baidu.fsg.uid.UidGenerator;
 import com.ticketflow.conf.RequestTemporaryWrapper;
 import com.ticketflow.enums.BaseCode;
 import com.ticketflow.exception.ArgumentError;
@@ -22,7 +21,6 @@ import com.ticketflow.util.StringUtil;
 import com.ticketflow.vo.GetChannelDataVo;
 import com.ticketflow.vo.UserVo;
 import lombok.extern.slf4j.Slf4j;
-import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
@@ -53,7 +51,6 @@ import java.util.Objects;
 import java.util.function.Function;
 
 import static com.ticketflow.constant.Constant.GRAY_PARAMETER;
-import static com.ticketflow.constant.Constant.TRACE_ID;
 import static com.ticketflow.constant.GatewayConstant.BUSINESS_BODY;
 import static com.ticketflow.constant.GatewayConstant.CODE;
 import static com.ticketflow.constant.GatewayConstant.ENCRYPT;
@@ -67,14 +64,17 @@ import static com.ticketflow.constant.GatewayConstant.VERIFY_VALUE;
 /**
  * Gateway 请求入口过滤器（order=-2，最高优先级）。
  * 职责链：RateLimiter（自适应信号量熔断）→ Token 验证（RSA 签名→渠道→JWT）→
- * API 限流（滑动窗口 Lua）→ 透传 header（traceId/userId/code）→ 下游微服务
+ * API 限流（滑动窗口 Lua）→ 透传 header（gray/userId/code）→ 下游微服务
  * <p>
  * 请求路径：
  * 1. rateLimiterProperty.rateSwitch 开启时，优先通过 RateLimiter 争取 Semaphore 许可
  * 2. JSON 请求：readBody() 异步捕获 body → doExecute() 校验签名/渠道/token → 注入 header
- * 3. 非 JSON 请求：直接透传，仅注入 traceId/gray/noVerify
+ * 3. 非 JSON 请求：直接透传，仅透传 gray/noVerify
  * <p>
  * 注意：链路中抛出 TicketFlowFrameException 会被全局 ErrorHandler 捕获并返回统一 JSON 错误响应
+ * <p>
+ * 说明：链路追踪上下文（W3C traceparent）由 OpenTelemetry Java Agent 在网关入口自动生成并注入下游，
+ * 不再自研 traceId Header 透传。
  */
 
 @Component
@@ -95,9 +95,6 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
 
     @Autowired
     private GatewayProperty gatewayProperty;
-
-    @Autowired
-    private UidGenerator uidGenerator;
 
     @Autowired
     private RateLimiterProperty rateLimiterProperty;
@@ -124,20 +121,13 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
 
     public Mono<Void> doFilter(final ServerWebExchange exchange, final GatewayFilterChain chain) {
         ServerHttpRequest request = exchange.getRequest();
-        String traceId = request.getHeaders().getFirst(TRACE_ID);
         String gray = request.getHeaders().getFirst(GRAY_PARAMETER);
         String noVerify = request.getHeaders().getFirst(NO_VERIFY);
-        if (StringUtil.isEmpty(traceId)) {
-            traceId = String.valueOf(uidGenerator.getUid());
-        }
-        MDC.put(TRACE_ID, traceId);
         Map<String, String> headMap = new HashMap<>(8);
-        headMap.put(TRACE_ID, traceId);
         headMap.put(GRAY_PARAMETER, gray);
         if (StringUtil.isNotEmpty(noVerify)) {
             headMap.put(NO_VERIFY, noVerify);
         }
-        BaseParameterHolder.setParameter(TRACE_ID, traceId);
         BaseParameterHolder.setParameter(GRAY_PARAMETER, gray);
         MediaType contentType = request.getHeaders().getContentType();
         //application json请求
@@ -288,9 +278,6 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
                     newHeaders.setContentLength(contentLength);
                 } else {
                     newHeaders.set(HttpHeaders.TRANSFER_ENCODING, "chunked");
-                }
-                if (CollectionUtil.isNotEmpty(headMap) && StringUtil.isNotEmpty(headMap.get(TRACE_ID))) {
-                    MDC.put(TRACE_ID, headMap.get(TRACE_ID));
                 }
                 return newHeaders;
             }

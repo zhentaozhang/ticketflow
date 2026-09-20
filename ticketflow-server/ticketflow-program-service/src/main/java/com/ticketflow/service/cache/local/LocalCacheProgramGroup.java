@@ -46,8 +46,9 @@ public class LocalCacheProgramGroup {
                     @Override
                     public long expireAfterCreate(@NonNull final String key, @NonNull final ProgramGroupVo value,
                                                   final long currentTime) {
-                        return TimeUnit.MILLISECONDS.toNanos
-                                (DateUtils.countBetweenSecond(DateUtils.now(),value.getRecentShowTime()));
+                        // 剧末场次时间 + 本地缓存上界（原来用 MILLISECONDS.toNanos 包“秒”，单位错了 1000 倍）
+                        return LocalCacheTtl.capNanos(
+                                DateUtils.countBetweenSecond(DateUtils.now(), value.getRecentShowTime()));
                     }
                     
                     @Override

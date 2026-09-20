@@ -12,8 +12,9 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * Servlet 过滤器链自动配置。
  * 注册 BackManageAuthFilter（后台认证）、
  * RequestWrapperFilter（请求体缓存）、
- * BaseParameterFilter（上下文参数透传）、
- * SkyWalkingFilter（链路追踪）
+ * BaseParameterFilter（业务上下文参数透传）
+ *
+ * 说明：链路追踪（trace_id/span_id）由 OpenTelemetry Java Agent 注入 MDC，不再注册链路 Filter。
  */
 @EnableConfigurationProperties(BackManageProperties.class)
 public class FilterAutoConfiguration {
@@ -31,11 +32,6 @@ public class FilterAutoConfiguration {
     @Bean
     public BaseParameterFilter baseParameterFilter() {
         return new BaseParameterFilter();
-    }
-
-    @Bean
-    public SkyWalkingFilter skyWalkingFilter() {
-        return new SkyWalkingFilter();
     }
 
     @Bean

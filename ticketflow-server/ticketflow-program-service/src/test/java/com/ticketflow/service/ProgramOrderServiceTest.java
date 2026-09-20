@@ -90,6 +90,9 @@ class ProgramOrderServiceTest {
         RedisTemplate redisTemplate = mock(RedisTemplate.class);
         lenient().when(redisCache.getInstance()).thenReturn(redisTemplate);
         lenient().when(redisTemplate.execute(any(RedisScript.class), anyList())).thenReturn(0L);
+        // 缓存就绪探测改为一次 pipeline hasKeys：默认 4 个 key 全部不存在（等价旧 hasKey=false），走预热分支
+        lenient().when(redisCache.hasKeys(anyCollection()))
+                .thenReturn(java.util.List.of(false, false, false, false));
     }
 
     @Mock private OrderClient orderClient;
@@ -387,17 +390,17 @@ class ProgramOrderServiceTest {
                     .thenReturn(remainMap);
             when(uidGenerator.getUid()).thenReturn(888L);
 
-            // 第一次 Lua 返回 40002（并发抢占），重试后成功
+            // 第一次 Lua 返回 40002（候选 50,51 被并发抢占），本地剔除后从剩余座位（52,53）重新匹配成功。
+            // no_sold 只读一次：重试用本地剩余座位，不再重读整档 hash（原实现每轮 HGETALL + 重排）。
             when(redisCache.getAllMapForHash(any(), eq(SeatVo.class)))
-                    .thenReturn(adjacentSeatMap(50L, 51L, 52L))
-                    .thenReturn(adjacentSeatMap(50L, 51L, 52L));
+                    .thenReturn(adjacentSeatMap(50L, 51L, 52L, 53L));
             ProgramCacheCreateOrderData lockedResult = new ProgramCacheCreateOrderData();
             lockedResult.setCode(BaseCode.SEAT_LOCK.getCode());
             ProgramCacheCreateOrderData successResult = new ProgramCacheCreateOrderData();
             successResult.setCode(BaseCode.SUCCESS.getCode());
             successResult.setPurchaseSeatList(List.of(
-                    createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID),
-                    createPurchaseSeat(51L, 2001L, TICKET_CATEGORY_ID)));
+                    createPurchaseSeat(52L, 2000L, TICKET_CATEGORY_ID),
+                    createPurchaseSeat(53L, 2001L, TICKET_CATEGORY_ID)));
             when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
                     .thenReturn(lockedResult)
                     .thenReturn(successResult);
@@ -407,8 +410,10 @@ class ProgramOrderServiceTest {
 
             assertNotNull(result);
             assertEquals(2, result.getPurchaseSeatList().size());
+            assertEquals(List.of(52L, 53L),
+                    result.getPurchaseSeatList().stream().map(PurchaseSeat::getId).toList());
             verify(programCacheCreateOrderResolutionOperate, times(2)).programCacheOperate(anyList(), any());
-            verify(redisCache, times(2)).getAllMapForHash(any(), eq(SeatVo.class));
+            verify(redisCache, times(1)).getAllMapForHash(any(), eq(SeatVo.class));
         }
 
         @Test
@@ -438,9 +443,11 @@ class ProgramOrderServiceTest {
             when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
                     .thenReturn(lockedResult);
 
+            // 唯一一组候选被抢占并本地剔除后，剩余座位不足以再凑出相邻票数 → SEAT_OCCUPY
+            // （旧实现每轮重读整档 hash，这里会一直拿到同一组候选并最终抛 SEAT_LOCK）
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programOrderService.createOrderOperateProgramCacheResolution(dto));
-            assertEquals(BaseCode.SEAT_LOCK.getCode(), ex.getCode());
+            assertEquals(BaseCode.SEAT_OCCUPY.getCode(), ex.getCode());
         }
 
         private Map<String, SeatVo> adjacentSeatMap(Long... seatIds) {
@@ -667,6 +674,10 @@ class ProgramOrderServiceTest {
                 return null;
             }).when(createOrderSend).sendMessage(anyString(), any(), any());
 
+            // 回滚守卫：发送失败回调先确认座位仍在锁定集合（PENDING 已回滚时跳过，避免余票二次回补）
+            when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(
+                    List.of(createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID)));
+
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programOrderService.createNewAsync(dto, ProgramOrderVersion.V4_VERSION.getValue()));
 
@@ -723,7 +734,7 @@ class ProgramOrderServiceTest {
     class CreateNewAsyncV5 {
 
         @Test
-        void v5Lua幂等标记TTL为3秒() {
+        void v5Lua幂等标记TTL为10秒() {
             ProgramOrderCreateDto dto = createDtoWithSeats(1);
 
             when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
@@ -752,10 +763,10 @@ class ProgramOrderServiceTest {
 
             programOrderService.createOrderOperateProgramCacheResolutionV5(dto);
 
-            // 幂等标记 TTL 通过 ARGV[4]（data[3]）传入 V5 Lua，必须为 3 秒
+            // 幂等标记 TTL 通过 ARGV[4]（data[3]）传入 V5 Lua，必须覆盖"请求不确定窗口"（10 秒）
             ArgumentCaptor<String[]> dataCaptor = ArgumentCaptor.forClass(String[].class);
             verify(programCacheCreateOrderV5ResolutionOperate).programCacheOperate(anyList(), dataCaptor.capture());
-            assertEquals("3", dataCaptor.getValue()[3]);
+            assertEquals("10", dataCaptor.getValue()[3]);
         }
 
         @Test

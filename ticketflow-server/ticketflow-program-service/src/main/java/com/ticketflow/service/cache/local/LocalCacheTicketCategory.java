@@ -53,9 +53,11 @@ public class LocalCacheTicketCategory {
                     @Override
                     public long expireAfterCreate(@NonNull final Long key, @NonNull final List<TicketCategoryVo> value,
                                                   final long currentTime) {
-                        Long expire = redisCache.getExpire(RedisKeyBuild.createRedisKey
-                                (RedisKeyManage.PROGRAM_TICKET_CATEGORY_LIST, key),TimeUnit.MILLISECONDS);
-                        return TimeUnit.MILLISECONDS.toNanos(expire);
+                        // 与 Redis 里票档数据的 TTL 对齐；但要补上本地缓存上界，
+                        // 并且把“键不存在/没设过期时间”返回的负数归为零（立即过期）
+                        long redisExpireMillis = redisCache.getExpire(RedisKeyBuild.createRedisKey
+                                (RedisKeyManage.PROGRAM_TICKET_CATEGORY_LIST, key), TimeUnit.MILLISECONDS);
+                        return LocalCacheTtl.capNanos(TimeUnit.MILLISECONDS.toSeconds(redisExpireMillis));
                     }
                     
                     @Override

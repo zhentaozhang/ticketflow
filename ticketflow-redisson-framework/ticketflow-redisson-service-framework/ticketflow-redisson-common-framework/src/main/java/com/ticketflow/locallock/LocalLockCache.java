@@ -34,7 +34,7 @@ public class LocalLockCache {
     @PostConstruct
     public void localLockCacheInit(){
         localLockCache = Caffeine.newBuilder()
-                .expireAfterWrite(durationTime, TimeUnit.HOURS)
+                .expireAfterAccess(durationTime, TimeUnit.HOURS)
                 .build();
     }
     

@@ -66,6 +66,7 @@ import com.ticketflow.service.cache.local.LocalCacheTicketCategory;
 import com.ticketflow.service.constant.ProgramTimeType;
 import com.ticketflow.service.es.ProgramEs;
 import com.ticketflow.service.lua.ProgramDelCacheData;
+import com.ticketflow.service.stock.ProgramLocalStockGate;
 import com.ticketflow.service.tool.TokenExpireManager;
 import com.ticketflow.servicelock.LockType;
 import com.ticketflow.servicelock.annotion.ServiceLock;
@@ -204,6 +205,9 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
 
     @Autowired
     private SeatService seatService;
+
+    @Autowired
+    private ProgramLocalStockGate programLocalStockGate;
 
     /**
      * 添加节目
@@ -594,7 +598,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      */
     public ProgramVo getByIdMultipleCache(Long programId, Date showTime) {
         return localCacheProgram.getCache(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId).getRelKey(),
-                key -> {
+                key -> {    // 加载函数，只有 miss 才执行
                     log.info("查询节目详情 从本地缓存没有查询到 节目id : {}", programId);
                     ProgramVo programVo = getById(programId, DateUtils.countBetweenSecond(DateUtils.now(), showTime),
                             TimeUnit.SECONDS);
@@ -652,20 +656,28 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      * 内部 Redis 不存在时获取 ReentrantLock，二次检查后查 DB 回填，
      * 避免同一个节目在缓存过期瞬间被重复加载（cache stampede）。
      */
-    @ServiceLock(lockType = LockType.Read, name = PROGRAM_LOCK, keys = {"#programId"})
+    @ServiceLock(lockType = LockType.Read, name = PROGRAM_LOCK, keys = {"#programId"})  //分布式读锁
     public ProgramVo getById(Long programId, Long expireTime, TimeUnit timeUnit) {
         ProgramVo programVo =
                 redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId), ProgramVo.class);
         if (Objects.nonNull(programVo)) {
             return programVo;
-        }
+        }  // Redis 命中直接返回
         log.info("查询节目详情 从Redis缓存没有查询到 节目id : {}", programId);
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_PROGRAM_LOCK, new String[]{String.valueOf(programId)});
-        lock.lock();
+        if (!serviceLockTool.tryLock(lock, "GET_PROGRAM_LOCK:" + programId)) {
+            // 等超时：先再查一次缓存（可能刚好被填好），仍没有就快速失败，不无锁重建
+            programVo = redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId),
+                    ProgramVo.class);
+            if (Objects.nonNull(programVo)) {
+                return programVo;
+            }
+            throw new TicketFlowFrameException(BaseCode.CACHE_LOAD_LOCK_TIMEOUT);
+        }
         try {
             return redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId)
                     , ProgramVo.class,
-                    () -> createProgramVo(programId)
+                    () -> createProgramVo(programId)   //查 DB 回填
                     , expireTime,
                     timeUnit);
         } finally {
@@ -694,7 +706,16 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
             return programGroupVo;
         }
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_PROGRAM_LOCK, new String[]{String.valueOf(programGroupId)});
-        lock.lock();
+        if (!serviceLockTool.tryLock(lock, "GET_PROGRAM_GROUP_LOCK:" + programGroupId)) {
+            // 等超时：先再查一次缓存（可能刚好被填好），仍没有就快速失败，不无锁重建
+            programGroupVo = redisCache.get(
+                    RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, programGroupId),
+                    ProgramGroupVo.class);
+            if (Objects.nonNull(programGroupVo)) {
+                return programGroupVo;
+            }
+            throw new TicketFlowFrameException(BaseCode.CACHE_LOAD_LOCK_TIMEOUT);
+        }
         try {
             programGroupVo = redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, programGroupId),
                     ProgramGroupVo.class);
@@ -1139,6 +1160,9 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     @Transactional(rollbackFor = Exception.class)
     public Boolean resetExecute(ProgramResetExecuteDto programResetExecuteDto) {
         Long programId = programResetExecuteDto.getProgramId();
+        // 清空本地库存闸门：reset 后余票/座位全部还原，旧预估余票（可能为 0/售罄态）
+        // 若不清理，压测/重开后前 2s 内请求会被旧闸门误拒（假售罄）
+        programLocalStockGate.clear(programId);
         //查出该节目下锁定和已售卖的座位
         LambdaQueryWrapper<Seat> seatQueryWrapper =
                 Wrappers.lambdaQuery(Seat.class).eq(Seat::getProgramId, programId)
@@ -1215,12 +1239,12 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     public Boolean invalid(final ProgramInvalidDto programInvalidDto) {
         Program program = new Program();
         program.setId(programInvalidDto.getId());
-        program.setProgramStatus(BusinessStatus.NO.getCode());
+        program.setProgramStatus(BusinessStatus.NO.getCode());  // ① 更新 DB：状态改为下架
         int result = programMapper.updateById(program);
         if (result > 0) {
-            delRedisData(programInvalidDto.getId());
-            redisStreamPushHandler.push(String.valueOf(programInvalidDto.getId()));
-            programEs.deleteByProgramId(programInvalidDto.getId());
+            delRedisData(programInvalidDto.getId());  // ② 删 Redis 所有相关 key
+            redisStreamPushHandler.push(String.valueOf(programInvalidDto.getId()));  // ③ 广播失效事件
+            programEs.deleteByProgramId(programInvalidDto.getId());  // ④ 删 ES 索引
             return true;
         } else {
             return false;

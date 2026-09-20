@@ -9,6 +9,7 @@ import com.ticketflow.entity.OrderTicketUser;
 import com.ticketflow.enums.OrderStatus;
 import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.mapper.OrderMapper;
+import com.ticketflow.observability.Metrics;
 import com.ticketflow.mapper.OrderTicketUserMapper;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
@@ -126,8 +127,8 @@ public class V5StockConservationTask {
                 log.warn("V5库存守恒异常 programId : {} ticketCategoryId : {} " +
                                 "Redis(locked={}, sold={}) DB(locked={}, sold={})",
                         programId, ticketCategoryId, redisLocked, redisSold, dbLockedCount, dbSoldCount);
-                meterRegistry.counter("ticketflow_v5_stock_consistency_violation",
-                        "programId", String.valueOf(programId)).increment();
+                meterRegistry.counter(Metrics.V5_STOCK_CONSISTENCY_VIOLATION,
+                        Metrics.PROGRAM_ID, String.valueOf(programId)).increment();
             }
         }
     }

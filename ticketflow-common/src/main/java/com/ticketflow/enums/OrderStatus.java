@@ -7,11 +7,12 @@ package com.ticketflow.enums;
 public enum OrderStatus {
     /**
      * 订单状态
-     * */
-    NO_PAY(1,"未支付"),
-    CANCEL(2,"已取消"),
-    PAY(3,"已支付"),
-    REFUND(4,"已退单"),
+     *
+     */
+    NO_PAY(1, "未支付"),
+    CANCEL(2, "已取消"),
+    PAY(3, "已支付"),
+    REFUND(4, "已退单"),
     ;
 
     private Integer code;

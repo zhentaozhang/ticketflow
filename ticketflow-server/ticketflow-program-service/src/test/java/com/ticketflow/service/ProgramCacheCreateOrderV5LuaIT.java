@@ -55,7 +55,7 @@ class ProgramCacheCreateOrderV5LuaIT {
     private static final long SEAT_ID = 50L;
     private static final long TICKET_USER_ID = 4001L;
     /** 幂等标记 TTL（与 ProgramOrderService.V5_IDEMPOTENT_TTL_SECONDS 一致） */
-    private static final String IDEMPOTENT_TTL_SECONDS = "3";
+    private static final String IDEMPOTENT_TTL_SECONDS = "10";
 
     @Container
     static GenericContainer<?> redis = new GenericContainer<>(DockerImageName.parse("redis:7"))

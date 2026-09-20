@@ -217,6 +217,33 @@ class ProgramOrderFlowIT {
     }
 
     @Test
+    void createNewAsync_座位不在未售集合但在锁定集合_也报座位已锁定() {
+        // 这才是真实并发抢座的形状：座位被锁时就已经从 no_sold 里删掉了，
+        // 后到的请求 hget 拿不到它。如果只回报 40001（座位不存在），
+        // 用户看到的原因就不对、失败分桶也会跟着错。
+        // 所以 Lua 在这个分支里要再查一眼锁定/已售集合（这个用例就是盯它的）。
+        long raceSeatId = 9101L;
+        SeatVo seatVo = new SeatVo();
+        seatVo.setId(raceSeatId);
+        seatVo.setTicketCategoryId(VIP_TICKET_CATEGORY_ID);
+        seatVo.setRowCode(10);
+        seatVo.setColCode(1);
+        seatVo.setPrice(new BigDecimal("299"));
+        seatVo.setSellStatus(2);
+        // 关键：只写进“锁定”集合，no_sold 里根本不存在
+        redisCache.putHash(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH,
+                PROGRAM_ID, VIP_TICKET_CATEGORY_ID), String.valueOf(raceSeatId), seatVo, 60, TimeUnit.SECONDS);
+        redisCache.delForHash(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH,
+                PROGRAM_ID, VIP_TICKET_CATEGORY_ID), String.valueOf(raceSeatId));
+
+        TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class, () -> programOrderService.createNewAsync(
+                request(PROGRAM_ID, 1L, List.of(2001L),
+                        List.of(seat(raceSeatId, VIP_TICKET_CATEGORY_ID, 10, 1, new BigDecimal("299"))), null, null), 1));
+
+        assertEquals(BaseCode.SEAT_LOCK.getCode(), ex.getCode());
+    }
+
+    @Test
     void createNewAsync_余票不足_抛余票数量不足异常() {
         // 21 张座位 > 票档 remain 20 → Lua 先校验余票（40011），未触碰座位检查
         List<SeatDto> seatDtoList = new ArrayList<>();

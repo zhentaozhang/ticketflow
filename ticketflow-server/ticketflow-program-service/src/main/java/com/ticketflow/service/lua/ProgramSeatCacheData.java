@@ -4,6 +4,7 @@ import com.alibaba.fastjson.JSON;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.vo.SeatVo;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ClassPathResource;
@@ -14,6 +15,8 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
 import java.util.stream.Collectors;
 
 /**
@@ -33,6 +36,19 @@ public class ProgramSeatCacheData {
      * 大型演出的座位数通常在 3000-8000，2000 以下串行足够快，避免并行调度开销。
      */
     private static final Integer THRESHOLD_VALUE = 2000;
+
+    /**
+     * 座位反序列化专用并行池。
+     * 不用 commonPool：公共池承载 JVM 内所有并行流/并行任务，座位大列表反序列化会与其它
+     * 并行操作互相抢线程。这里自建一个有界池，随 Bean 生命周期关闭。
+     */
+    private final ForkJoinPool seatParsePool =
+            new ForkJoinPool(Math.min(8, Math.max(2, Runtime.getRuntime().availableProcessors())));
+
+    @PreDestroy
+    public void destroy() {
+        seatParsePool.shutdown();
+    }
     
     /**
      * 加载 Lua 脚本 programSeat.lua，设置返回类型为 Object。
@@ -63,11 +79,25 @@ public class ProgramSeatCacheData {
         if (Objects.nonNull(object) && object instanceof ArrayList) {
             seatVoStrlist = (ArrayList<String>)object;
         }
-        // 超过阈值（2000）则并行流反序列化，提升大演出（3000-8000 座位）的处理速度
+        // 超过阈值（2000）在专用池里并行反序列化，提升大演出（3000-8000 座位）的处理速度；
+        // 在自建池的任务内调用 parallelStream，流会复用该池而不是 commonPool。
         if (seatVoStrlist.size() > THRESHOLD_VALUE) {
-            list = seatVoStrlist.parallelStream()
-                    .map(seatVoStr -> JSON.parseObject(seatVoStr,SeatVo.class)).collect(Collectors.toList());
-        }else {
+            List<String> parseSource = seatVoStrlist;
+            try {
+                list = seatParsePool.submit(() -> parseSource.parallelStream()
+                        .map(seatVoStr -> JSON.parseObject(seatVoStr, SeatVo.class))
+                        .collect(Collectors.toList())).get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("座位缓存并行反序列化被中断", e);
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException runtimeException) {
+                    throw runtimeException;
+                }
+                throw new IllegalStateException("座位缓存并行反序列化失败", cause);
+            }
+        } else {
             list = seatVoStrlist.stream()
                     .map(seatVoStr -> JSON.parseObject(seatVoStr,SeatVo.class)).collect(Collectors.toList());
         }

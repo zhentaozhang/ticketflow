@@ -86,6 +86,15 @@ public interface RedisCache {
     Boolean hasKey(RedisKeyBuild redisKeyBuild);
 
     /**
+     * 批量判断 key 是否存在（pipeline，单次网络往返）。
+     * 热路径上替代多次 {@link #hasKey(RedisKeyBuild)}，减少 Redis 往返次数。
+     *
+     * @param redisKeyBuildList key 集合，返回顺序与入参一致
+     * @return 与入参顺序一致的布尔列表
+     */
+    List<Boolean> hasKeys(Collection<RedisKeyBuild> redisKeyBuildList);
+
+    /**
      * 删除key
      *
      * @param redisKeyBuild 缓存key

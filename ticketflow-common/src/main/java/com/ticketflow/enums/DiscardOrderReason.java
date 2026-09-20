@@ -13,6 +13,12 @@ public enum DiscardOrderReason {
     MODIFY_PROGRAM_REMAIN_NUMBER_SEAT_FAIL(2,"修改节目服务的余票和座位失败"),
     
     CREATE_ORDER_FAIL(3,"创建订单失败"),
+    
+    /**
+     * 请求侧 Kafka 发送失败后回滚 Redis 缓存也失败（库存黑洞兜底：
+     * 写入本原因后由 discardOrderCompensation 幂等重试回滚，而非仅留日志）
+     * */
+    ROLLBACK_FAIL(4,"kafka发送失败后回滚缓存失败"),
     ;
 
     private Integer code;

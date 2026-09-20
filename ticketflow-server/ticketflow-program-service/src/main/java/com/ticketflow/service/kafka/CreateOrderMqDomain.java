@@ -8,6 +8,6 @@ import com.ticketflow.exception.TicketFlowFrameException;
 public class CreateOrderMqDomain {
 
     public String orderNumber;
-    
+
     public TicketFlowFrameException ticketFlowFrameException;
 }

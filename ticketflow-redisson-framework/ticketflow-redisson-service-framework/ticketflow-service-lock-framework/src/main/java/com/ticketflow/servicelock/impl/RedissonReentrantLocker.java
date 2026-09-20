@@ -9,19 +9,19 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Redisson 可重入锁实现——包装 redissonClient.getLock()。
- *
+ * <p>
  * 同名 key 可被同一线程多次 lock/unlock，适合需嵌套加锁的场景
  */
 @AllArgsConstructor
 public class RedissonReentrantLocker implements ServiceLocker {
 
     private final RedissonClient redissonClient;
-    
+
     @Override
     public RLock getLock(String lockKey) {
         return redissonClient.getLock(lockKey);
     }
-    
+
     @Override
     public RLock lock(String lockKey) {
         RLock lock = redissonClient.getLock(lockKey);
@@ -37,7 +37,7 @@ public class RedissonReentrantLocker implements ServiceLocker {
     }
 
     @Override
-    public RLock lock(String lockKey, TimeUnit unit ,long leaseTime) {
+    public RLock lock(String lockKey, TimeUnit unit, long leaseTime) {
         RLock lock = redissonClient.getLock(lockKey);
         lock.lock(leaseTime, unit);
         return lock;
@@ -53,7 +53,7 @@ public class RedissonReentrantLocker implements ServiceLocker {
             return false;
         }
     }
-    
+
     @Override
     public boolean tryLock(String lockKey, TimeUnit unit, long waitTime, long leaseTime) {
         RLock lock = redissonClient.getLock(lockKey);

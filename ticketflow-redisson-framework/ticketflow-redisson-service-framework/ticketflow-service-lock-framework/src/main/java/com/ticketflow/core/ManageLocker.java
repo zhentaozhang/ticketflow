@@ -18,40 +18,40 @@ import static com.ticketflow.servicelock.LockType.Write;
 
 /**
  * 分布式锁管理器——启动时创建 4 种 Redisson Locker 并缓存。
- *
+ * <p>
  * 4 种锁类型及其适用场景：
- *   ReentrantLock — 默认，可重入，适合普通互斥（订单创建、支付回调与取消互斥）
- *   FairLock      — 公平锁，按请求顺序排队，避免线程饥饿
- *   ReadLock      — 读写锁读锁，可并发读、写互斥（ProgramService.getById 缓存加载）
- *   WriteLock     — 读写锁写锁，写独占（ProgramCategoryService 全量加载写缓存）
- *
+ * ReentrantLock — 默认，可重入，适合普通互斥（订单创建、支付回调与取消互斥）
+ * FairLock      — 公平锁，按请求顺序排队，避免线程饥饿
+ * ReadLock      — 读写锁读锁，可并发读、写互斥（ProgramService.getById 缓存加载）
+ * WriteLock     — 读写锁写锁，写独占（ProgramCategoryService 全量加载写缓存）
+ * <p>
  * ServiceLockFactory 通过策略模式选择对应的 locker。
- * 缓存避免每次加锁时重复创建 Redisson 对象。
+ * 为什么启动时就建好 4 个并缓存：如果每次加锁都 new 一个 Locker，高并发下创建开销浪费且没必要——Redisson 的锁对象是轻量壳，复用同一个即可。用 Map 缓存 = 用空间换时间。
  **/
 public class ManageLocker {
 
     private final Map<LockType, ServiceLocker> cacheLocker = new HashMap<>();
-    
-    public ManageLocker(RedissonClient redissonClient){
-        cacheLocker.put(Reentrant,new RedissonReentrantLocker(redissonClient));
-        cacheLocker.put(Fair,new RedissonFairLocker(redissonClient));
-        cacheLocker.put(Write,new RedissonWriteLocker(redissonClient));
-        cacheLocker.put(Read,new RedissonReadLocker(redissonClient));
+
+    public ManageLocker(RedissonClient redissonClient) {
+        cacheLocker.put(Reentrant, new RedissonReentrantLocker(redissonClient));
+        cacheLocker.put(Fair, new RedissonFairLocker(redissonClient));
+        cacheLocker.put(Write, new RedissonWriteLocker(redissonClient));
+        cacheLocker.put(Read, new RedissonReadLocker(redissonClient));
     }
-    
-    public ServiceLocker getReentrantLocker(){
+
+    public ServiceLocker getReentrantLocker() {
         return cacheLocker.get(Reentrant);
     }
-    
-    public ServiceLocker getFairLocker(){
+
+    public ServiceLocker getFairLocker() {
         return cacheLocker.get(Fair);
     }
-    
-    public ServiceLocker getWriteLocker(){
+
+    public ServiceLocker getWriteLocker() {
         return cacheLocker.get(Write);
     }
-    
-    public ServiceLocker getReadLocker(){
+
+    public ServiceLocker getReadLocker() {
         return cacheLocker.get(Read);
     }
 }
