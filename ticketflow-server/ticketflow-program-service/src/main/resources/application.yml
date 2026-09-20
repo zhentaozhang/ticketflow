@@ -27,14 +27,10 @@ spring:
   main:
     allow-bean-definition-overriding: true
     allow-circular-references: true
-  # 高并发优化配置
+  # 异步任务统一走静态 BusinessThreadPool（ticketflow-thread-pool-framework），
+  # 不经过 Spring 的 task executor，故 spring.task.execution.pool 不生效，已移除；
+  # @Scheduled 仍使用 Spring 调度线程池，保留 scheduling 配置。
   task:
-    execution:
-      pool:
-        core-size: 50               # 异步任务核心线程数
-        max-size: 200               # 异步任务最大线程数
-        queue-capacity: 1000        # 异步任务队列容量
-        keep-alive: 60s             # 线程空闲时间
     scheduling:
       pool:
         size: 20                    # 定时任务线程池大小
@@ -51,10 +47,8 @@ spring:
   datasource:
     driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
     url: jdbc:shardingsphere:classpath:shardingsphere-program-${spring.profiles.active}.yaml
-    hikari:
-      maximum-pool-size: 32
-      minimum-idle: 5
-      connection-timeout: 10000
+    # 连接池在 shardingsphere-program-*.yaml 的 dataSources 下配置；
+    # 此处 hikari.* 对 ShardingSphereDriver 不生效，已移除以避免误配。
   data:  
     redis:
       database: 0

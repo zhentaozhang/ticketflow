@@ -183,7 +183,7 @@ public class AjCaptchaProperties {
     }
 
     public int getReqCheckMinuteLimit() {
-        return reqGetMinuteLimit;
+        return reqCheckMinuteLimit;
     }
 
     public void setReqCheckMinuteLimit(int reqCheckMinuteLimit) {

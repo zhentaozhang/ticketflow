@@ -16,7 +16,8 @@ public final class Metrics {
 
     /* ==================== 订单创建（order-service） ==================== */
 
-    /** 订单创建失败总数（消费超时丢弃 / 建单异常），tags：{@link #REASON} / {@link #PROGRAM_ID} */
+    /** 订单创建失败总数（消费超时丢弃 / 建单异常），tags：{@link #REASON}。
+     *  （不携带 programId：无界标签会撑爆 Prometheus 时间线；按节目定位从 DISCARD_ORDER 记录取） */
     public static final String ORDER_CREATE_FAIL_TOTAL = "ticketflow_order_create_fail_total";
 
     /**

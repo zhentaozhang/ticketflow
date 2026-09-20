@@ -58,6 +58,10 @@ spring:
     gateway:
       default-filters:
         - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials
+      # 下游 HTTP 超时兜底：避免下游挂起时请求线程/连接无限占用（默认无 response-timeout）
+      httpclient:
+        connect-timeout: 3000
+        response-timeout: 10s
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
     producer:

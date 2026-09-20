@@ -4,7 +4,8 @@ spring:
       enabled: true
       discovery:
         locator:
-          enabled: true
+          # 关闭按服务名自动路由，避免绕过下面显式配置的 StripPrefix 路由把全部服务暴露出去
+          enabled: false
       routes:
         - id: ${prefix.distinction.name:ticketflow}-base-data-service
           uri: lb://${prefix.distinction.name:ticketflow}-base-data-service

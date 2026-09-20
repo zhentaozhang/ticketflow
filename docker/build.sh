@@ -30,7 +30,6 @@ ensure_pay_env() {
 package_and_stage() {
   echo ">> [1/3] Maven 打包（-DskipTests；程序/订单等使用 -exec 分类器 fat-jar）..."
   mvn -B -q -DskipTests -Dmaven.test.skip=true \
-      -Dspotless.check.skip=true -Dspotless.apply.skip=true \
       -pl "${SVC_MODULES}" -am package -T 4
 
   echo ">> [2/3] 暂存并适配 fat-jar（127.0.0.1:3306 -> mysql:3306，供容器内连接 MySQL）..."
