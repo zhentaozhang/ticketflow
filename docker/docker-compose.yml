@@ -1,0 +1,539 @@
+# =============================================================================
+# TicketFlow 统一 Docker Compose（本地开发环境）
+#
+# 一键启动：docker compose -f docker/docker-compose.yml up -d --build
+# 停止：    docker compose -f docker/docker-compose.yml down
+#          （数据卷默认保留；如需彻底清库加 -v，注意会删除 MySQL/Redis/Kafka 数据）
+#
+# 组成：
+#   基础设施  mysql / redis / kafka / nacos / elasticsearch / sentinel /
+#            prometheus / grafana / jaeger（OTel Trace 演示后端）
+#   应用服务  gateway / user / base-data / customize / program / order / pay / admin
+#
+# 可观测性约定：
+#   * 应用镜像内检测到 docker/otel/opentelemetry-javaagent.jar（volume 挂载到 /otel）即自动挂载
+#     OpenTelemetry Java Agent，链路数据经 OTLP 上报 jaeger（http://jaeger:4318）；
+#     未放置 agent 时应用照常启动（仅无 Trace）。agent 下载见 docker/otel/download-agent.sh。
+#   * Metrics 仍由各服务 /actuator/prometheus 暴露给 Prometheus/Grafana（保持 benchmark 兼容），
+#     agent 仅承担 Trace（OTEL_METRICS_EXPORTER/OTEL_LOGS_EXPORTER=none）。
+#
+# 关键约定：
+#   * 所有容器处于同一默认网络，应用通过“服务名”访问基础设施
+#     （如 mysql:3306、redis:6379、kafka:9092、nacos:8848、es:9200）。
+#   * 各 Spring Boot 应用的可变配置全部由环境变量注入，见服务 environment。
+#   * 应用注册到 Nacos 的 IP 由 entrypoint.sh 自动取容器自身 IP（NACOS_DISCOVERY_IP）。
+#   * ShardingSphere 本地分片 YAML 中 127.0.0.1:3306 -> mysql:3306 在镜像构建阶段完成。
+# =============================================================================
+
+name: docker
+
+# ------------------------------- 公共锚点 ----------------------------------
+x-infra-common: &infra-common
+  restart: unless-stopped
+
+# 应用服务公共环境变量（默认值与裸机本地一致，容器内通过覆盖实现服务名互通）
+x-app-env: &app-env
+  TZ: Asia/Shanghai
+  JASYPT_ENCRYPTOR_PASSWORD: ticketflow   # 本地约定的 jasypt 加密口令
+  KNIFE4J_PRODUCTION: "false"
+  # 以下地址指向 compose 服务名（覆盖各 application.yml 中的 127.0.0.1 默认值）
+  NACOS_SERVER_ADDR: nacos:8848
+  NACOS_DISCOVERY_IP: ""                  # 空 -> entrypoint 自动取容器 IP 注册 Nacos
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  MYSQL_HOST: mysql
+  MYSQL_PORT: "3306"
+  # ---- OpenTelemetry 链路追踪（Trace）公共配置 ----
+  ENABLE_OTEL: "true"                # 入口脚本开关：false 时即使有 agent 也不挂载
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318   # OTLP HTTP 直推 Jaeger
+  OTEL_TRACES_EXPORTER: otlp
+  OTEL_METRICS_EXPORTER: "none"      # Metrics 继续走 /actuator/prometheus，避免双上报
+  OTEL_LOGS_EXPORTER: "none"         # 日志继续落本地文件/JSON
+  # 声明式配置：DROP /actuator/* 的 SERVER span（消除 Prometheus 抓取/健康检查噪音），见 /otel/otel-agent-config.yaml
+  OTEL_CONFIG_FILE: /otel/otel-agent-config.yaml
+
+# 应用服务默认资源限额（本地开发留足 JVM 堆外/元空间余量）。
+# container_name 一律不写：避免固定容器名导致无法 --scale 扩缩。
+x-app-deploy: &app-deploy
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits:
+        cpus: "2.0"
+        memory: 1280m
+      reservations:
+        memory: 384m
+
+# ---------------------------------------------------------------------------
+# 基础设施
+# ---------------------------------------------------------------------------
+services:
+
+  mysql:
+    <<: *infra-common
+    image: mysql:8.0
+    container_name: ticketflow-mysql
+    ports:
+      - "3306:3306"
+    volumes:
+      # 数据持久化（首次启动为空时自动初始化，非空则跳过 init 脚本）
+      - mysql-data:/var/lib/mysql
+      # 首次启动初始化：建库 + 建表 + 种子数据（docker/mysql/init.d/01-init-schemas.sh 按序执行 ../sql/cloud）
+      - ./mysql/init.d:/docker-entrypoint-initdb.d:ro
+      - ../sql/cloud:/sql:ro
+      - ./mysql/client.cnf:/etc/mysql/conf.d/client.cnf:ro
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_HOST: "%"
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    <<: *infra-common
+    image: redis:7
+    container_name: ticketflow-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Kafka 3.6 KRaft 单节点（bitnami）
+  # 双监听器：INTERNAL(kafka:9092) 供 compose 网络内应用使用；
+  #          EXTERNAL(localhost:19092) 供宿主机命令行工具使用。
+  kafka:
+    <<: *infra-common
+    image: bitnami/kafka:3.6
+    container_name: ticketflow-kafka
+    ports:
+      - "19092:19092"
+    volumes:
+      - kafka-data:/bitnami/kafka
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092
+      KAFKA_CFG_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:19092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_NUM_PARTITIONS: "3"
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_KRAFT_CLUSTER_ID: abcDEFghijKLmnopQRStuv
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  nacos:
+    <<: *infra-common
+    image: nacos/nacos-server:v2.4.0
+    container_name: ticketflow-nacos
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+    volumes:
+      - nacos-data:/home/nacos/data
+    environment:
+      MODE: standalone
+      PREFER_HOST_MODE: hostname
+      NACOS_AUTH_ENABLE: "false"
+      JVM_XMS: 256m
+      JVM_XMX: 512m
+      TIME_ZONE: Asia/Shanghai
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8848/nacos/v1/console/health/readiness >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  elasticsearch:
+    <<: *infra-common
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: ticketflow-es
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      TZ: Asia/Shanghai
+
+  sentinel:
+    <<: *infra-common
+    image: bladex/sentinel-dashboard:1.8.8
+    container_name: ticketflow-sentinel
+    ports:
+      - "8082:8858"
+    environment:
+      SENTINEL_AUTH_USER: sentinel
+      SENTINEL_AUTH_PASSWORD: sentinel
+      TZ: Asia/Shanghai
+
+  prometheus:
+    <<: *infra-common
+    image: prom/prometheus:v2.53.0
+    container_name: ticketflow-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - prometheus-data:/prometheus
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+
+  grafana:
+    <<: *infra-common
+    image: grafana/grafana:11.0.0
+    container_name: ticketflow-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # provisioning：datasource/dashboard 以代码形式纳管（observability-as-code）
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/ticketflow-overview.json
+      TZ: Asia/Shanghai
+
+  # OpenTelemetry Trace 演示后端（Jaeger all-in-one，原生 OTLP 接收）
+  jaeger:
+    <<: *infra-common
+    image: jaegertracing/all-in-one:1.76.0
+    container_name: ticketflow-jaeger
+    ports:
+      - "16686:16686"   # Jaeger UI（http://localhost:16686）
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP（各服务上报入口）
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      TZ: Asia/Shanghai
+
+# ---------------------------------------------------------------------------
+# 应用服务
+# ---------------------------------------------------------------------------
+
+  gateway:
+    image: ticketflow/gateway:0.0.1-SNAPSHOT
+    <<: *app-deploy
+    build:
+      context: ..
+      dockerfile: docker/app/Dockerfile
+      args:
+        SVC: gateway
+        PORT: "6085"
+    ports:
+      - "6085:6085"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: gateway
+      SPRING_PROFILES_ACTIVE: pro
+      JAVA_OPTS: "-Xms192m -Xmx384m -XX:MaxMetaspaceSize=256m"
+      # Sentinel 控制台地址（容器内 8858；宿主机访问 http://localhost:8082）
+      SENTINEL_DASHBOARD_ADDR: sentinel:8858
+    volumes:
+      - ../logs/container:/app/logs
+      - ./otel:/otel:ro
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6085/actuator/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  user:
+    image: ticketflow/user:0.0.1-SNAPSHOT
+    <<: *app-deploy
+    build:
+      context: ..
+      dockerfile: docker/app/Dockerfile
+      args:
+        SVC: user
+        PORT: "6082"
+    ports:
+      - "6082:6082"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: user
+      SPRING_PROFILES_ACTIVE: local
+      JAVA_OPTS: "-Xms192m -Xmx384m -XX:MaxMetaspaceSize=256m"
+    volumes:
+      - ../logs/container:/app/logs
+      - ./otel:/otel:ro
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6082/actuator/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  base-data:
+    image: ticketflow/base-data:0.0.1-SNAPSHOT
+    <<: *app-deploy
+    build:
+      context: ..
+      dockerfile: docker/app/Dockerfile
+      args:
+        SVC: base-data
+        PORT: "6083"
+    ports:
+      - "6083:6083"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: base-data
+      SPRING_PROFILES_ACTIVE: local
+      JAVA_OPTS: "-Xms160m -Xmx320m -XX:MaxMetaspaceSize=256m"
+    volumes:
+      - ../logs/container:/app/logs
+      - ./otel:/otel:ro
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6083/actuator/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  customize:
+    image: ticketflow/customize:0.0.1-SNAPSHOT
+    <<: *app-deploy
+    build:
+      context: ..
+      dockerfile: docker/app/Dockerfile
+      args:
+        SVC: customize
+        PORT: "6084"
+    ports:
+      - "6084:6084"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: customize
+      SPRING_PROFILES_ACTIVE: local
+      JAVA_OPTS: "-Xms160m -Xmx320m -XX:MaxMetaspaceSize=256m"
+    volumes:
+      - ../logs/container:/app/logs
+      - ./otel:/otel:ro
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6084/actuator/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  program:
+    image: ticketflow/program:0.0.1-SNAPSHOT
+    <<: *app-deploy
+    build:
+      context: ..
+      dockerfile: docker/app/Dockerfile
+      args:
+        SVC: program
+        PORT: "6086"
+    ports:
+      - "6086:6086"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: program
+      SPRING_PROFILES_ACTIVE: local
+      JAVA_OPTS: "-Xms256m -Xmx512m -XX:MaxMetaspaceSize=300m"
+      ES_ADDR: elasticsearch:9200
+    volumes:
+      - ../logs/container:/app/logs
+      - ./otel:/otel:ro
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+      elasticsearch: { condition: service_started }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6086/actuator/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  order:
+    image: ticketflow/order:0.0.1-SNAPSHOT
+    <<: *app-deploy
+    build:
+      context: ..
+      dockerfile: docker/app/Dockerfile
+      args:
+        SVC: order
+        PORT: "8081"
+    ports:
+      - "8081:8081"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: order
+      SPRING_PROFILES_ACTIVE: local
+      JAVA_OPTS: "-Xms256m -Xmx512m -XX:MaxMetaspaceSize=300m"
+    volumes:
+      - ../logs/container:/app/logs
+      - ./otel:/otel:ro
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/actuator/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  pay:
+    image: ticketflow/pay:0.0.1-SNAPSHOT
+    <<: *app-deploy
+    build:
+      context: ..
+      dockerfile: docker/app/Dockerfile
+      args:
+        SVC: pay
+        PORT: "6087"
+    ports:
+      - "6087:6087"
+    # 支付宝密钥属敏感信息，不写入 compose：
+    # 由 docker/app/pay.env 注入（首次由 Makefile 从 pay.env.example 生成，该文件已 gitignore）。
+    env_file:
+      - path: app/pay.env
+        required: false
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: pay
+      SPRING_PROFILES_ACTIVE: local
+      JAVA_OPTS: "-Xms160m -Xmx320m -XX:MaxMetaspaceSize=256m"
+    volumes:
+      - ../logs/container:/app/logs
+      - ./otel:/otel:ro
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6087/actuator/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  admin:
+    image: ticketflow/admin:0.0.1-SNAPSHOT
+    <<: *app-deploy
+    build:
+      context: ..
+      dockerfile: docker/app/Dockerfile
+      args:
+        SVC: admin
+        PORT: "10082"
+    ports:
+      - "10082:10082"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: admin
+      JAVA_OPTS: "-Xms128m -Xmx256m -XX:MaxMetaspaceSize=192m"
+    volumes:
+      - ../logs/container:/app/logs
+      - ./otel:/otel:ro
+    depends_on:
+      nacos: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u admin:admin http://127.0.0.1:10082/actuator/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  migrate:
+    image: ticketflow/migrate:0.0.1-SNAPSHOT
+    <<: *app-deploy
+    build:
+      context: ..
+      dockerfile: docker/app/Dockerfile
+      args:
+        SVC: migrate
+        PORT: "6088"
+    ports:
+      - "6088:6088"
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: migrate
+      SPRING_PROFILES_ACTIVE: local
+      JAVA_OPTS: "-Xms160m -Xmx320m -XX:MaxMetaspaceSize:256m"
+      ES_ADDR: elasticsearch:9200
+    volumes:
+      - ../logs/container:/app/logs
+      - ./otel:/otel:ro
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+      elasticsearch: { condition: service_started }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6088/actuator/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+# ---------------------------------------------------------------------------
+# 数据卷（与旧 external 卷同名，保留本机既有数据；全新机器首次 up 自动初始化）
+# ---------------------------------------------------------------------------
+volumes:
+  mysql-data:
+  redis-data:
+  kafka-data:
+  nacos-data:
+  es-data:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# 业务告警规则（SLO 驱动，见 rules/ticketflow-alerts.yml）
+rule_files:
+  - 'rules/ticketflow-alerts.yml'
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # 应用服务运行在 compose 网络内，直接使用服务名抓取。
+  # 注：gateway 的 /actuator/prometheus 被应用内部拦截（返回 not found），
+  #     admin 服务未引入 prometheus 指标端点（404），故两者暂不纳入采集。
+  - job_name: 'spring-boot'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets:
+        - 'base-data:6083'
+        - 'customize:6084'
+        - 'order:8081'
+        - 'program:6086'
+        - 'user:6082'
+        - 'pay:6087'

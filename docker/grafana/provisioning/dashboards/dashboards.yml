@@ -1,0 +1,14 @@
+# Grafana dashboard provisioning：自动加载 /var/lib/grafana/dashboards 下的 JSON
+apiVersion: 1
+
+providers:
+  - name: 'ticketflow'
+    orgId: 1
+    folder: 'TicketFlow'
+    folderUid: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

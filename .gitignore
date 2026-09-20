@@ -8,8 +8,13 @@ logs/
 **/dependency-reduced-pom.xml
 **/.flattened-pom.xml
 
-### Local deployment ###
-docker/
+### Local deployment artifacts ###
+# Dockerfile / compose / build.sh 属于标准项目，需入库；
+# 只忽略本地运行产物（暂存的 fat-jar、agent、外置密钥、容器日志）。
+docker/app/jars/
+docker/app/pay.env
+docker/otel/opentelemetry-javaagent.jar*
+docker/**/logs/
 
 ### Local sharding config ###
 **/shardingsphere-*-local.yaml
@@ -50,5 +55,3 @@ __pycache__/
 ### Benchmark outputs ###
 benchmark-results/
 
-# OpenTelemetry javaagent（体积大不入库；docker/otel/ 整体已被 docker/ 规则忽略，此条仅为意图声明）
-docker/otel/opentelemetry-javaagent.jar*
