@@ -51,4 +51,15 @@ public class DelayQueueProperties {
      * 调大可提升吞吐，但会增加 Redis 的 CPU 开销（每个分区有独立的延时排序）。
      * */
     private Integer isolationRegionCount = 5;
+
+    /**
+     * 消费失败最大重试次数。超过后消息转入死信队列（topic + ":dead-letter"），
+     * 避免订单超时取消等任务因瞬时故障被静默丢弃。
+     * */
+    private Integer maxRetry = 3;
+
+    /**
+     * 消费失败重试的基础退避时间（秒）。第 N 次重试延迟 = N * retryBackoffSeconds。
+     * */
+    private long retryBackoffSeconds = 5L;
 }

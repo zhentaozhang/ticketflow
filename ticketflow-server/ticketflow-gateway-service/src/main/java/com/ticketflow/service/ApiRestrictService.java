@@ -22,6 +22,7 @@ import com.ticketflow.vo.DepthRuleVo;
 import com.ticketflow.vo.RuleVo;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.stereotype.Component;
@@ -68,6 +69,14 @@ public class ApiRestrictService {
      */
     @Autowired
     private GatewayProperty gatewayProperty;
+
+    /**
+     * 可信反向代理跳数。0（默认）表示网关前没有可信代理，
+     * 此时完全忽略 X-Forwarded-For 等可伪造头，仅取 TCP 对端地址，
+     * 防止客户端伪造 XFF 绕过 IP 限流。>0 时按“从右往左第 N 跳”取真实客户端 IP。
+     */
+    @Value("${gateway.trusted-proxy-count:0}")
+    private int trustedProxyCount;
 
     /**
      * Kafka消息发送
@@ -359,40 +368,35 @@ public class ApiRestrictService {
     }
 
     /**
-     * 获取请求的归属IP地址
+     * 获取请求的归属IP地址。
+     * <p>
+     * 安全前提：X-Forwarded-For 等转发头是客户端可任意伪造的，只有在网关前确实存在
+     * N 跳可信代理（{@code gateway.trusted-proxy-count}）时才可采信，并按“从右往左第 N 跳”
+     * 取真实客户端 IP。默认 trustedProxyCount=0 时不信任任何转发头，直接使用 TCP 对端地址。
      *
      * @param request 请求
      */
-    public static String getIpAddress(ServerHttpRequest request) {
-        String unknown = "unknown";
-        String split = ",";
-        HttpHeaders headers = request.getHeaders();
-        String ip = headers.getFirst("x-forwarded-for");
-        if (ip != null && ip.length() != 0 && !unknown.equalsIgnoreCase(ip)) {
-            // 多次反向代理后会有多个ip值，第一个ip才是真实ip
-            if (ip.contains(split)) {
-                ip = ip.split(split)[0];
+    public String getIpAddress(ServerHttpRequest request) {
+        if (trustedProxyCount > 0) {
+            HttpHeaders headers = request.getHeaders();
+            String forwarded = headers.getFirst("x-forwarded-for");
+            if (forwarded == null || forwarded.isEmpty()) {
+                forwarded = headers.getFirst("X-Real-IP");
+            }
+            if (forwarded != null && !forwarded.isEmpty()) {
+                String[] parts = forwarded.split(",");
+                // 从右往左第 trustedProxyCount 跳即真实客户端 IP（左侧多出的部分都是可伪造的）
+                int idx = parts.length - trustedProxyCount;
+                if (idx < 0) {
+                    idx = 0;
+                }
+                String ip = parts[idx].trim();
+                if (!ip.isEmpty() && !"unknown".equalsIgnoreCase(ip)) {
+                    return ip;
+                }
             }
         }
-        if (ip == null || ip.length() == 0 || unknown.equalsIgnoreCase(ip)) {
-            ip = headers.getFirst("Proxy-Client-IP");
-        }
-        if (ip == null || ip.length() == 0 || unknown.equalsIgnoreCase(ip)) {
-            ip = headers.getFirst("WL-Proxy-Client-IP");
-        }
-        if (ip == null || ip.length() == 0 || unknown.equalsIgnoreCase(ip)) {
-            ip = headers.getFirst("HTTP_CLIENT_IP");
-        }
-        if (ip == null || ip.length() == 0 || unknown.equalsIgnoreCase(ip)) {
-            ip = headers.getFirst("HTTP_X_FORWARDED_FOR");
-        }
-        if (ip == null || ip.length() == 0 || unknown.equalsIgnoreCase(ip)) {
-            ip = headers.getFirst("X-Real-IP");
-        }
-        if (ip == null || ip.length() == 0 || unknown.equalsIgnoreCase(ip)) {
-            ip = Objects.requireNonNull(request.getRemoteAddress()).getAddress().getHostAddress();
-        }
-        return ip;
+        return Objects.requireNonNull(request.getRemoteAddress()).getAddress().getHostAddress();
     }
 
     public void saveApiData(ServerHttpRequest request, String apiUrl, Integer type) {

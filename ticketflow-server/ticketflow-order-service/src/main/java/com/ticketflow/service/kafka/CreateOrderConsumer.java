@@ -76,9 +76,10 @@ public class CreateOrderConsumer {
         }
         OrderCreateMq orderCreateMq = JSON.parseObject(value, OrderCreateMq.class);
 
+        // 延迟用 Kafka 记录时间戳与消息自带创建时间计算：二者同源（生产/落盘侧），
+        // 避免使用消费端主机 System.currentTimeMillis() 与生产者主机时钟相互比较导致的跨主机时钟漂移失真。
         long createOrderTimeTimestamp = orderCreateMq.getCreateOrderTime().getTime();
-        long currentTimeTimestamp = System.currentTimeMillis();
-        long delayTime = currentTimeTimestamp - createOrderTimeTimestamp;
+        long delayTime = consumerRecord.timestamp() - createOrderTimeTimestamp;
 
         // 热路径只打关键字段：完整消息体是高并发下的日志放大源，需要时开 debug
         log.info("消费到kafka的创建订单消息 订单号 : {} 延迟时间 : {} 毫秒", orderCreateMq.getOrderNumber(), delayTime);

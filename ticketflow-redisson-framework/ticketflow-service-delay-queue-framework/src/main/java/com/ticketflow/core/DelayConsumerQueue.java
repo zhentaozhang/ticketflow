@@ -2,6 +2,9 @@ package com.ticketflow.core;
 
 import com.ticketflow.context.DelayQueuePart;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RAtomicLong;
+import org.redisson.api.RDelayedQueue;
+import org.redisson.api.RList;
 
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
@@ -21,6 +24,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * RBlockingQueue 的 take() 不能并发（单线程监听），因此消费端把消息取出后
  * 交给工作线程池处理，避免阻塞新到期的消息。
+ *
+ * 可靠性：RBlockingQueue.take() 出队即代表消息「物理删除」，业务执行抛异常时
+ * 消息不会自动回到队列。因此消费失败时按递增退避重投回延迟队列（最多 maxRetry 次），
+ * 超过重试上限后转入死信队列（topic + ":dead-letter"）并告警，避免订单超时取消等任务被静默丢弃。
  *
  * listenStart() 使用 AtomicBoolean + synchronized 确保只启动一次。
  *
@@ -48,9 +55,29 @@ public class DelayConsumerQueue extends DelayBaseQueue{
     private volatile boolean running = true;
 
     private final ConsumerTask consumerTask;
-    
+
+    /** 主题名（含分区后缀），用于构造重试计数与死信队列的 key。 */
+    private final String relTopic;
+
+    /** 消息重投用的延迟队列（与生产端共享同一 Redisson 延迟队列）。 */
+    private final RDelayedQueue<String> retryDelayedQueue;
+
+    /** 死信队列：超过重试上限的消息转入此处，供人工/告警处理。 */
+    private final RList<String> deadLetterQueue;
+
+    /** 消费失败最大重试次数。 */
+    private final int maxRetry;
+
+    /** 重试基础退避时间（秒）。 */
+    private final long retryBackoffSeconds;
+
     public DelayConsumerQueue(DelayQueuePart delayQueuePart, String relTopic){
         super(delayQueuePart.getDelayQueueBasePart().getRedissonClient(),relTopic);
+        this.relTopic = relTopic;
+        this.retryDelayedQueue = delayQueuePart.getDelayQueueBasePart().getRedissonClient().getDelayedQueue(blockingQueue);
+        this.deadLetterQueue = delayQueuePart.getDelayQueueBasePart().getRedissonClient().getList(relTopic + ":dead-letter");
+        this.maxRetry = delayQueuePart.getDelayQueueBasePart().getDelayQueueProperties().getMaxRetry();
+        this.retryBackoffSeconds = delayQueuePart.getDelayQueueBasePart().getDelayQueueProperties().getRetryBackoffSeconds();
         this.listenStartThreadPool = new ThreadPoolExecutor(1,1,60, 
                 TimeUnit.SECONDS,new LinkedBlockingQueue<>(),r -> {
                     Thread t = new Thread(Thread.currentThread().getThreadGroup(), r,
@@ -88,8 +115,10 @@ public class DelayConsumerQueue extends DelayBaseQueue{
                         executeTaskThreadPool.execute(() -> {
                             try {
                                 consumerTask.execute(content);
-                            }catch (Exception e) {
-                                log.error("consumer execute error",e);
+                                // 执行成功：清理该消息的重试计数
+                                clearRetryCount(content);
+                            } catch (Exception e) {
+                                handleConsumeFailure(content, e);
                             }
                         });
                     } catch (InterruptedException e) {
@@ -101,6 +130,57 @@ public class DelayConsumerQueue extends DelayBaseQueue{
                     }
                 }
             });
+        }
+    }
+
+    /**
+     * 消费失败处理：按递增退避重投回延迟队列，超过上限后转入死信队列。
+     * 业务消费者需保证幂等（重投可能造成重复执行）。
+     */
+    private void handleConsumeFailure(String content, Exception e) {
+        int attempt = (int) incrementRetryCount(content);
+        if (attempt <= maxRetry) {
+            long delay = attempt * retryBackoffSeconds;
+            try {
+                retryDelayedQueue.offer(content, delay, TimeUnit.SECONDS);
+                log.warn("延迟队列消费失败，将于 {}s 后第 {} 次重试 topic : {}", delay, attempt, relTopic, e);
+            } catch (Exception rethrowException) {
+                log.error("延迟队列消费失败消息重投失败，转入死信 topic : {}", relTopic, rethrowException);
+                moveToDeadLetter(content, e);
+            }
+        } else {
+            log.error("延迟队列消费失败已达重试上限 {}，转入死信 topic : {}", maxRetry, relTopic, e);
+            moveToDeadLetter(content, e);
+        }
+    }
+
+    private void moveToDeadLetter(String content, Exception e) {
+        try {
+            deadLetterQueue.add(content);
+        } catch (Exception deadLetterException) {
+            log.error("写入死信队列失败，消息丢失需人工处理 topic : {} content : {}", relTopic, content, deadLetterException);
+        } finally {
+            clearRetryCount(content);
+        }
+    }
+
+    private RAtomicLong retryCounter(String content) {
+        return redissonClient.getAtomicLong(relTopic + ":retry:" + Math.abs(Objects.hashCode(content)));
+    }
+
+    private long incrementRetryCount(String content) {
+        RAtomicLong counter = retryCounter(content);
+        long count = counter.incrementAndGet();
+        // 计数保留 1 小时，避免长期堆积；正常消费成功会立即删除
+        counter.expire(1, TimeUnit.HOURS);
+        return count;
+    }
+
+    private void clearRetryCount(String content) {
+        try {
+            retryCounter(content).delete();
+        } catch (Exception e) {
+            log.warn("清理延迟队列重试计数失败 topic : {}", relTopic, e);
         }
     }
     

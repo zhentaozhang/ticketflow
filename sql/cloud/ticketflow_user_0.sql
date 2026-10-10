@@ -12,7 +12,8 @@ CREATE TABLE `d_ticket_user_0` (
                                    `create_time` datetime NOT NULL COMMENT '创建时间',
                                    `edit_time` datetime NOT NULL COMMENT '编辑时间',
                                    `status` tinyint(1) NOT NULL DEFAULT '1' COMMENT '1:正常 0:删除',
-                                   PRIMARY KEY (`id`)
+                                   PRIMARY KEY (`id`),
+                                   KEY `d_ticket_user_user_id_IDX` (`user_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4  COMMENT='购票人表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -42,7 +43,8 @@ CREATE TABLE `d_ticket_user_1` (
                                    `create_time` datetime NOT NULL COMMENT '创建时间',
                                    `edit_time` datetime NOT NULL COMMENT '编辑时间',
                                    `status` tinyint(1) NOT NULL DEFAULT '1' COMMENT '1:正常 0:删除',
-                                   PRIMARY KEY (`id`)
+                                   PRIMARY KEY (`id`),
+                                   KEY `d_ticket_user_user_id_IDX` (`user_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4  COMMENT='购票人表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -88,7 +90,7 @@ CREATE TABLE `d_user_0` (
 
 LOCK TABLES `d_user_0` WRITE;
 /*!40000 ALTER TABLE `d_user_0` DISABLE KEYS */;
-INSERT INTO `d_user_0` VALUES (2397595777083736068,NULL,NULL,'13255886678',1,'Abc123456',0,NULL,0,NULL,NULL,'2026-08-05 15:08:37','2026-08-05 15:08:37',1),(2397595777083736072,NULL,NULL,'13634567891',1,'Abc123456',0,NULL,0,NULL,NULL,'2026-08-05 15:12:09','2026-08-05 15:12:09',1);
+INSERT INTO `d_user_0` VALUES (2397595777083736068,NULL,NULL,'13255886678',1,'$2a$10$Lx0kdTymi2KOrveP6BCaE.z45NI3NTOTGEZXS75iOim7G/2ZfHDPa',0,NULL,0,NULL,NULL,'2026-08-05 15:08:37','2026-08-05 15:08:37',1),(2397595777083736072,NULL,NULL,'13634567891',1,'$2a$10$Lx0kdTymi2KOrveP6BCaE.z45NI3NTOTGEZXS75iOim7G/2ZfHDPa',0,NULL,0,NULL,NULL,'2026-08-05 15:12:09','2026-08-05 15:12:09',1);
 /*!40000 ALTER TABLE `d_user_0` ENABLE KEYS */;
 UNLOCK TABLES;
 

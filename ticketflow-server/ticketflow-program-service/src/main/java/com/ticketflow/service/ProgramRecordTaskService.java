@@ -64,7 +64,7 @@ public class ProgramRecordTaskService extends ServiceImpl<ProgramRecordTaskMappe
         updateProgramRecordTask.setHandleStatus(programRecordTaskUpdateDto.getAfterHandleStatus());
         return programRecordTaskMapper.update(updateProgramRecordTask,Wrappers.lambdaUpdate(ProgramRecordTask.class)
                         .eq(ProgramRecordTask::getHandleStatus, programRecordTaskUpdateDto.getBeforeHandleStatus())
-                        .in(ProgramRecordTask::getCreateTime, programRecordTaskUpdateDto.getCreateTimeSet()));
+                        .in(ProgramRecordTask::getId, programRecordTaskUpdateDto.getIdSet()));
         
     }
     

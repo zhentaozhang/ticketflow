@@ -326,7 +326,46 @@ public class RedisCacheImpl implements RedisCache {
         CacheUtil.checkNotEmpty(value);
         String key = redisKeyBuild.getRelKey();
         String jsonValue = value instanceof String ? (String) value : JSON.toJSONString(value);
-        return redisTemplate.opsForList().remove(key, count, jsonValue);
+        Long removed = redisTemplate.opsForList().remove(key, count, jsonValue);
+        if (removed != null && removed > 0) {
+            return removed;
+        }
+        // 精确匹配删不到时的兜底：取出元素反序列化后重新序列化，字段顺序/空值处理可能与写入时不同，
+        // 导致 LREM 精确匹配失效、元素残留（队列无限增长、每轮重复处理）。
+        // 这里改为逐条读取“原始字符串”，按反序列化对象的相等性定位，再用原始字符串精确删除，保证删除必然生效。
+        if (value instanceof String) {
+            return removed == null ? 0L : removed;
+        }
+        return removeByParsedEquality(key, value, count);
+    }
+
+    private Long removeByParsedEquality(String key, Object value, long count) {
+        List<String> rawValues = redisTemplate.opsForList().range(key, 0, -1);
+        if (CacheUtil.checkRedisListIsEmpty(rawValues)) {
+            return 0L;
+        }
+        long removed = 0L;
+        for (String rawStr : rawValues) {
+            if (removed >= count) {
+                break;
+            }
+            if (rawStr == null) {
+                continue;
+            }
+            Object parsed;
+            try {
+                parsed = JSON.parseObject(rawStr, CacheUtil.buildType(value.getClass()));
+            } catch (Exception e) {
+                continue;
+            }
+            if (Objects.equals(parsed, value)) {
+                Long removedCount = redisTemplate.opsForList().remove(key, 1, rawStr);
+                if (removedCount != null) {
+                    removed += removedCount;
+                }
+            }
+        }
+        return removed;
     }
 
     @Override

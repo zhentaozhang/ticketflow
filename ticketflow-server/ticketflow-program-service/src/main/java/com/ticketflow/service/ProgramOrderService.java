@@ -5,7 +5,6 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.baidu.fsg.uid.UidGenerator;
-import com.ticketflow.BusinessThreadPool;
 import com.ticketflow.client.OrderClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
@@ -54,7 +53,9 @@ import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -93,6 +94,22 @@ public class ProgramOrderService {
      * 因此无需长时间阻塞请求线程；500ms 已覆盖正常发送，超时路径不影响正确性。
      */
     private static final long KAFKA_SEND_AWAIT_MS = 500L;
+
+    /**
+     * 对账记录任务专用线程池：与通用 BusinessThreadPool 隔离。
+     * 下单每笔都会投递一个对账记录任务，高频且必须落库（否则对账缺失），
+     * 混用通用池会在尖峰期被其打满并抛异常，进而在下单线程同步插库、拖垮秒杀 RT。
+     * 独立池 + 有界队列 + CallerRunsPolicy（饱和时由提交线程亲自执行，形成背压，绝不丢任务）。
+     */
+    private static final ThreadPoolExecutor PROGRAM_RECORD_TASK_EXECUTOR = new ThreadPoolExecutor(
+            1, 1, 60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(2000),
+            runnable -> {
+                Thread thread = new Thread(runnable, "program-record-task");
+                thread.setDaemon(true);
+                return thread;
+            },
+            new ThreadPoolExecutor.CallerRunsPolicy());
 
     @Autowired
     private OrderClient orderClient;
@@ -569,7 +586,7 @@ public class ProgramOrderService {
         // 正常情况下异步执行，不阻塞当前下单线程；
         // 如果线程池已经饱和，则降级为同步执行，避免对账记录直接丢失。
         try {
-            BusinessThreadPool.execute(
+            PROGRAM_RECORD_TASK_EXECUTOR.execute(
                     () -> createProgramRecordTask(orderCreateMq.getProgramId()));
         } catch (RejectedExecutionException e) {
             log.error("节目对账记录任务提交失败，降级同步插入 programId : {}",

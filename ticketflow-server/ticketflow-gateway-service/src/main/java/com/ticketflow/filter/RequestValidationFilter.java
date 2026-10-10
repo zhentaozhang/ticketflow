@@ -146,14 +146,22 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
                     })
                     .subscribeOn(Schedulers.boundedElastic())
                     .flatMap(map -> {
-                        request.mutate().headers(httpHeaders -> map.forEach(httpHeaders::set));
+                        request.mutate().headers(httpHeaders -> {
+                            // 先剥离外部客户端可能伪造的内部身份头，再由网关注入验签得到的权威值，
+                            // 避免下游 BaseParameterFilter 把伪造的 userId/code 当成登录用户
+                            httpHeaders.remove(USER_ID);
+                            httpHeaders.remove(CODE);
+                            map.forEach(httpHeaders::set);
+                        });
                         return chain.filter(exchange);
                     });
         }
     }
 
     private Mono<Void> readBody(ServerWebExchange exchange, GatewayFilterChain chain, Map<String, String> headMap) {
-        log.info("current thread readBody : {}", Thread.currentThread().getName());
+        if (log.isDebugEnabled()) {
+            log.debug("current thread readBody : {}", Thread.currentThread().getName());
+        }
         RequestTemporaryWrapper requestTemporaryWrapper = new RequestTemporaryWrapper();
 
         // WebFlux 反应式 body 读取：bodyToMono → execute() 验签/解密/注入参数 → 缓存 body 供下游读取
@@ -275,10 +283,12 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
         return new ServerHttpRequestDecorator(exchange.getRequest()) {
             @Override
             public HttpHeaders getHeaders() {
-                log.info("current thread getHeaders: {}", Thread.currentThread().getName());
                 long contentLength = headers.getContentLength();
                 HttpHeaders newHeaders = new HttpHeaders();
                 newHeaders.putAll(headers);
+                // 剥离外部客户端可能伪造的内部身份头，仅保留网关注入的权威 userId/code（setAll 覆盖）
+                newHeaders.remove(USER_ID);
+                newHeaders.remove(CODE);
                 Map<String, String> map = requestTemporaryWrapper.getMap();
                 if (CollectionUtil.isNotEmpty(map)) {
                     newHeaders.setAll(map);

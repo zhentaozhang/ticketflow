@@ -578,6 +578,13 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     private static final long ORDER_LOCK_WAIT_SECONDS = 3L;
 
     /**
+     * 订单列表分页默认/上限条数：防止单用户全量拉取与无上限 IN 查询。
+     */
+    private static final int ORDER_LIST_DEFAULT_PAGE_SIZE = 20;
+
+    private static final int ORDER_LIST_MAX_PAGE_SIZE = 50;
+
+    /**
      * 支付对账（定时兜底用）：向渠道确认这一笔的真实结果，并只在“渠道确实收了钱”时收尾。
      * <p>
      * 要解决的问题：回调丢失时会出现“用户付了钱、订单却被超时取消”，
@@ -1073,10 +1080,16 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
 
     public List<OrderListVo> selectList(OrderListDto orderListDto) {
         List<OrderListVo> orderListVos = new ArrayList<>();
+        // 强制分页：避免单用户全量订单 + 无上限 IN 查询（大包传输/内存暴涨/跨分片阻塞）
+        int page = Objects.isNull(orderListDto.getPage()) || orderListDto.getPage() < 1 ? 1 : orderListDto.getPage();
+        int size = Objects.isNull(orderListDto.getSize()) || orderListDto.getSize() < 1
+                ? ORDER_LIST_DEFAULT_PAGE_SIZE : Math.min(orderListDto.getSize(), ORDER_LIST_MAX_PAGE_SIZE);
+        long offset = (long) (page - 1) * size;
         LambdaQueryWrapper<Order> orderLambdaQueryWrapper =
                 Wrappers.lambdaQuery(Order.class)
                         .eq(Order::getUserId, orderListDto.getUserId())
-                        .orderByDesc(Order::getCreateOrderTime);
+                        .orderByDesc(Order::getCreateOrderTime)
+                        .last("limit " + offset + "," + size);
         List<Order> orderList = orderMapper.selectList(orderLambdaQueryWrapper);
         if (CollectionUtil.isEmpty(orderList)) {
             return orderListVos;
@@ -1184,6 +1197,15 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     // 只有订单落库段（createByMq）用 TransactionTemplate 圈事务，失败时事务回滚再走反向恢复。
     @RepeatExecuteLimit(name = CREATE_PROGRAM_ORDER_MQ, keys = {"#orderCreateMq.orderNumber"}, durationTime = 0)
     public String createMq(OrderCreateMq orderCreateMq) {
+        // 幂等前置校验：Kafka 至少一次投递、对账重放都可能重复投递同一订单号。
+        // 必须先查本地订单再执行远程扣减：否则重复消息会再次调用 program 侧锁定（座位已 LOCK → 40011），
+        // 既白白触发重试，又可能把已成功建单的消息误记为 DISCARD_ORDER。
+        Order existingOrder = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class)
+                .eq(Order::getOrderNumber, orderCreateMq.getOrderNumber()));
+        if (Objects.nonNull(existingOrder)) {
+            log.info("重复建单消息 幂等成功 订单号 : {}", orderCreateMq.getOrderNumber());
+            return String.valueOf(existingOrder.getOrderNumber());
+        }
         List<OrderTicketUserCreateDto> orderTicketUserCreateDtoList = orderCreateMq.getOrderTicketUserCreateDtoList();
         String orderNumber;
         try {

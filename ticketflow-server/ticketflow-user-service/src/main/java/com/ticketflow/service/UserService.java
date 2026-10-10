@@ -42,6 +42,7 @@ import com.ticketflow.mapper.UserMapper;
 import com.ticketflow.mapper.UserMobileMapper;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
+import com.ticketflow.service.lua.LoginErrorCountOperate;
 import com.ticketflow.servicelock.LockType;
 import com.ticketflow.servicelock.annotion.ServiceLock;
 import com.ticketflow.util.StringUtil;
@@ -54,6 +55,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -101,10 +104,24 @@ public class UserService extends ServiceImpl<UserMapper, User> {
     @Autowired
     private BaseDataClient baseDataClient;
 
+    @Autowired
+    private LoginErrorCountOperate loginErrorCountOperate;
+
+    /**
+     * 密码哈希器（BCrypt，自带随机盐）。注册/改密写哈希，登录用 matches 校验，
+     * 数据库中不再出现明文密码。
+     */
+    private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
+
     @Value("${token.expire.time:40}")
     private Long tokenExpireTime;
 
     private static final Integer ERROR_COUNT_THRESHOLD = 5;
+
+    /**
+     * 登录失败计数窗口（秒）。与错误次数阈值配合，避免暴力破解。
+     */
+    private static final long LOGIN_ERROR_EXPIRE_SECONDS = 60L;
 
     @Transactional(rollbackFor = Exception.class)
     @ServiceLock(lockType = LockType.Write, name = REGISTER_USER_LOCK, keys = {"#userRegisterDto.mobile"})
@@ -114,6 +131,8 @@ public class UserService extends ServiceImpl<UserMapper, User> {
         //用户表添加
         User user = new User();
         BeanUtils.copyProperties(userRegisterDto, user);
+        // 密码哈希后入库，避免明文落库
+        user.setPassword(passwordEncoder.encode(userRegisterDto.getPassword()));
         user.setId(uidGenerator.getUid());
         userMapper.insert(user);
         //用户手机表添加
@@ -176,8 +195,7 @@ public class UserService extends ServiceImpl<UserMapper, User> {
             UserMobile userMobile = userMobileMapper.selectOne(queryWrapper);
             if (Objects.isNull(userMobile)) {
                 // 手机号不存在时记录一次错误计数，防止攻击者枚举试探手机号是否注册
-                redisCache.incrBy(RedisKeyBuild.createRedisKey(RedisKeyManage.LOGIN_USER_MOBILE_ERROR, mobile), 1);
-                redisCache.expire(RedisKeyBuild.createRedisKey(RedisKeyManage.LOGIN_USER_MOBILE_ERROR, mobile), 1, TimeUnit.MINUTES);
+                recordLoginError(mobile, null);
                 throw new TicketFlowFrameException(BaseCode.USER_MOBILE_EMPTY);
             }
             userId = userMobile.getUserId();
@@ -192,17 +210,16 @@ public class UserService extends ServiceImpl<UserMapper, User> {
                     .eq(UserEmail::getEmail, email);
             UserEmail userEmail = userEmailMapper.selectOne(queryWrapper);
             if (Objects.isNull(userEmail)) {
-                redisCache.incrBy(RedisKeyBuild.createRedisKey(RedisKeyManage.LOGIN_USER_EMAIL_ERROR, email), 1);
-                redisCache.expire(RedisKeyBuild.createRedisKey(RedisKeyManage.LOGIN_USER_EMAIL_ERROR, email), 1, TimeUnit.MINUTES);
+                recordLoginError(null, email);
                 throw new TicketFlowFrameException(BaseCode.USER_EMAIL_NOT_EXIST);
             }
             userId = userEmail.getUserId();
         }
-        // 密码验证：同一 userId 下匹配 password 字段
-        LambdaQueryWrapper<User> queryUserWrapper = Wrappers.lambdaQuery(User.class)
-                .eq(User::getId, userId).eq(User::getPassword, password);
-        User user = userMapper.selectOne(queryUserWrapper);
-        if (Objects.isNull(user)) {
+        // 密码验证：先按 userId 取用户，再用 BCrypt matches 校验哈希，避免以明文条件比对
+        User user = userMapper.selectById(userId);
+        if (Objects.isNull(user) || !passwordEncoder.matches(password, user.getPassword())) {
+            // 密码错误也必须累计失败次数，否则攻击者可对已存在的手机号/邮箱无限暴力破解
+            recordLoginError(mobile, email);
             throw new TicketFlowFrameException(BaseCode.NAME_PASSWORD_ERROR);
         }
         // 登录成功：写入 Redis session（含 TTL 过期自动登出），生成 JWT token
@@ -226,6 +243,23 @@ public class UserService extends ServiceImpl<UserMapper, User> {
             return getChannelDataApiResponse.getData();
         }
         throw new TicketFlowFrameException("没有找到ChannelData");
+    }
+
+    /**
+     * 记录一次登录失败（原子 INCR + 首次设置 EXPIRE），用于暴力破解防护。
+     * 手机号/邮箱二选一，二者存在时各自累计。
+     */
+    private void recordLoginError(String mobile, String email) {
+        if (StringUtil.isNotEmpty(mobile)) {
+            loginErrorCountOperate.loginErrorCount(
+                    RedisKeyBuild.createRedisKey(RedisKeyManage.LOGIN_USER_MOBILE_ERROR, mobile),
+                    LOGIN_ERROR_EXPIRE_SECONDS);
+        }
+        if (StringUtil.isNotEmpty(email)) {
+            loginErrorCountOperate.loginErrorCount(
+                    RedisKeyBuild.createRedisKey(RedisKeyManage.LOGIN_USER_EMAIL_ERROR, email),
+                    LOGIN_ERROR_EXPIRE_SECONDS);
+        }
     }
 
     public String createToken(Long userId, String tokenSecret) {
@@ -272,6 +306,8 @@ public class UserService extends ServiceImpl<UserMapper, User> {
         }
         User updateUser = new User();
         BeanUtil.copyProperties(userUpdatePasswordDto, updateUser);
+        // 改密同样哈希后入库
+        updateUser.setPassword(passwordEncoder.encode(userUpdatePasswordDto.getPassword()));
         userMapper.updateById(updateUser);
     }
 

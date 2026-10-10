@@ -67,7 +67,8 @@ spring:
       # earliest:重置为分区中最小的offset;
       # latest:重置为分区中最新的offset(消费分区中新产生的数据);
       # none:只要有一个分区不存在已提交的offset,就抛出异常;
-      auto-offset-reset: latest
+      # 交易类核心链路必须用 earliest：位点被清理/新消费组接入时不能跳过已扣库存的待建单消息
+      auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       topic: create_order

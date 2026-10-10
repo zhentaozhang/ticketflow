@@ -30,7 +30,6 @@ import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -147,23 +146,27 @@ public class ReconciliationTask {
                 return;
             }
             List<ProgramRecordTaskVo> programRecordTaskVoList = listApiResponse.getData();
-            if (CollectionUtil.isEmpty(programRecordTaskVoList)) {
+            // 兜底触发源不依赖对账记录：先把 DISCARD_ORDER / ORDER_CREATE_PENDING 涉及的节目并入触发集合，
+            // 再判断对账记录是否为空——否则低峰期无新订单时（常态）会提前 return，库存补偿永久失效（库存黑洞）。
+            Set<Long> programIdSet = new HashSet<>();
+            programIdSet.addAll(scanProgramIdsByKeyPattern("*" + RedisKeyManage.DISCARD_ORDER.getKey().replace("%s", "*")));
+            programIdSet.addAll(scanProgramIdsByKeyPattern("*" + RedisKeyManage.ORDER_CREATE_PENDING.getKey().replace("%s", "*")));
+
+            Set<Long> programRecordTaskIdSet = new HashSet<>();
+            if (CollectionUtil.isNotEmpty(programRecordTaskVoList)) {
+                for (ProgramRecordTaskVo programRecordTaskVo : programRecordTaskVoList) {
+                    programIdSet.add(programRecordTaskVo.getProgramId());
+                    programRecordTaskIdSet.add(programRecordTaskVo.getId());
+                }
+            } else {
                 log.warn("获取节目对账记录任务集合为空 dto : {}", JSON.toJSONString(programRecordTaskListDto));
                 BusinessMetrics.increment(meterRegistry, Metrics.RECONCILIATION_TASK_TOTAL,
                         Metrics.RESULT, Metrics.RESULT_EMPTY);
+            }
+
+            if (programIdSet.isEmpty()) {
                 return;
             }
-            Set<Long> programIdSet = new HashSet<>();
-            Set<Date> createTimeSet = new HashSet<>();
-            for (ProgramRecordTaskVo programRecordTaskVo : programRecordTaskVoList) {
-                programIdSet.add(programRecordTaskVo.getProgramId());
-                createTimeSet.add(programRecordTaskVo.getCreateTime());
-            }
-            // 补偿触发源不依赖对账记录：若对账记录写入失败（线程池满且同步也失败）或某节目从未成功
-            // 写过记录，DISCARD_ORDER / PENDING 列表即使非空也不会被扫描 → 库存黑洞。
-            // 这里用 SCAN 把这两类列表涉及的节目 id 并入触发集合兜底。
-            programIdSet.addAll(scanProgramIdsByKeyPattern("*" + RedisKeyManage.DISCARD_ORDER.getKey().replace("%s", "*")));
-            programIdSet.addAll(scanProgramIdsByKeyPattern("*" + RedisKeyManage.ORDER_CREATE_PENDING.getKey().replace("%s", "*")));
             for (Long programId : programIdSet) {
                 BusinessMetrics.increment(meterRegistry, Metrics.RECONCILIATION_COMPENSATE_TOTAL);
                 orderTaskService.reconciliationTask(programId);
@@ -171,14 +174,16 @@ public class ReconciliationTask {
                 //PENDING 发送超时订单补偿：已建单则移除，未建单则回滚 Redis 座位
                 orderTaskService.pendingOrderCompensation(programId);
             }
-            //修改对账记录任务集合为已处理
-            ProgramRecordTaskUpdateDto programRecordTaskUpdateDto = new ProgramRecordTaskUpdateDto();
-            programRecordTaskUpdateDto.setBeforeHandleStatus(HandleStatus.NO_HANDLE.getCode());
-            programRecordTaskUpdateDto.setAfterHandleStatus(HandleStatus.YES_HANDLE.getCode());
-            programRecordTaskUpdateDto.setCreateTimeSet(createTimeSet);
-            ApiResponse<Integer> updateApiResponse = programClient.update(programRecordTaskUpdateDto);
-            if (!Objects.equals(updateApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
-                log.error("更新节目对账记录任务失败 dto : {} message: {}", JSON.toJSONString(programRecordTaskUpdateDto), updateApiResponse.getMessage());
+            //修改对账记录任务集合为已处理（按主键 id 精确更新，避免时间戳精度/时区导致误更）
+            if (CollectionUtil.isNotEmpty(programRecordTaskIdSet)) {
+                ProgramRecordTaskUpdateDto programRecordTaskUpdateDto = new ProgramRecordTaskUpdateDto();
+                programRecordTaskUpdateDto.setBeforeHandleStatus(HandleStatus.NO_HANDLE.getCode());
+                programRecordTaskUpdateDto.setAfterHandleStatus(HandleStatus.YES_HANDLE.getCode());
+                programRecordTaskUpdateDto.setIdSet(programRecordTaskIdSet);
+                ApiResponse<Integer> updateApiResponse = programClient.update(programRecordTaskUpdateDto);
+                if (!Objects.equals(updateApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
+                    log.error("更新节目对账记录任务失败 dto : {} message: {}", JSON.toJSONString(programRecordTaskUpdateDto), updateApiResponse.getMessage());
+                }
             }
             BusinessMetrics.increment(meterRegistry, Metrics.RECONCILIATION_TASK_TOTAL,
                     Metrics.RESULT, Metrics.RESULT_SUCCESS);

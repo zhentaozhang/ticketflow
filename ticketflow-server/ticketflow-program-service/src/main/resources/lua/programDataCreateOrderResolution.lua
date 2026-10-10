@@ -146,14 +146,15 @@ if (type == 1) then
 			-- 校验通过，加入最终购买座位列表。
 			table.insert(purchase_seat_list, seat_vo)
 
-			-- 校验请求价格与缓存价格，防止客户端篡改价格。
+			-- 校验请求价格与缓存价格必须一致（防御性一致性：既拦截高价也拦截低价篡改）。
+			-- 用容差比较规避浮点累加漂移导致的误判。
 			total_seat_dto_price =
 				total_seat_dto_price + seat_dto_price
 
 			total_seat_vo_price =
 				total_seat_vo_price + seat_vo.price
 
-			if (total_seat_dto_price > total_seat_vo_price) then
+			if (math.abs(total_seat_dto_price - total_seat_vo_price) > 0.001) then
 				return string.format('{"%s": %d}', 'code', 40008)
 			end
 

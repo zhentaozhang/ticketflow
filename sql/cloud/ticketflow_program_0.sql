@@ -358,13 +358,13 @@ DROP TABLE IF EXISTS `d_seat_0`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `d_seat_0` (
-  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键id',
+  `id` bigint NOT NULL COMMENT '主键id',
   `program_id` bigint NOT NULL COMMENT '节目表id',
   `ticket_category_id` bigint NOT NULL COMMENT '节目票档id',
   `row_code` int NOT NULL COMMENT '排号',
   `col_code` int NOT NULL COMMENT '列号',
   `seat_type` int NOT NULL COMMENT '座位类型 详见seatType枚举',
-  `price` decimal(10,0) NOT NULL COMMENT '座位价格',
+  `price` decimal(10,2) NOT NULL COMMENT '座位价格',
   `sell_status` int NOT NULL DEFAULT '1' COMMENT '1未售卖 2锁定 3已售卖',
   `create_time` datetime NOT NULL COMMENT '创建时间',
   `edit_time` datetime NOT NULL COMMENT '编辑时间',
@@ -373,7 +373,7 @@ CREATE TABLE `d_seat_0` (
   KEY `program_id_idx` (`program_id`) USING BTREE,
   KEY `row_code_idx` (`row_code`) USING BTREE,
   KEY `col_code_idx` (`col_code`) USING BTREE
-) ENGINE=InnoDB AUTO_INCREMENT=35531 DEFAULT CHARSET=utf8mb4  COMMENT='座位表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4  COMMENT='座位表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -393,13 +393,13 @@ DROP TABLE IF EXISTS `d_seat_1`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `d_seat_1` (
-  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键id',
+  `id` bigint NOT NULL COMMENT '主键id',
   `program_id` bigint NOT NULL COMMENT '节目表id',
   `ticket_category_id` bigint NOT NULL COMMENT '节目票档id',
   `row_code` int NOT NULL COMMENT '排号',
   `col_code` int NOT NULL COMMENT '列号',
   `seat_type` int NOT NULL COMMENT '座位类型 详见seatType枚举',
-  `price` decimal(10,0) NOT NULL COMMENT '座位价格',
+  `price` decimal(10,2) NOT NULL COMMENT '座位价格',
   `sell_status` int NOT NULL DEFAULT '1' COMMENT '1未售卖 2锁定 3已售卖',
   `create_time` datetime NOT NULL COMMENT '创建时间',
   `edit_time` datetime NOT NULL COMMENT '编辑时间',
@@ -408,7 +408,7 @@ CREATE TABLE `d_seat_1` (
   KEY `program_id_idx` (`program_id`) USING BTREE,
   KEY `row_code_idx` (`row_code`) USING BTREE,
   KEY `col_code_idx` (`col_code`) USING BTREE
-) ENGINE=InnoDB AUTO_INCREMENT=35051 DEFAULT CHARSET=utf8mb4  COMMENT='座位表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4  COMMENT='座位表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -431,7 +431,7 @@ CREATE TABLE `d_ticket_category_0` (
   `id` bigint NOT NULL COMMENT '主键id',
   `program_id` bigint NOT NULL COMMENT '节目表id',
   `introduce` varchar(256) NOT NULL COMMENT '介绍',
-  `price` decimal(10,0) NOT NULL COMMENT '价格',
+  `price` decimal(10,2) NOT NULL COMMENT '价格',
   `total_number` bigint NOT NULL COMMENT '总数量',
   `remain_number` bigint NOT NULL COMMENT '剩余数量',
   `create_time` datetime NOT NULL COMMENT '创建时间',
@@ -461,7 +461,7 @@ CREATE TABLE `d_ticket_category_1` (
   `id` bigint NOT NULL COMMENT '主键id',
   `program_id` bigint NOT NULL COMMENT '节目表id',
   `introduce` varchar(256) NOT NULL COMMENT '介绍',
-  `price` decimal(10,0) NOT NULL COMMENT '价格',
+  `price` decimal(10,2) NOT NULL COMMENT '价格',
   `total_number` bigint NOT NULL COMMENT '总数量',
   `remain_number` bigint NOT NULL COMMENT '剩余数量',
   `create_time` datetime NOT NULL COMMENT '创建时间',

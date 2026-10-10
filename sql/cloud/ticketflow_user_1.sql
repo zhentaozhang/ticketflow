@@ -12,7 +12,8 @@ CREATE TABLE `d_ticket_user_0` (
                                    `create_time` datetime NOT NULL COMMENT '创建时间',
                                    `edit_time` datetime NOT NULL COMMENT '编辑时间',
                                    `status` tinyint(1) NOT NULL DEFAULT '1' COMMENT '1:正常 0:删除',
-                                   PRIMARY KEY (`id`)
+                                   PRIMARY KEY (`id`),
+                                   KEY `d_ticket_user_user_id_IDX` (`user_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4  COMMENT='购票人表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -42,7 +43,8 @@ CREATE TABLE `d_ticket_user_1` (
                                    `create_time` datetime NOT NULL COMMENT '创建时间',
                                    `edit_time` datetime NOT NULL COMMENT '编辑时间',
                                    `status` tinyint(1) NOT NULL DEFAULT '1' COMMENT '1:正常 0:删除',
-                                   PRIMARY KEY (`id`)
+                                   PRIMARY KEY (`id`),
+                                   KEY `d_ticket_user_user_id_IDX` (`user_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4  COMMENT='购票人表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -88,7 +90,7 @@ CREATE TABLE `d_user_0` (
 
 LOCK TABLES `d_user_0` WRITE;
 /*!40000 ALTER TABLE `d_user_0` DISABLE KEYS */;
-INSERT INTO `d_user_0` VALUES (1818770834261614594,NULL,NULL,'280a7288b94ca19418b4ed5b710617a8',1,'9da6b113c108364ba9524f02624b8255',0,NULL,0,NULL,NULL,'2026-01-22 15:43:35','2026-01-22 15:43:35',1),(2352477008199704578,NULL,NULL,'63ca2f60b6800fcfe6829530484f2df0',1,'d08cfa5db5979fd0d7e4c5bfe639d123',0,NULL,0,NULL,NULL,'2026-07-21 15:34:07','2026-07-21 15:34:07',1),(2353961967372582914,'zhentao','','e2eee1fe59d67a373f005f84915e0037',1,'d08cfa5db5979fd0d7e4c5bfe639d123',0,NULL,0,'d6fc016529aefcfa2a5ec4a3caab8b79',NULL,'2026-07-22 09:16:28','2026-07-22 09:25:39',1),(2397567464659312642,NULL,NULL,'13100024885',1,'Abc123456',0,NULL,0,NULL,NULL,'2026-08-05 14:53:29','2026-08-05 14:53:29',1);
+INSERT INTO `d_user_0` VALUES (1818770834261614594,NULL,NULL,'280a7288b94ca19418b4ed5b710617a8',1,'9da6b113c108364ba9524f02624b8255',0,NULL,0,NULL,NULL,'2026-01-22 15:43:35','2026-01-22 15:43:35',1),(2352477008199704578,NULL,NULL,'63ca2f60b6800fcfe6829530484f2df0',1,'d08cfa5db5979fd0d7e4c5bfe639d123',0,NULL,0,NULL,NULL,'2026-07-21 15:34:07','2026-07-21 15:34:07',1),(2353961967372582914,'zhentao','','e2eee1fe59d67a373f005f84915e0037',1,'d08cfa5db5979fd0d7e4c5bfe639d123',0,NULL,0,'d6fc016529aefcfa2a5ec4a3caab8b79',NULL,'2026-07-22 09:16:28','2026-07-22 09:25:39',1),(2397567464659312642,NULL,NULL,'13100024885',1,'$2a$10$Lx0kdTymi2KOrveP6BCaE.z45NI3NTOTGEZXS75iOim7G/2ZfHDPa',0,NULL,0,NULL,NULL,'2026-08-05 14:53:29','2026-08-05 14:53:29',1);
 /*!40000 ALTER TABLE `d_user_0` ENABLE KEYS */;
 UNLOCK TABLES;
 

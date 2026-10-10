@@ -23,6 +23,7 @@ import com.ticketflow.mapper.UserEmailMapper;
 import com.ticketflow.mapper.UserMapper;
 import com.ticketflow.mapper.UserMobileMapper;
 import com.ticketflow.redis.RedisCache;
+import com.ticketflow.service.lua.LoginErrorCountOperate;
 import com.ticketflow.vo.GetChannelDataVo;
 import com.ticketflow.vo.UserLoginVo;
 import com.ticketflow.vo.UserVo;
@@ -82,7 +83,13 @@ class UserServiceTest {
     @Mock
     private BaseDataClient baseDataClient;
 
+    @Mock
+    private LoginErrorCountOperate loginErrorCountOperate;
+
     private UserService userService;
+
+    private final org.springframework.security.crypto.password.PasswordEncoder passwordEncoder =
+            new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder();
 
     @BeforeAll
     static void initSpringUtil() {
@@ -108,6 +115,7 @@ class UserServiceTest {
         ReflectionTestUtils.setField(userService, "bloomFilterHandler", bloomFilterHandler);
         ReflectionTestUtils.setField(userService, "compositeContainer", compositeContainer);
         ReflectionTestUtils.setField(userService, "baseDataClient", baseDataClient);
+        ReflectionTestUtils.setField(userService, "loginErrorCountOperate", loginErrorCountOperate);
         ReflectionTestUtils.setField(userService, "tokenExpireTime", 40L);
     }
 
@@ -116,12 +124,16 @@ class UserServiceTest {
         when(uidGenerator.getUid()).thenReturn(100L, 101L);
         UserRegisterDto dto = new UserRegisterDto();
         dto.setMobile("13800000000");
+        dto.setPassword("pwd");
 
         boolean result = userService.register(dto);
 
         assertTrue(result);
         verify(compositeContainer).execute(any(String.class), eq(dto));
-        verify(userMapper).insert(any(User.class));
+        org.mockito.ArgumentCaptor<User> userCaptor = org.mockito.ArgumentCaptor.forClass(User.class);
+        verify(userMapper).insert(userCaptor.capture());
+        assertTrue(userCaptor.getValue().getPassword() != null
+                && !"pwd".equals(userCaptor.getValue().getPassword()));
         verify(userMobileMapper).insert(any(UserMobile.class));
         verify(bloomFilterHandler).add("13800000000");
     }
@@ -190,8 +202,7 @@ class UserServiceTest {
                 () -> userService.login(dto));
 
         assertEquals(BaseCode.USER_MOBILE_EMPTY.getCode(), exception.getCode());
-        verify(redisCache).incrBy(any(), eq(1L));
-        verify(redisCache).expire(any(), eq(1L), eq(TimeUnit.MINUTES));
+        verify(loginErrorCountOperate).loginErrorCount(any(), eq(60L));
     }
 
     @Test
@@ -199,7 +210,10 @@ class UserServiceTest {
         UserMobile userMobile = new UserMobile();
         userMobile.setUserId(100L);
         when(userMobileMapper.selectOne(any())).thenReturn(userMobile);
-        when(userMapper.selectOne(any())).thenReturn(null);
+        User user = new User();
+        user.setId(100L);
+        user.setPassword(passwordEncoder.encode("pwd"));
+        when(userMapper.selectById(100L)).thenReturn(user);
         UserLoginDto dto = new UserLoginDto();
         dto.setCode("2");
         dto.setMobile("13800000000");
@@ -209,6 +223,8 @@ class UserServiceTest {
                 () -> userService.login(dto));
 
         assertEquals(BaseCode.NAME_PASSWORD_ERROR.getCode(), exception.getCode());
+        // 密码错误也必须累计失败次数
+        verify(loginErrorCountOperate).loginErrorCount(any(), eq(60L));
     }
 
     @Test
@@ -217,9 +233,9 @@ class UserServiceTest {
         userMobile.setUserId(100L);
         User user = new User();
         user.setId(100L);
-        user.setPassword("pwd");
+        user.setPassword(passwordEncoder.encode("pwd"));
         when(userMobileMapper.selectOne(any())).thenReturn(userMobile);
-        when(userMapper.selectOne(any())).thenReturn(user);
+        when(userMapper.selectById(100L)).thenReturn(user);
         when(uidGenerator.getUid()).thenReturn(999L);
         stubChannelDataFallback();
 
@@ -248,8 +264,7 @@ class UserServiceTest {
                 () -> userService.login(dto));
 
         assertEquals(BaseCode.USER_EMAIL_NOT_EXIST.getCode(), exception.getCode());
-        verify(redisCache).incrBy(any(), eq(1L));
-        verify(redisCache).expire(any(), eq(1L), eq(TimeUnit.MINUTES));
+        verify(loginErrorCountOperate).loginErrorCount(any(), eq(60L));
     }
 
     @Test
