@@ -8,7 +8,7 @@
   设计原则：
     * 只收「真实的代码问题」（未用导入、缺省分支、equals/hashCode 失配等），
       不收纯风格项（缩进/行宽/空格）——避免与历史代码产生海量无意义 diff。
-    * 首轮以「报告基线」方式接入（failOnViolation=false），观察结果后再决定收紧。
+    * 已收紧为强制门禁（failOnViolation=true）：基线违规已清零，命中即失败。
 
   升级路径：
     * 若要引入风格门禁，应先用 formatter 统一，而非直接开 Checkstyle 风格规则。

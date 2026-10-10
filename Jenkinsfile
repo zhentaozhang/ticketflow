@@ -42,7 +42,7 @@ pipeline {
         stage('Static analysis') {
             steps {
                 sh 'mvn -B checkstyle:check'
-                sh 'mvn -B -DskipTests compile spotbugs:spotbugs'
+                sh 'mvn -B -DskipTests compile spotbugs:check'
             }
         }
 
