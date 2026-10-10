@@ -29,6 +29,7 @@ import com.ticketflow.vo.UserLoginVo;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -49,10 +50,15 @@ import static com.ticketflow.simulation.constant.SimulationOrderConstant.USER_LO
  * 3. 清理废弃订单 Redis 队列并生成新数据
  * 4. 将废弃订单写入 Redis discard_order 队列供页面展示
  *
- * 专为演示环境设计，非生产功能
+ * 专为演示环境设计，非生产功能。
+ * <p>
+ * 默认关闭：仅当显式配置 {@code ticketflow.demo-reset.enabled=true} 时才加载本 Bean，
+ * 避免默认 profile 部署时每晚清空全量订单。裸机本地开发由 application-local.yml 打开，
+ * 容器化环境（docker-compose）显式置为 false，需要演示时可临时通过 env 打开。
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(prefix = "ticketflow.demo-reset", name = "enabled", havingValue = "true")
 public class PresentationOrderDataTask {
     
     @Autowired

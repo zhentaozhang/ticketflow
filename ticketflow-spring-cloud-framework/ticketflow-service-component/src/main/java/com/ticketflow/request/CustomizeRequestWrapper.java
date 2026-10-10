@@ -56,7 +56,7 @@ public class CustomizeRequestWrapper extends HttpServletRequestWrapper {
     
     @Override
     public BufferedReader getReader() {
-        return new BufferedReader(new InputStreamReader(this.getInputStream()));
+        return new BufferedReader(new InputStreamReader(this.getInputStream(), StandardCharsets.UTF_8));
     }
     
     public String getRequestBody() {

@@ -30,21 +30,21 @@ import static com.ticketflow.service.constant.OrderConstant.DELAY_ORDER_CANCEL_T
  * 延迟队列消费者：超时未支付订单自动取消。
  * 订单创建时 DelayOrderCancelSend 推送延迟消息 → 此消费者在超时后消费 →
  * 检查订单支付状态 → 未支付则调用 OrderService.cancel() 取消。
- *
+ * <p>
  * 幂等保障：先通过 ApiDataClient 查询消息消费记录，
- *           已消费的不再重复处理
+ * 已消费的不再重复处理
  */
 @Slf4j
 @Component
 public class DelayOrderCancelConsumer implements ConsumerTask {
-    
+
     @Autowired
     private OrderService orderService;
-    
+
     @Autowired
     private ApiDataClient apiDataClient;
-    
-    
+
+
     @Override
     public void execute(String content) {
         log.info("延迟订单取消消息进行消费 content : {}", content);
@@ -53,12 +53,12 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
             return;
         }
         DelayOrderCancelMessageModule delayOrderCancelMessageModule = JSON.parseObject(content, DelayOrderCancelMessageModule.class);
-        
+
         Long messageTraceId = delayOrderCancelMessageModule.getMessageTraceId();
         Long messageId = delayOrderCancelMessageModule.getMessageId();
         Long programId = delayOrderCancelMessageModule.getProgramId();
         Long orderNumber = delayOrderCancelMessageModule.getOrderNumber();
-        
+
         // 幂等检查：通过 ApiDataClient 查询消息消费记录 → 已成功消费则跳过
         MessageIdDto messageIdDto = new MessageIdDto();
         messageIdDto.setMessageId(messageId);
@@ -67,10 +67,10 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
             ApiResponse<MessageConsumerRecordVo> apiResponse = apiDataClient.getMessageConsumerByMessageId(messageIdDto);
             if (!apiResponse.getCode().equals(BaseCode.SUCCESS.getCode())) {
                 log.error("查询消息消费记录失败 messageId : {}", messageId);
-            }else {
+            } else {
                 existMessageConsumerRecordVo = apiResponse.getData();
             }
-        }catch (Exception e) {
+        } catch (Exception e) {
             // api-data 故障时不阻断取消：cancel 为本地事务+Redis，重复消费安全由幂等注解保障
             log.error("查询消息消费记录异常 messageId : {}", messageId, e);
         }
@@ -94,16 +94,16 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
                 ApiResponse<MessageConsumerRecordVo> insertApiResponse = apiDataClient.insertMessageConsumerRecord(insertMessageConsumerRecordDto);
                 if (!insertApiResponse.getCode().equals(BaseCode.SUCCESS.getCode())) {
                     log.error("添加消息消费记录失败 insertMessageConsumerRecordDto : {}", JSON.toJSONString(insertMessageConsumerRecordDto));
-                }else {
+                } else {
                     MessageConsumerRecordVo saveMessageConsumerRecordVo = insertApiResponse.getData();
                     messageConsumerRecordId = saveMessageConsumerRecordVo.getId();
                     messageConsumerCount = saveMessageConsumerRecordVo.getMessageConsumerCount();
                 }
-            }catch (Exception e) {
+            } catch (Exception e) {
                 // api-data 故障时不阻断取消：消费记录缺失时由消息对账层重投，cancel 幂等保证安全
                 log.error("添加消息消费记录异常 insertMessageConsumerRecordDto : {}", JSON.toJSONString(insertMessageConsumerRecordDto), e);
             }
-        }else {
+        } else {
             messageConsumerRecordId = existMessageConsumerRecordVo.getId();
             messageConsumerCount = existMessageConsumerRecordVo.getMessageConsumerCount() + 1;
         }
@@ -114,27 +114,37 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
             updateMessageConsumerRecordDto.setMessageConsumerCount(messageConsumerCount);
             updateMessageConsumerRecordDto.setConsumerTime(DateUtils.now());
         }
-        
+
         try {
             OrderCancelDto orderCancelDto = new OrderCancelDto();
             orderCancelDto.setOrderNumber(orderNumber);
             boolean cancel = orderService.cancel(orderCancelDto);
             if (cancel) {
-                log.info("延迟订单取消成功 orderCancelDto : {}",content);
+                log.info("延迟订单取消成功 orderCancelDto : {}", content);
                 if (Objects.nonNull(updateMessageConsumerRecordDto)) {
                     updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
                 }
-            }else {
-                log.error("延迟订单取消失败 orderCancelDto : {}",content);
+            } else {
+                log.error("延迟订单取消失败 orderCancelDto : {}", content);
                 if (Objects.nonNull(updateMessageConsumerRecordDto)) {
                     updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_FAIL.getCode());
                     updateMessageConsumerRecordDto.setMessageConsumerException("订单取消失败");
                 }
             }
         } catch (TicketFlowFrameException e) {
-            // TicketFlowFrameException 表示程序层已处理（如订单已支付/已取消），视为消费成功
-            if (Objects.nonNull(updateMessageConsumerRecordDto)) {
-                updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
+            // 只有"订单已处于终态 / 已被并发流程改掉"才视为消费成功；
+            // 其余业务失败（如订单暂不可见 ORDER_NOT_EXIST、状态不允许取消）应标记失败保留重试，
+            // 否则一次瞬时失败就被永久吞掉、订单再也不会被取消。
+            if (isTerminalOrderState(e.getCode())) {
+                if (Objects.nonNull(updateMessageConsumerRecordDto)) {
+                    updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
+                }
+            } else {
+                log.warn("延迟订单取消业务失败，保留重试 orderNumber : {} code : {}", orderNumber, e.getCode());
+                if (Objects.nonNull(updateMessageConsumerRecordDto)) {
+                    updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_FAIL.getCode());
+                    updateMessageConsumerRecordDto.setMessageConsumerException(e.getMessage());
+                }
             }
         } catch (Exception e) {
             if (Objects.nonNull(updateMessageConsumerRecordDto)) {
@@ -145,12 +155,23 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
         if (Objects.nonNull(updateMessageConsumerRecordDto)) {
             try {
                 apiDataClient.updateMessageConsumerRecord(updateMessageConsumerRecordDto);
-            }catch (Exception e) {
+            } catch (Exception e) {
                 log.error("更新消息消费记录失败 id : {}", updateMessageConsumerRecordDto.getId(), e);
             }
         }
     }
-    
+
+    /**
+     * 订单已处于终态 / 已被并发流程改掉的错误码：这类失败重试也无意义，按消费成功处理。
+     * 其余业务失败（订单不存在、状态不允许等）保留重试。
+     */
+    private boolean isTerminalOrderState(Integer code) {
+        return Objects.equals(code, BaseCode.ORDER_CANCEL.getCode())
+                || Objects.equals(code, BaseCode.ORDER_PAY.getCode())
+                || Objects.equals(code, BaseCode.ORDER_REFUND.getCode())
+                || Objects.equals(code, BaseCode.ORDER_STATUS_CHANGED.getCode());
+    }
+
     @Override
     public String topic() {
         return SpringUtil.getPrefixDistinctionName() + "-" + DELAY_ORDER_CANCEL_TOPIC;

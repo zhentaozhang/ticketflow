@@ -14,7 +14,7 @@ import java.util.Optional;
 /**
  * 订单创建策略上下文（策略模式）。
  * 启动时扫描所有 ProgramOrderStrategy 实现，按 version() 注册到 MAP。
- * 客户端通过 version 参数选择策略（V1/V2/V3/V4/V21/V31/V41）。
+ * 客户端通过 version 参数选择策略（V1/V2/V3/V4）。
  * <p>
  * 扩展方式：新增 ProgramOrderStrategy 实现并标注 @Component，
  * 自动注入 strategyList，无需修改此文件（满足开闭原则）

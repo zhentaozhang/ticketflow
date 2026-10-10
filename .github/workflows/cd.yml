@@ -1,0 +1,118 @@
+name: CD
+
+# 持续交付：测试门禁 → 构建镜像 → 漏洞扫描 → 推送仓库 → 部署 → 发布验证（失败回滚）。
+#
+# 说明（务实）：
+#   * test/images 两个 job 是「真实可跑」的云端流水线；
+#   * deploy 需要目标 K8s 集群，本仓库默认无集群，因此以
+#     workflow_dispatch + 仓库变量 K8S_DEPLOY_ENABLED=true 双重开关保护，避免误触发失败；
+#   * 本地等价路径见 scripts/cd.sh（已在 kind 上端到端验证）。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 目标环境
+        required: true
+        default: staging
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    name: Test gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Unit tests
+        run: mvn -B test
+
+  images:
+    name: Build / scan / push images
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+
+      - name: Build images
+        run: bash ./docker/build.sh images
+
+      # 阻断门禁：命中 HIGH/CRITICAL 即失败（已评估的残留豁免见 .trivyignore）
+      - name: Scan images (Trivy, HIGH/CRITICAL)
+        env:
+          IMAGE_TAG: 0.0.1-SNAPSHOT
+          SBOM_DIR: sbom
+        run: bash scripts/scan-images.sh
+
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/
+          if-no-files-found: ignore
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push images (tag = short commit SHA)
+        env:
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
+        # tag 必须与 deploy/release-verify 的 ${GITHUB_SHA::8} 一致，否则拉不到镜像
+        run: GIT_SHA="${GITHUB_SHA::8}" bash scripts/push-images.sh
+
+  deploy:
+    name: Deploy to ${{ github.event.inputs.environment || 'staging' }}
+    needs: images
+    # 需要：仓库变量 K8S_DEPLOY_ENABLED=true 且手动触发；并配置 KUBE_CONFIG secret
+    if: github.event_name == 'workflow_dispatch' && vars.K8S_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    env:
+      NAMESPACE: ticketflow
+      SERVICES: gateway order program
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure kubeconfig
+        id: kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Set image (commit SHA)
+        run: |
+          IMAGE_TAG="${GITHUB_SHA::8}"
+          for svc in $SERVICES; do
+            kubectl -n "$NAMESPACE" set image "deploy/$svc" \
+              "$svc=ghcr.io/${{ github.repository_owner }}/ticketflow-${svc}:${IMAGE_TAG}"
+          done
+
+      - name: Release verification
+        run: EXPECTED_TAG="${GITHUB_SHA::8}" bash scripts/release-verify.sh
+
+      - name: Rollback on failure
+        # 仅在 kubeconfig 已就绪时回滚；否则（连集群都没连上）回滚无意义
+        if: failure() && steps.kubeconfig.outcome == 'success'
+        run: bash scripts/rollback.sh

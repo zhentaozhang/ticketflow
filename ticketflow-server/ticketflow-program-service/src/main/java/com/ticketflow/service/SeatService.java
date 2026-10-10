@@ -123,7 +123,15 @@ public class SeatService extends ServiceImpl<SeatMapper, Seat> {
         }
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_SEAT_LOCK, new String[]{String.valueOf(programId),
                 String.valueOf(ticketCategoryId)});
-        lock.lock();
+        if (!serviceLockTool.tryLock(lock, "GET_SEAT_LOCK:" + programId + ":" + ticketCategoryId)) {
+            // 等超时：可能有另一个请求正在重建这份缓存。先再查一次（说不定刚好填好），
+            // 仍然没有就快速失败——这时候改成无锁重建，会把数据库也一起拖进来
+            seatVoList = getSeatVoListByCacheResolution(programId, ticketCategoryId);
+            if (CollectionUtil.isNotEmpty(seatVoList)) {
+                return seatVoList;
+            }
+            throw new TicketFlowFrameException(BaseCode.CACHE_LOAD_LOCK_TIMEOUT);
+        }
         try {
             seatVoList = getSeatVoListByCacheResolution(programId, ticketCategoryId);
             if (CollectionUtil.isNotEmpty(seatVoList)) {
@@ -244,6 +252,9 @@ public class SeatService extends ServiceImpl<SeatMapper, Seat> {
 
 
         int rowIndex = 0;
+        // 先攒批再一次性写入：原实现逐条 insert，一个大型演出（数千~上万座位）就是同等次数的
+        // DB 往返；改为 saveBatch 后按批提交，减少网络与事务开销。
+        List<Seat> seatList = new ArrayList<>();
         for (SeatBatchRelateInfoAddDto seatBatchRelateInfoAddDto : seatBatchRelateInfoAddDtoList) {
             Long ticketCategoryId = seatBatchRelateInfoAddDto.getTicketCategoryId();
             BigDecimal price = seatBatchRelateInfoAddDto.getPrice();
@@ -263,11 +274,11 @@ public class SeatService extends ServiceImpl<SeatMapper, Seat> {
                     seat.setSeatType(1);
                     seat.setPrice(price);
                     seat.setSellStatus(SellStatus.NO_SOLD.getCode());
-                    seatMapper.insert(seat);
+                    seatList.add(seat);
                 }
             }
         }
 
-        return true;
+        return saveBatch(seatList);
     }
 }

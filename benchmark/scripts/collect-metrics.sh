@@ -17,8 +17,11 @@ DURATION=$(echo "$VERSION" | sed -n 's/.*-d\([0-9]*\).*/\1/p')
 [ -z "$DURATION" ] && DURATION=30
 RATE_WINDOW=$((DURATION + 30))s
 
+# 被测机地址：默认单机 127.0.0.1；局域网双机模式设 TARGET_HOST=<被测机IP>
+TARGET_HOST=${TARGET_HOST:-127.0.0.1}
+
 OUTPUT_FILE="$RESULT_DIR/metrics-${VERSION}-${TIMESTAMP}.json"
-PROMETHEUS="http://127.0.0.1:9090"
+PROMETHEUS="http://${TARGET_HOST}:9090"
 
 echo "{" > "$OUTPUT_FILE"
 FIRST=true
@@ -70,12 +73,31 @@ query_and_append "jvm_threads_live_threads" "live_threads"
 query_and_append "hikaricp_connections_active{pool='HikariPool-1'}" "hikari_active_connections"
 query_and_append "hikaricp_connections_pending{pool='HikariPool-1'}" "hikari_pending_threads"
 
+# 压测机 CPU（同机压测局限标注：高并发下压测机可能成为瓶颈）
+# macOS: top -l 1 解析 "CPU usage: 12.34% user, ..."；Linux 备选 /proc/stat
+HOST_CPU=$(top -l 1 -n 0 2>/dev/null | grep "CPU usage" | sed -E 's/.* ([0-9.]+)% user.*/\1/' || echo "N/A")
+if [ "$FIRST" = true ]; then
+  FIRST=false
+else
+  echo "," >> "$OUTPUT_FILE"
+fi
+echo "  \"load_generator_cpu_percent\": \"$HOST_CPU\"" >> "$OUTPUT_FILE"
+
 # Kafka consumer lag（create_order_data 消费组；v4 异步链路是否积压/消费成瓶颈）
-KAFKA_LAG=$(docker exec ticketflow-kafka /opt/bitnami/kafka/bin/kafka-consumer-groups.sh \
-  --bootstrap-server localhost:9092 --describe --group create_order_data 2>/dev/null \
-  | awk 'NR>1 && NF>=6 {lag+=$6} END {print lag+0}')
-if [ -z "$KAFKA_LAG" ]; then
-  KAFKA_LAG="N/A"
+# 单机：docker exec 容器内 CLI；双机：压测机本地 kafka CLI 远程连被测机 9092（无 CLI 则 N/A）
+if [ "$TARGET_HOST" != "127.0.0.1" ] && command -v kafka-consumer-groups.sh >/dev/null 2>&1; then
+  KAFKA_LAG=$(kafka-consumer-groups.sh --bootstrap-server "$TARGET_HOST:9092" \
+    --describe --group create_order_data 2>/dev/null \
+    | awk 'NR>1 && NF>=6 {lag+=$6} END {print lag+0}')
+  [ -z "$KAFKA_LAG" ] && KAFKA_LAG="N/A"
+elif command -v docker >/dev/null 2>&1 && docker exec ticketflow-kafka true 2>/dev/null; then
+  KAFKA_LAG=$(docker exec ticketflow-kafka /opt/bitnami/kafka/bin/kafka-consumer-groups.sh \
+    --bootstrap-server localhost:9092 --describe --group create_order_data 2>/dev/null \
+    | awk 'NR>1 && NF>=6 {lag+=$6} END {print lag+0}')
+  [ -z "$KAFKA_LAG" ] && KAFKA_LAG="N/A"
+else
+  # 双机且压测机无 kafka CLI：标注 N/A（可后续装 brew install kafka 补采）
+  KAFKA_LAG="N/A (压测机无 kafka CLI，可 brew install kafka)"
 fi
 if [ "$FIRST" = true ]; then
   FIRST=false

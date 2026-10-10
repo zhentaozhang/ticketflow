@@ -25,6 +25,7 @@ import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.springframework.core.annotation.Order;
+import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.lang.reflect.Method;
@@ -103,11 +104,16 @@ public class RepeatExecuteLimitAspect {
         String lockName = lockInfoHandle.getLockName(joinPoint, repeatLimit.name(), repeatLimit.keys());
         //幂等标识
         String repeatFlagName = PREFIX_NAME + lockName;
+        //durationTime=0 时不写幂等标记，GET 恒为 null；跳过幂等标识查询以省 2 次 Redis 往返，
+        //仍保留本地锁 + 分布式锁防并发（语义与原来完全等价）
+        boolean needIdempotentCheck = durationTime > 0;
         //获得幂等标识
-        String flagObject = redissonDataHandle.get(repeatFlagName);
-        //如果幂等标识的值为success，说明已经有请求在执行了，这次请求直接结束
-        if (SUCCESS_FLAG.equals(flagObject)) {
-            throw new TicketFlowFrameException(message);
+        if (needIdempotentCheck) {
+            String flagObject = redissonDataHandle.get(repeatFlagName);
+            //如果幂等标识的值为success，说明已经有请求在执行了，这次请求直接结束
+            if (SUCCESS_FLAG.equals(flagObject)) {
+                throw new TicketFlowFrameException(message);
+            }
         }
         //获取本地锁
         ReentrantLock localLock = localLockCache.getLock(lockName, false);
@@ -125,21 +131,22 @@ public class RepeatExecuteLimitAspect {
             //加锁成功执行
             if (result) {
                 try {
-                    //再次获取幂等标识
-                    flagObject = redissonDataHandle.get(repeatFlagName);
-                    //如果幂等标识的值为success，说明已经有请求在执行了，这次请求直接结束
-                    if (SUCCESS_FLAG.equals(flagObject)) {
-                        throw new TicketFlowFrameException(message);
+                    //再次获取幂等标识（锁内二次校验）：GET 在锁外与拿到锁之间可能被并发请求置位，
+                    //该语义有测试契约（successFlagSetBetweenLocksShouldRejectInsideDistributedLock）保护，保留。
+                    if (needIdempotentCheck) {
+                        String flagObject = redissonDataHandle.get(repeatFlagName);
+                        //如果幂等标识的值为success，说明已经有请求在执行了，这次请求直接结束
+                        if (SUCCESS_FLAG.equals(flagObject)) {
+                            throw new TicketFlowFrameException(message);
+                        }
                     }
                     //执行业务逻辑
                     obj = joinPoint.proceed();
                     if (durationTime > 0) {
-                        try {
-                            //业务逻辑执行成功 并且 指定了设置幂等保持时间 设置请求标识
-                            redissonDataHandle.set(repeatFlagName, SUCCESS_FLAG, durationTime, TimeUnit.SECONDS);
-                        } catch (Exception e) {
-                            log.error("getBucket error", e);
-                        }
+                        //业务逻辑执行成功 并且 指定了设置幂等保持时间 设置请求标识
+                        //事务同步：若外层仍有未提交事务，延迟到 afterCommit 再写幂等标记，
+                        //避免"事务回滚但幂等标记已置成功"导致后续请求被误拒
+                        writeIdempotentFlagAfterCommit(repeatFlagName, durationTime);
                     }
                     return obj;
                 } finally {
@@ -151,6 +158,31 @@ public class RepeatExecuteLimitAspect {
             }
         } finally {
             localLock.unlock();
+        }
+    }
+
+    /**
+     * 幂等标记写入：若事务仍处于激活状态，注册 afterCommit 回调延迟写入；
+     * 否则（无事务或事务已提交）立即写入。
+     */
+    private void writeIdempotentFlagAfterCommit(String repeatFlagName, long durationTime) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    writeIdempotentFlag(repeatFlagName, durationTime);
+                }
+            });
+        } else {
+            writeIdempotentFlag(repeatFlagName, durationTime);
+        }
+    }
+
+    private void writeIdempotentFlag(String repeatFlagName, long durationTime) {
+        try {
+            redissonDataHandle.set(repeatFlagName, SUCCESS_FLAG, durationTime, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.error("getBucket error", e);
         }
     }
 }

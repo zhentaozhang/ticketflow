@@ -2,7 +2,7 @@ package com.ticketflow.servicelock;
 
 /**
  * 分布式锁类型枚举。
- *
+ * <p>
  * Reentrant — 可重入锁（默认），Fair — 公平锁，Read — 读锁，Write — 写锁
  */
 public enum LockType {

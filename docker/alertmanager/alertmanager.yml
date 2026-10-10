@@ -1,0 +1,44 @@
+# =============================================================================
+# Alertmanager 配置（TicketFlow）
+#
+# 作用：接收 Prometheus 告警规则（docker/prometheus/rules/ticketflow-alerts.yml）
+#       的触发结果，做分组 / 抑制 / 静默，并投递到接收端。
+#
+# 本地默认接收端：
+#   webhook -> http://host.docker.internal:8089/alerts
+#   由 scripts/alert-sink.py 提供的一个本地接收器（仅用于验证“告警能真的响”）。
+#   验证流程：make sink（另开终端） -> docker compose up -d alertmanager -> make alert-test
+#
+# 生产替换（真实 URL 属敏感信息，不入库）：
+#   * 钉钉/飞书/企业微信：Alertmanager 不原生支持，需部署适配网关
+#     （如 prometheus-webhook-dingtalk），再把下面 webhook url 指过去；
+#   * 或改用 Slack / PagerDuty / 邮件 receiver。
+# =============================================================================
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default-webhook
+  group_by: ['alertname', 'severity']
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 2h
+  routes:
+    # P0（资损 / 正确性风险）：立即触达，最短重复间隔
+    - matchers:
+        - severity = "P0"
+      receiver: default-webhook
+      group_wait: 0s
+      group_interval: 30s
+      repeat_interval: 30m
+
+# 说明：曾尝试「P0 存在时抑制 P1/P2」，但本项目的 P0 与 P1/P2 告警 alertname 不同，
+# 且没有可用于“同一目标”的公共标签（programId/topic/reason 等只在部分规则出现），
+# 按 alertname 相等抑制永远不会命中，属无效规则，故移除。
+# 若需系统级抑制：先给全部告警规则统一加 service 标签，再以 equal: ['service'] 实现。
+
+receivers:
+  - name: default-webhook
+    webhook_configs:
+      - url: 'http://host.docker.internal:8089/alerts'
+        send_resolved: true

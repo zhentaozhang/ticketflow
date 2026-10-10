@@ -51,9 +51,13 @@ public class BusinessEsAutoConfig {
             if (needAuth) {
                 httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider);
             }
+            Integer ioThreadCount = businessEsProperties.getIoThreadCount();
             httpClientBuilder.setDefaultIOReactorConfig(IOReactorConfig.custom()
-                    // 设置 I/O 线程数
-                    .setIoThreadCount(businessEsProperties.getMaxConnectNum()).build());
+                    // IO reactor 线程数按 CPU 规模，而非连接数（maxConnectNum）
+                    .setIoThreadCount(Objects.nonNull(ioThreadCount) && ioThreadCount > 0
+                            ? ioThreadCount
+                            : Runtime.getRuntime().availableProcessors() * 2)
+                    .build());
             return httpClientBuilder;
         });
         Header[] defaultHeaders = {new BasicHeader(HttpHeaders.CONTENT_TYPE, "application/json")};

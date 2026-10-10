@@ -4,11 +4,9 @@ import com.ticketflow.common.ApiResponse;
 import com.ticketflow.dto.*;
 import com.ticketflow.vo.ProgramRecordTaskVo;
 import com.ticketflow.vo.TicketCategoryDetailVo;
-import jakarta.validation.Valid;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 
 import java.util.List;
 

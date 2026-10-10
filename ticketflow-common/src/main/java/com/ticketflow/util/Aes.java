@@ -123,7 +123,7 @@ public class Aes {
 		try {
 			int sixteen = 16;
 			KeyGenerator kg = KeyGenerator.getInstance("AES");
-			kg.init(128, new SecureRandom(key.getBytes()));
+			kg.init(128, new SecureRandom(key.getBytes(StandardCharsets.UTF_8)));
 			SecretKey sk = kg.generateKey();
 			byte[] b = sk.getEncoded();
 			resultString = byteToHexString(b);

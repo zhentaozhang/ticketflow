@@ -33,16 +33,15 @@
             <artifactId>ticketflow-common</artifactId>
             <version>${revision}</version>
         </dependency>
+        <!--
+          ES 低层 REST 客户端（8.x，与容器内 ES 8.11 对齐）。
+          仅使用 org.elasticsearch.client.*（RestClient/Request/Response），
+          不再依赖已停更的 spring-data-elasticsearch 4.0.9 与 org.elasticsearch:elasticsearch 核心制品，
+          查询 DSL 由 fastjson 直接构造 JSON（见 BusinessEsHandle / ProgramEs）。
+        -->
         <dependency>
-            <groupId>org.springframework.data</groupId>
-            <artifactId>spring-data-elasticsearch</artifactId>
-            <version>4.0.9.RELEASE</version>
-            <exclusions>
-                <exclusion>
-                    <artifactId>transport</artifactId>
-                    <groupId>org.elasticsearch.client</groupId>
-                </exclusion>
-            </exclusions>
+            <groupId>org.elasticsearch.client</groupId>
+            <artifactId>elasticsearch-rest-client</artifactId>
         </dependency>
         <dependency>
             <groupId>com.github.pagehelper</groupId>

@@ -1,6 +1,8 @@
 package com.ticketflow.service.es;
 
 import cn.hutool.core.collection.CollectionUtil;
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
 import com.ticketflow.core.SpringUtil;
 import com.ticketflow.dto.EsDataQueryDto;
 import com.ticketflow.dto.ProgramListDto;
@@ -19,21 +21,11 @@ import com.ticketflow.vo.ProgramListVo;
 import com.github.pagehelper.PageInfo;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
-import org.elasticsearch.index.query.BoolQueryBuilder;
-import org.elasticsearch.index.query.MatchAllQueryBuilder;
-import org.elasticsearch.index.query.QueryBuilder;
-import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.script.Script;
-import org.elasticsearch.search.builder.SearchSourceBuilder;
-import org.elasticsearch.search.fetch.subphase.highlight.HighlightBuilder;
-import org.elasticsearch.search.sort.FieldSortBuilder;
-import org.elasticsearch.search.sort.ScriptSortBuilder;
-import org.elasticsearch.search.sort.SortBuilders;
-import org.elasticsearch.search.sort.SortOrder;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.List;
 import java.util.Objects;
 
@@ -42,12 +34,12 @@ import java.util.Objects;
  * 所有查询都走 ES 索引 "ticketflow-program"，
  * 查询失败（ES 异常或 ES 无数据）时由 ProgramService 兜底走 DB。
  * <p>
- * ES 查询核心概念对应：
- * termQuery     = WHERE field = ?        （精确匹配，适用于 long/数值/keyword 类型）
- * matchQuery    = WHERE field 分词匹配    （全文搜索，适用于 text 类型）
- * boolQuery     = AND(must) / OR(should)  （条件组合）
- * rangeQuery    = WHERE field BETWEEN ?   （时间范围过滤）
- * from/size     = LIMIT ?, ?              （分页）
+ * 查询 DSL 说明（ES 8 + 低层 RestClient，JSON 由 fastjson 构造）：
+ * term       = WHERE field = ?        （精确匹配，适用于 long/数值/keyword 类型）
+ * match      = WHERE field 分词匹配    （全文搜索，适用于 text 类型）
+ * bool       = AND(must) / OR(should) / NOT(must_not)
+ * range      = WHERE field BETWEEN ?   （时间范围过滤）
+ * from/size  = LIMIT ?, ?
  */
 @Slf4j
 @Component
@@ -111,48 +103,56 @@ public class ProgramEs {
 
     /**
      * 推荐列表（随机展示 10 条）。
-     * 使用 ES 的 ScriptSort + Math.random() 实现随机排序，
+     * 使用 ES 的 script sort + Math.random() 实现随机排序，
      * 避免每次都返回相同数据。
      * <p>
-     * 支持排除指定节目 ID（mustNot），用于"看过这个的人也看"场景。
+     * 支持排除指定节目 ID（must_not），用于"看过这个的人也看"场景。
      */
     public List<ProgramListVo> recommendList(ProgramRecommendListDto programRecommendListDto) {
         List<ProgramListVo> programListVoList = new ArrayList<>();
         try {
-            // 构建布尔查询：无筛选条件时使用 matchAll，否则按 areaId/parentCategoryId 过滤，按 programId 排除
+            // 构建布尔查询：无筛选条件时使用 match_all，否则按 areaId/parentCategoryId 过滤，按 programId 排除
             boolean allQueryFlag = true;
-            MatchAllQueryBuilder matchAllQueryBuilder = QueryBuilders.matchAllQuery();
-            BoolQueryBuilder boolQuery = QueryBuilders.boolQuery();
+            JSONArray must = new JSONArray();
+            JSONArray mustNot = new JSONArray();
             if (Objects.nonNull(programRecommendListDto.getAreaId())) {
                 allQueryFlag = false;
-                QueryBuilder builds = QueryBuilders.termQuery(ProgramDocumentParamName.AREA_ID, programRecommendListDto.getAreaId());
-                boolQuery.must(builds);
+                must.add(termQuery(ProgramDocumentParamName.AREA_ID, programRecommendListDto.getAreaId()));
             }
             if (Objects.nonNull(programRecommendListDto.getParentProgramCategoryId())) {
                 allQueryFlag = false;
-                QueryBuilder builds = QueryBuilders.termQuery(ProgramDocumentParamName.PARENT_PROGRAM_CATEGORY_ID, programRecommendListDto.getParentProgramCategoryId());
-                boolQuery.must(builds);
+                must.add(termQuery(ProgramDocumentParamName.PARENT_PROGRAM_CATEGORY_ID, programRecommendListDto.getParentProgramCategoryId()));
             }
             if (Objects.nonNull(programRecommendListDto.getProgramId())) {
                 allQueryFlag = false;
-                // mustNot 排除指定节目 ID，实现"看过这个的人也看"排除已看节目
-                QueryBuilder builds = QueryBuilders.termQuery(ProgramDocumentParamName.ID, programRecommendListDto.getProgramId());
-                boolQuery.mustNot(builds);
+                // must_not 排除指定节目 ID，实现"看过这个的人也看"排除已看节目
+                mustNot.add(termQuery(ProgramDocumentParamName.ID, programRecommendListDto.getProgramId()));
             }
-            SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder();
-            searchSourceBuilder.query(allQueryFlag ? matchAllQueryBuilder : boolQuery);
-            searchSourceBuilder.trackTotalHits(true);
-            searchSourceBuilder.from(1);
-            searchSourceBuilder.size(10);
 
-            // 使用 ScriptSort + Math.random() 实现随机排序，避免每次返回相同推荐结果
-            Script script = new Script("Math.random()");
-            ScriptSortBuilder scriptSortBuilder = new ScriptSortBuilder(script, ScriptSortBuilder.ScriptSortType.NUMBER);
-            scriptSortBuilder.order(SortOrder.ASC);
+            JSONObject dsl = new JSONObject();
+            if (allQueryFlag) {
+                dsl.put("query", matchAllQuery());
+            } else {
+                dsl.put("query", boolQuery(must, null, mustNot));
+            }
+            dsl.put("track_total_hits", true);
+            dsl.put("from", 0);
+            dsl.put("size", 10);
 
-            searchSourceBuilder.sort(scriptSortBuilder);
+            // 使用 script sort + Math.random() 实现随机排序，避免每次返回相同推荐结果
+            JSONObject script = new JSONObject();
+            script.put("source", "Math.random()");
+            JSONObject scriptSort = new JSONObject();
+            scriptSort.put("type", "number");
+            scriptSort.put("script", script);
+            scriptSort.put("order", "asc");
+            JSONArray sort = new JSONArray();
+            JSONObject scriptWrap = new JSONObject();
+            scriptWrap.put("_script", scriptSort);
+            sort.add(scriptWrap);
+            dsl.put("sort", sort);
 
-            businessEsHandle.executeQuery(SpringUtil.getPrefixDistinctionName() + "-" + ProgramDocumentParamName.INDEX_NAME, ProgramDocumentParamName.INDEX_TYPE, programListVoList, null, ProgramListVo.class, searchSourceBuilder, null);
+            businessEsHandle.executeQuery(SpringUtil.getPrefixDistinctionName() + "-" + ProgramDocumentParamName.INDEX_NAME, ProgramDocumentParamName.INDEX_TYPE, programListVoList, null, ProgramListVo.class, dsl.toJSONString(), null);
         } catch (Exception e) {
             log.error("recommendList error", e);
         }
@@ -235,15 +235,15 @@ public class ProgramEs {
         switch (programPageListDto.getType()) {
             case 2:
                 programPageOrder.sortParam = ProgramDocumentParamName.HIGH_HEAT;
-                programPageOrder.sortOrder = SortOrder.DESC;
+                programPageOrder.sortOrder = "desc";
                 break;
             case 3:
                 programPageOrder.sortParam = ProgramDocumentParamName.SHOW_TIME;
-                programPageOrder.sortOrder = SortOrder.ASC;
+                programPageOrder.sortOrder = "asc";
                 break;
             case 4:
                 programPageOrder.sortParam = ProgramDocumentParamName.ISSUE_TIME;
-                programPageOrder.sortOrder = SortOrder.ASC;
+                programPageOrder.sortOrder = "asc";
                 break;
             default:
                 programPageOrder.sortParam = null;
@@ -254,8 +254,8 @@ public class ProgramEs {
 
     /**
      * 节目搜索方法（全文搜索）。
-     * 使用 matchQuery 对 title 和 actor 字段做分词匹配，
-     * 命中的关键词用 <em> 标签高亮返回给前端渲染。
+     * 使用 match 查询对 title 和 actor 字段做分词匹配，
+     * 命中的关键词用 &lt;em&gt; 标签高亮返回给前端渲染。
      * 支持区域、分类、时间范围、关键词等多条件组合筛选。
      * <p>
      * 搜索条件组合（AND）：
@@ -263,9 +263,6 @@ public class ProgramEs {
      * parentProgramCategoryId=?
      * showDayTime BETWEEN ? AND ?
      * (title 分词匹配 "内容" OR actor 分词匹配 "内容")
-     * <p>
-     * 注意：matchQuery 走分词，ES mapping 中这两个字段类型为 text。
-     * areaId 等精确字段走 termQuery，类型为 long。
      *
      * @param programSearchDto 节目搜索请求参数，包含搜索条件和分页信息
      * @return 分页的节目列表结果
@@ -274,102 +271,102 @@ public class ProgramEs {
         // 初始化返回的分页结果对象
         PageVo<ProgramListVo> pageVo = new PageVo<>();
         try {
-            // 1. 构建 ES 布尔查询，用于组合多个搜索条件
-            BoolQueryBuilder boolQuery = QueryBuilders.boolQuery();
+            // 1. 构建 ES bool 查询的 must 条件集合（AND）
+            JSONArray must = new JSONArray();
 
-            // 2. 区域筛选：如果传入了区域ID，则添加精确匹配条件（must 表示必须满足）
+            // 2. 区域筛选：精确匹配（term）
             if (Objects.nonNull(programSearchDto.getAreaId())) {
-                QueryBuilder builds = QueryBuilders.termQuery(ProgramDocumentParamName.AREA_ID, programSearchDto.getAreaId());
-                boolQuery.must(builds);
+                must.add(termQuery(ProgramDocumentParamName.AREA_ID, programSearchDto.getAreaId()));
             }
 
-            // 3. 节目分类筛选：如果传入了父级分类ID，则添加精确匹配条件
+            // 3. 节目分类筛选：精确匹配（term）
             if (Objects.nonNull(programSearchDto.getParentProgramCategoryId())) {
-                QueryBuilder builds = QueryBuilders.termQuery(ProgramDocumentParamName.PARENT_PROGRAM_CATEGORY_ID, programSearchDto.getParentProgramCategoryId());
-                boolQuery.must(builds);
+                must.add(termQuery(ProgramDocumentParamName.PARENT_PROGRAM_CATEGORY_ID, programSearchDto.getParentProgramCategoryId()));
             }
 
-            // 4. 时间范围筛选：如果起止时间都不为空，则添加时间区间查询
-            // includeLower(true) 表示包含下边界（即大于等于开始时间）
+            // 4. 时间范围筛选：range，gte 包含下边界
             if (Objects.nonNull(programSearchDto.getStartDateTime()) && Objects.nonNull(programSearchDto.getEndDateTime())) {
-                QueryBuilder builds = QueryBuilders.rangeQuery(ProgramDocumentParamName.SHOW_DAY_TIME).from(programSearchDto.getStartDateTime()).to(programSearchDto.getEndDateTime()).includeLower(true);
-                boolQuery.must(builds);
+                must.add(rangeQuery(ProgramDocumentParamName.SHOW_DAY_TIME, programSearchDto.getStartDateTime(), programSearchDto.getEndDateTime()));
             }
 
-            // 5. 关键词搜索：如果搜索内容不为空，则在标题和演员字段中进行模糊匹配
+            // 5. 关键词搜索：title/actor 分词匹配（OR，至少命中一个）
             if (StringUtil.isNotEmpty(programSearchDto.getContent())) {
-                // 创建内层布尔查询，用于处理多字段的 OR 逻辑
-                BoolQueryBuilder innerBoolQuery = QueryBuilders.boolQuery();
-                // 在标题中匹配关键词
-                innerBoolQuery.should(QueryBuilders.matchQuery(ProgramDocumentParamName.TITLE, programSearchDto.getContent()));
-                // 在演员中匹配关键词
-                innerBoolQuery.should(QueryBuilders.matchQuery(ProgramDocumentParamName.ACTOR, programSearchDto.getContent()));
-                // 设置至少匹配一个条件（标题或演员任一匹配即可）
-                innerBoolQuery.minimumShouldMatch(1);
-                // 将关键词搜索条件作为外层查询的必须满足条件
-                boolQuery.must(innerBoolQuery);
+                JSONArray should = new JSONArray();
+                should.add(matchQuery(ProgramDocumentParamName.TITLE, programSearchDto.getContent()));
+                should.add(matchQuery(ProgramDocumentParamName.ACTOR, programSearchDto.getContent()));
+                JSONObject innerBool = new JSONObject();
+                innerBool.put("should", should);
+                innerBool.put("minimum_should_match", 1);
+                JSONObject innerQuery = new JSONObject();
+                innerQuery.put("bool", innerBool);
+                must.add(innerQuery);
             }
 
-            // 6. 构建搜索请求配置
-            SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder();
+            // 6. 构建搜索 DSL
+            JSONObject dsl = new JSONObject();
+            dsl.put("query", boolQuery(must, null, null));
 
-            // 7. 处理排序逻辑：如果指定了排序字段和排序方式，则添加排序规则
+            // 7. 排序（可选）
             ProgramPageOrder programPageOrder = getProgramPageOrder(programSearchDto);
             if (Objects.nonNull(programPageOrder.sortParam) && Objects.nonNull(programPageOrder.sortOrder)) {
-                FieldSortBuilder sort = SortBuilders.fieldSort(programPageOrder.sortParam);
-                sort.order(programPageOrder.sortOrder);
-                searchSourceBuilder.sort(sort);
+                JSONObject orderBody = new JSONObject();
+                orderBody.put("order", programPageOrder.sortOrder);
+                JSONObject fieldSort = new JSONObject();
+                fieldSort.put(programPageOrder.sortParam, orderBody);
+                JSONArray sort = new JSONArray();
+                sort.add(fieldSort);
+                dsl.put("sort", sort);
             }
 
-            // 8. 设置查询条件
-            searchSourceBuilder.query(boolQuery);
+            // 8. 启用总数追踪，用于计算总页数
+            dsl.put("track_total_hits", true);
 
-            // 9. 启用总数追踪，用于计算总页数（ES 7.0+ 默认最多返回10000条）
-            searchSourceBuilder.trackTotalHits(true);
+            // 9. 分页（from/size）
+            dsl.put("from", (programSearchDto.getPageNumber() - 1) * programSearchDto.getPageSize());
+            dsl.put("size", programSearchDto.getPageSize());
 
-            // 10. 设置分页偏移量：计算从第几条记录开始
-            // 例如：第1页，每页10条，则从第0条开始
-            searchSourceBuilder.from((programSearchDto.getPageNumber() - 1) * programSearchDto.getPageSize());
+            // 10. 高亮：title/actor 命中关键词用 <em> 包裹
+            dsl.put("highlight", highlightBuilder(Arrays.asList(ProgramDocumentParamName.TITLE, ProgramDocumentParamName.ACTOR)));
 
-            // 11. 设置每页返回的记录数
-            searchSourceBuilder.size(programSearchDto.getPageSize());
-
-            // 12. 设置高亮显示：对标题和演员字段进行高亮处理，方便前端展示匹配的关键词
-            searchSourceBuilder.highlighter(getHighlightBuilder(Arrays.asList(ProgramDocumentParamName.TITLE, ProgramDocumentParamName.ACTOR)));
-
-            // 13. 准备接收查询结果的列表和分页信息
+            // 11. 准备接收查询结果的列表和分页信息
             List<ProgramListVo> list = new ArrayList<>();
             PageInfo<ProgramListVo> pageInfo = new PageInfo<>(list);
             pageInfo.setPageNum(programSearchDto.getPageNumber());
             pageInfo.setPageSize(programSearchDto.getPageSize());
 
-            // 14. 执行 ES 查询
-            // 参数说明：索引名称（带环境前缀）、索引类型、结果列表、分页信息、结果映射类、搜索配置、高亮字段列表
-            businessEsHandle.executeQuery(SpringUtil.getPrefixDistinctionName() + "-" + ProgramDocumentParamName.INDEX_NAME, ProgramDocumentParamName.INDEX_TYPE, list, pageInfo, ProgramListVo.class, searchSourceBuilder, Arrays.asList(ProgramDocumentParamName.TITLE, ProgramDocumentParamName.ACTOR));
+            // 12. 执行 ES 查询
+            businessEsHandle.executeQuery(SpringUtil.getPrefixDistinctionName() + "-" + ProgramDocumentParamName.INDEX_NAME, ProgramDocumentParamName.INDEX_TYPE, list, pageInfo, ProgramListVo.class, dsl.toJSONString(), Arrays.asList(ProgramDocumentParamName.TITLE, ProgramDocumentParamName.ACTOR));
 
-            // 15. 将 ES 查询结果的分页信息转换为统一的分页 VO 对象
+            // 13. 转换为统一分页 VO
             pageVo = PageUtil.convertPage(pageInfo, programListVo -> programListVo);
 
         } catch (Exception e) {
-            // 16. 异常处理：记录错误日志，返回空的分页结果
+            // 14. 异常处理：记录错误日志，返回空的分页结果
             log.error("search error", e);
         }
         return pageVo;
     }
 
     /**
-     * 高亮配置。
-     * 命中关键词用 <em>标签</em> 包裹，前端渲染标红。
+     * 高亮配置：命中关键词用 &lt;em&gt; 标签包裹。
      */
-    public HighlightBuilder getHighlightBuilder(List<String> fieldNameList) {
-        HighlightBuilder highlightBuilder = new HighlightBuilder();
+    public JSONObject highlightBuilder(List<String> fieldNameList) {
+        JSONObject fields = new JSONObject();
         for (String fieldName : fieldNameList) {
-            HighlightBuilder.Field highlightTitle = new HighlightBuilder.Field(fieldName);
-            highlightTitle.preTags("<em>");
-            highlightTitle.postTags("</em>");
-            highlightBuilder.field(highlightTitle);
+            // 每个字段用独立的数组实例：fastjson 对同一对象多次引用会序列化成 {"$ref": ...}，
+            // 而 ES 的 highlight.pre_tags 不接受引用语法，会导致查询报错。
+            JSONArray preTags = new JSONArray();
+            preTags.add("<em>");
+            JSONArray postTags = new JSONArray();
+            postTags.add("</em>");
+            JSONObject field = new JSONObject();
+            field.put("pre_tags", preTags);
+            field.put("post_tags", postTags);
+            fields.put(fieldName, field);
         }
-        return highlightBuilder;
+        JSONObject highlight = new JSONObject();
+        highlight.put("fields", fields);
+        return highlight;
     }
 
     /**
@@ -394,5 +391,60 @@ public class ProgramEs {
         } catch (Exception e) {
             log.error("deleteByProgramId error", e);
         }
+    }
+
+    private JSONObject termQuery(String field, Object value) {
+        JSONObject body = new JSONObject();
+        body.put(field, value);
+        JSONObject query = new JSONObject();
+        query.put("term", body);
+        return query;
+    }
+
+    private JSONObject matchQuery(String field, Object value) {
+        JSONObject body = new JSONObject();
+        body.put(field, value);
+        JSONObject query = new JSONObject();
+        query.put("match", body);
+        return query;
+    }
+
+    private JSONObject rangeQuery(String field, Date startTime, Date endTime) {
+        JSONObject bounds = new JSONObject();
+        // 用 epoch 毫秒，而不是 Date 对象：fastjson 会把 Date 序列化成 "yyyy-MM-dd HH:mm:ss"，
+        // ES 的 date 字段不接受该格式（会 400）。
+        if (Objects.nonNull(startTime)) {
+            bounds.put("gte", startTime.getTime());
+        }
+        if (Objects.nonNull(endTime)) {
+            bounds.put("lte", endTime.getTime());
+        }
+        JSONObject body = new JSONObject();
+        body.put(field, bounds);
+        JSONObject query = new JSONObject();
+        query.put("range", body);
+        return query;
+    }
+
+    private JSONObject matchAllQuery() {
+        JSONObject query = new JSONObject();
+        query.put("match_all", new JSONObject());
+        return query;
+    }
+
+    private JSONObject boolQuery(JSONArray must, JSONArray should, JSONArray mustNot) {
+        JSONObject bool = new JSONObject();
+        if (Objects.nonNull(must) && !must.isEmpty()) {
+            bool.put("must", must);
+        }
+        if (Objects.nonNull(should) && !should.isEmpty()) {
+            bool.put("should", should);
+        }
+        if (Objects.nonNull(mustNot) && !mustNot.isEmpty()) {
+            bool.put("must_not", mustNot);
+        }
+        JSONObject query = new JSONObject();
+        query.put("bool", bool);
+        return query;
     }
 }

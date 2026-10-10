@@ -6,19 +6,15 @@ import com.ticketflow.enums.RecordType;
  * 全局常量定义。
  * <p>
  * 关键常量说明：
- * TRACE_ID / SKY_WALKING_TRACE_ID — 链路追踪 ID
  * GRAY_PARAMETER / GRAY_FLAG_*   — 灰度标记
- * USER_ID / CODE                 — 链路传播中的 Header 名
+ * USER_ID / CODE                 — 链路传播中的业务 Header 名
  * SPRING_INJECT_PREFIX_DISTINCTION_NAME — Feign 服务名的动态前缀占位符
  * SERVER_GRAY                    — Nacos 元数据灰度标记占位符
+ *
+ * 说明：链路追踪上下文（trace_id/span_id）不再自研 Header 透传，
+ * 统一由 OpenTelemetry Java Agent 按 W3C Trace Context 标准注入 MDC。
  */
 public class Constant {
-
-    /**
-     * 链路id
-     *
-     */
-    public static final String TRACE_ID = "traceId";
 
     public static final String GRAY_FLAG_TRUE = "true";
 
@@ -63,7 +59,5 @@ public class Constant {
     public static final String CHANGE_STATUS = RecordType.CHANGE_STATUS.getValue();
 
     public static final String INCREASE = RecordType.INCREASE.getValue();
-
-    public static final String SKY_WALKING_TRACE_ID = "skyWalkingTraceId";
 
 }

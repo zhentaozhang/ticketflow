@@ -59,8 +59,29 @@ public enum PayChannel {
     }
 
     public static PayChannel getRc(Integer code) {
+        // code 为空时直接返回 null：这个方法会被“订单上可能没存渠道”的场景调到，
+        // 不能在这里 NPE（原实现是 code.intValue()，传 null 会抛）
+        if (code == null) {
+            return null;
+        }
         for (PayChannel re : PayChannel.values()) {
             if (re.code.intValue() == code.intValue()) {
+                return re;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 按渠道值（如 alipay / wx）查枚举。
+     * 前端传的是 value（见 OrderService#getPayDto 里的判断），而订单表里存的是 code。
+     */
+    public static PayChannel getByValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        for (PayChannel re : PayChannel.values()) {
+            if (re.value.equals(value)) {
                 return re;
             }
         }

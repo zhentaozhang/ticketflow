@@ -1,6 +1,5 @@
 package com.ticketflow.initialize.base;
 
-import jakarta.annotation.PostConstruct;
 
 import static com.ticketflow.initialize.constant.InitializeHandlerType.APPLICATION_POST_CONSTRUCT;
 

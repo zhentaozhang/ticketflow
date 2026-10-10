@@ -52,8 +52,15 @@ public class RedissonCommonAutoConfiguration {
                     redissonBaseProperties.getKeepAliveTime(),
                     redissonBaseProperties.getUnit(),
                     new LinkedBlockingQueue<>(redissonBaseProperties.getWorkQueueSize()),
-                    r -> new Thread(Thread.currentThread().getThreadGroup(), r,
-                            "redisson-thread-" + executeTaskThreadCount.getAndIncrement()));
+                    r -> {
+                        Thread t = new Thread(Thread.currentThread().getThreadGroup(), r,
+                                "redisson-thread-" + executeTaskThreadCount.getAndIncrement());
+                        t.setDaemon(true);
+                        return t;
+                    },
+                    // 有界队列 + 默认 AbortPolicy 在饱和时会抛 RejectedExecutionException，
+                    // 让 Redisson 的异步命令回调丢失/异常。CallerRunsPolicy 改为在调用线程执行，不丢回调。
+                    new ThreadPoolExecutor.CallerRunsPolicy());
             config.setExecutor(threadPoolExecutor);
         }
         return Redisson.create(config);

@@ -2,3 +2,9 @@
 orderPayNotifyUrl: https://your-ngrok-host.ngrok-free.app/ticketflow/order/order/alipay/notify
 # 支付成功页面
 orderPayReturnUrl: http://localhost:5173/order/paySuccess
+
+# 演示数据重置（PresentationOrderDataTask）：默认关闭，裸机本地显式打开；
+# 容器化环境由 docker-compose 显式 TICKETFLOW_DEMO_RESET_ENABLED=false 覆盖为关闭。
+ticketflow:
+  demo-reset:
+    enabled: true

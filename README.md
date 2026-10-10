@@ -6,6 +6,7 @@
   <p>
     <a href="#项目简介">项目简介</a> •
     <a href="#核心技术">核心技术</a> •
+    <a href="#性能基准">性能基准</a> •
     <a href="#系统架构">系统架构</a> •
     <a href="#技术栈">技术栈</a> •
     <a href="#数据库架构">数据库架构</a> •
@@ -24,6 +25,8 @@
     <img src="https://img.shields.io/badge/Kafka-3.6-231F20?logo=apachekafka&style=flat-square" alt="Kafka 3.6">
     <img src="https://img.shields.io/badge/ShardingSphere-5.3-4479A1?logo=apache&style=flat-square" alt="ShardingSphere 5.3">
     <img src="https://img.shields.io/badge/Elasticsearch-8.11-005571?logo=elasticsearch&style=flat-square" alt="Elasticsearch 8.11">
+    <img src="https://github.com/zhentaozhang/ticketflow/actions/workflows/ci.yml/badge.svg" alt="CI">
+    <img src="https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&style=flat-square" alt="Docker Compose">
   </p>
 </div>
 
@@ -129,6 +132,25 @@ sequenceDiagram
 
 ---
 
+## 性能基准
+
+下单链路提供 **V1 ~ V4** 四个演进版本，在**本地单机部署**（微服务与 MySQL / Redis / Kafka 同节点）下，使用 **Gatling 开环到达率模型**（恒定 QPS 灌入，60s 稳态窗口）压测下单接口，各版本成功率对比如下：
+
+| 版本 | 架构 | 80 QPS | 120 QPS | 160 QPS | 200 QPS |
+|------|------|--------|---------|---------|---------|
+| **V1** | 方法级粗锁 + 同步 RPC 建单 | 96.7% | 12.1% | 17.7% | 11.9% |
+| **V2** | 票档级双锁 + 同步 RPC 建单 | 85.3% | 34.5% | 64.7% | 13.3% |
+| **V3** | 本地锁模板 + 同步 RPC 建单 | 98.8% | 36.1% | 37.1% | 38.2% |
+| **V4** | 本地锁 + Lua 原子扣减 + Kafka 异步建单 | 100% | 100% | 81.0% | 66.5% |
+
+- V4 异步下单链路单机拐点约 **120–160 QPS**，120 QPS 内成功率接近 100%
+- 各版本并发模型：V1 整节目串行 → V2/V3 按票档拆锁 → V4 锁外异步解耦，性能逐级提升
+- 压测脚本与完整数据见 `benchmark/` 目录
+
+> 性能结果随部署环境与硬件配置变化，仅供参考。
+
+---
+
 ## 系统架构
 
 ```mermaid
@@ -192,6 +214,7 @@ flowchart TB
     %% ==================== 可观测性 ====================
     subgraph Observability[可观测性]
         PG[Prometheus + Grafana]:::monitor
+        JG[Jaeger<br/>OTel Trace]:::monitor
         BA[Spring Boot Admin]:::monitor
     end
 
@@ -255,7 +278,7 @@ flowchart TB
 | **搜索引擎** | Elasticsearch | 8.11.0 |
 | **认证授权** | Sa-Token + JWT | 1.43.0 |
 | **支付** | 支付宝 SDK | 4.38.197.ALL |
-| **监控** | Spring Boot Admin / Prometheus / Grafana | — |
+| **监控** | Spring Boot Admin / Prometheus / Grafana / OpenTelemetry + Jaeger（Trace） | — |
 | **API 文档** | Knife4j + SpringDoc OpenAPI 3 | 4.3.0 |
 
 ### 前端
@@ -411,34 +434,65 @@ flowchart LR
 | Java | 17+（推荐 Corretto） |
 | Maven | 3.8+ |
 | Node.js | 20+ |
-| npm / pnpm | npm 9+ / pnpm 9+ |
+| pnpm | 9+ |
 | Docker & Docker Compose | 最新稳定版 |
+| GNU Make（可选） | 用于 `make` 快捷命令 |
 
-### 启动基础设施
+### 一键容器化启动（推荐）
+
+> 全部微服务与基础设施容器化运行。`make up`（等价 `./docker/build.sh`）一条命令完成
+> **宿主机 Maven 打包 → 暂存 fat-jar（按容器网络改写 ShardingSphere 地址）→ 构建镜像 → compose 启动**。
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
+make up                  # 构建并启动整套系统
+make ps                  # 容器状态
+make logs SVC=program    # 查看某服务日志
+make down                # 停止（数据卷保留）
 ```
 
-启动后包含以下 9 个容器：
+不使用 `make` 时，可直接调用脚本：
+
+```bash
+./docker/build.sh           # 打包 + 构建镜像 + 启动
+./docker/build.sh images    # 只打包 + 构建镜像，不启动
+./docker/build.sh down      # 停止
+./docker/build.sh logs order
+```
+
+- 应用镜像统一由 `docker/app/Dockerfile` 构建（`build args: SVC / PORT`），基础镜像
+  `eclipse-temurin:17-jre-jammy`，以非 root 运行。
+- 容器化的业务服务（9 个）：`gateway`、`user`、`base-data`、`customize`、`program`、`order`、`pay`、`admin`、`migrate`。
+- 支付密钥不入库：首次由 `docker/app/pay.env.example` 生成 `docker/app/pay.env`（已 gitignore），真实密钥请替换该文件。
+- Trace 可选：`./docker/otel/download-agent.sh` 下载 agent 后，compose 会挂载到容器 `/otel`。
+
+### 启动基础设施（裸机开发模式）
+
+> `docker compose` 已升级为“基础设施 + 全部业务服务”的统一编排；若只在本机 IDE 跑应用、仅把中间件放容器：
+
+```bash
+docker compose -f docker/docker-compose.yml up -d mysql redis kafka nacos elasticsearch sentinel
+```
+
+基础设施镜像与端口：
 
 | 服务 | 镜像 | 端口 | 账号/密码 |
 |------|------|------|----------|
 | **MySQL** | mysql:8.0 | 3306 | `root` / `root` |
 | **Redis 7** | redis:7 | 6379 | 无密码 |
-| **Kafka** (KRaft) | bitnami/kafka:3.6 | 9092 | 无认证 |
+| **Kafka** (KRaft) | bitnami/kafka:3.6 | 9092（宿主 19092） | 无认证 |
 | **Nacos** | nacos/nacos-server:v2.4.0 | 8848 (9848) | 无认证（单机模式） |
 | **Elasticsearch** | docker.elastic.co/elasticsearch/elasticsearch:8.11.0 | 9200 (9300) | 无认证 |
 | **Sentinel** | bladex/sentinel-dashboard:1.8.8 | 8082 | `sentinel` / `sentinel` |
 | **Prometheus** | prom/prometheus:v2.53.0 | 9090 | 无认证 |
 | **Grafana** | grafana/grafana:11.0.0 | 3000 | `admin` / `admin` |
-| **Seata** | seataio/seata-server:1.8.0 | 8091 | 无认证 |
+| **Jaeger** | jaegertracing/all-in-one:1.76.0 | 16686 / 4318 | 无认证 |
 
-> Docker 数据卷持久化：`docker_mysql-data`, `docker_redis-data`, `docker_kafka-data`, `docker_nacos-data`, `docker_es-data`, `docker_prometheus-data`, `docker_grafana-data`, `docker_seata-data`
+> 数据卷：`docker_mysql-data`、`docker_redis-data`、`docker_kafka-data`、`docker_nacos-data`、`docker_es-data`、`docker_prometheus-data`、`docker_grafana-data`。
 
 ### 构建后端
 
 ```bash
+make build                          # 等价 mvn -DskipTests -T 4 package
 # 全量构建（-T 4 启用 4 线程并行编译）
 mvn clean install -DskipTests -T 4
 
@@ -480,8 +534,8 @@ curl -s http://localhost:6085/actuator/health
 ```bash
 # 用户端 (Vue 3)
 cd vue3
-npm install --legacy-peer-deps
-npm run dev
+pnpm install
+pnpm run dev
 # → http://localhost:5173
 
 # 管理端 (Vben Admin)
@@ -490,6 +544,18 @@ pnpm install
 pnpm dev:ele
 # → http://localhost:5555
 ```
+
+### 常用命令（Makefile）
+
+| 命令 | 说明 |
+|------|------|
+| `make up` / `make images` / `make down` | 启动整套 / 只构建镜像 / 停止 |
+| `make ps` / `make logs SVC=program` / `make restart SVC=order` | 状态 / 日志 / 重启 |
+| `make build` / `make test` / `make itest` | 后端打包 / 单元测试 / 集成测试 |
+| `make front-build` | 前端构建 |
+| `make lint` / `make ci` / `make clean` | 静态门禁（编译 + Checkstyle，命中即失败）/ 本地等价 CI / 清理 |
+
+> `make help` 可查看全部目标。
 
 ### 访问入口一览
 
@@ -503,6 +569,7 @@ pnpm dev:ele
 | Sentinel | `http://localhost:8082` | 限流熔断控制台 |
 | Prometheus | `http://localhost:9090` | 指标采集 |
 | Grafana | `http://localhost:3000` | 监控看板 |
+| Jaeger | `http://localhost:16686` | 链路追踪（Trace） |
 | Spring Boot Admin | `http://localhost:10082` | 服务健康监控（admin/admin） |
 
 ---
@@ -541,6 +608,68 @@ Apifox 支持通过 URL 直接导入 OpenAPI 格式的接口文档。各服务�
 
 ---
 
+## 工程化与交付
+
+### 持续集成（GitHub Actions）
+
+`.github/workflows/ci.yml`，push 到 `master` 或发起 PR 时触发：
+
+| Job | 内容 |
+|-----|------|
+| **Backend unit tests** | `mvn -B test`（全部后端模块单元测试） |
+| **Integration tests (Testcontainers)** | `mvn -B verify -pl order,program -am` |
+| **Build application images** | `bash ./docker/build.sh images`（验证 Dockerfile / build.sh / patch-jar 链路） |
+| **Frontend build** | vue3 与 admin（pnpm + `--frozen-lockfile`） |
+| **Static analysis** | Checkstyle + SpotBugs（强制门禁，命中即失败；豁免见 `config/spotbugs/exclude.xml`） |
+
+本地等价校验：`make ci`、`make lint`。
+
+### 持续交付（GitHub Actions + 本地 kind）
+
+`.github/workflows/cd.yml`：测试 → 构建镜像 → Trivy 扫描 → 推送 GHCR（tag=commit SHA）→ 部署 → 发布验证（失败自动回滚）。部署以 `workflow_dispatch + K8S_DEPLOY_ENABLED` 双重开关保护。本地等价路径（已在 kind 上端到端验证）：
+
+```bash
+make scan       # 镜像漏洞扫描（Trivy, HIGH/CRITICAL）；SBOM 由 CI 产出
+make cd         # 构建 → 载入 kind → 滚动更新 → 发布验证（失败自动回滚）
+make verify     # 发布验证：rollout + 镜像 tag + gateway health/服务发现
+make rollback   # 回滚到上一版本（kubectl rollout undo）
+```
+
+> **镜像归属**：`k8s/` 清单里的 `image:` 只是 bootstrap / 本地默认值；运行时镜像由 CD 用 `kubectl set image`（tag=commit SHA）**独占管理**，回滚用 `kubectl rollout undo`。回滚是命令式操作，不会更新 `last-applied-configuration` 注解，因此**不要再对已部署对象执行 `kubectl apply -k` 覆盖**（如需声明式管理镜像，改用 `kustomize edit set image` + apply，或接入 GitOps）。
+
+同时提供等价的 `Jenkinsfile`（Checkout → Test → Static analysis → Build → Scan → Push → Deploy → Verify）。
+
+### 云原生部署（K8s）
+
+`k8s/` 提供 gateway / order / program 三服务的 Kustomize 清单（Deployment / Service / Ingress / HPA，三分 Probe、资源限额、ConfigMap / Secret 模板）：
+
+```bash
+kind create cluster --name ticketflow
+bash ./docker/build.sh images
+kind load docker-image ticketflow/program:0.0.1-SNAPSHOT --name ticketflow
+kubectl apply -k k8s/overlays/dev
+```
+
+### 效能工具 tfctl
+
+`tools/tfctl/tfctl.py`（零依赖 Python）聚合 Prometheus / Kafka / Maven / benchmark 数据源：
+
+```bash
+make tfctl ARGS=diag    # 下单链路体检（存活/建单/扣减/端到端落库率/库存守恒）
+make tfctl ARGS=lag     # Kafka 消费积压
+make tfctl ARGS=deps    # 依赖冲突/重复
+```
+
+### 可观测性
+
+- **指标**：Micrometer → Prometheus → Grafana（provisioning as code）
+- **链路**：OpenTelemetry Java Agent → Jaeger（声明式配置丢弃 `/actuator/*` 噪音 span）
+- **日志**：Loki + Promtail（采集宿主机挂载的应用日志，traceId 可跳转 Jaeger）
+- **告警**：Prometheus 规则（SLO 分级 P0/P1/P2）→ Alertmanager → webhook
+- 本地验证：`make sink` 另开终端 + `make alert-test` 可跑通告警闭环
+
+---
+
 ## 项目结构
 
 ```
@@ -566,7 +695,9 @@ ticketflow/
 ├── ticketflow-thread-pool-framework/          # 线程池透传
 ├── ticketflow-captcha-manage-framework/       # 验证码框架
 ├── sql/                                       # 数据库 DDL
-├── docker/                                    # Docker Compose
+├── docker/                                    # Compose 编排 + 统一 Dockerfile + OTel 接入
+├── Makefile                                   # 常用命令（构建 / 测试 / 容器）
+├── .github/workflows/                         # GitHub Actions CI
 ├── vue3/                                      # 用户端前端
 ├── ticketflow-front-manage/                   # 管理端前端
 └── benchmark/                                 # 压测
@@ -584,6 +715,6 @@ ticketflow/
 | 超时取消 | 延迟队列 | 基于 Redisson 实现，避免轮询数据库 |
 | 分布式事务 | 最终一致性 + 补偿 | 避免 Seata 带来的性能开销，延迟队列兜底 |
 | ID 生成 | 雪花算法 + 基因法 | 全局唯一 + 单调递增 + 天然支持分片路由 |
-| 可观测性 | Prometheus + Grafana + Spring Boot Admin | 指标采集、可视化监控、服务健康检查 |
+| 可观测性 | Prometheus + Grafana + Spring Boot Admin + OpenTelemetry（OTLP→Jaeger） | 指标采集、可视化监控、服务健康检查、全链路 Trace |
 
 

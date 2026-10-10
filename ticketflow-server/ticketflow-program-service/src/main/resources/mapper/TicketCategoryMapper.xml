@@ -89,20 +89,4 @@
           and program_id = #{programId,jdbcType=BIGINT}
           and <![CDATA[remain_number + #{amount,jdbcType=BIGINT} <= total_number]]>
     </update>
-
-    <!--
-        批量扣减多个票档的库存（V1-V3 版本订单使用，V4 已不再调用）。
-
-        直接用 UPDATE 更新，不改 seat 表的 sellStatus（没有 LOCK 中间态）。
-        循环每个票档执行一次 UPDATE。
-    -->
-    <update id="batchUpdateRemainNumber">
-        <foreach collection="ticketCategoryCountDtoList" item="ticketCategoryCountDto" index="index">
-            update
-                d_ticket_category
-            set remain_number = remain_number - #{ticketCategoryCountDto.count,jdbcType=BIGINT}
-            where id = #{ticketCategoryCountDto.ticketCategoryId,jdbcType=BIGINT}
-            and program_id = #{programId,jdbcType=BIGINT}
-        </foreach>
-    </update>
 </mapper>

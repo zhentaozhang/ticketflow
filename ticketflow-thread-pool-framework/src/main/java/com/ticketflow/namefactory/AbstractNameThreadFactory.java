@@ -34,9 +34,9 @@ public abstract class AbstractNameThreadFactory implements ThreadFactory {
     public Thread newThread(Runnable r) {
         String name = namePrefix + threadNum.getAndIncrement();
         Thread t = new Thread(group, r, name, 0);
-        if (t.isDaemon()) {
-            t.setDaemon(false);
-        }
+        // 异步任务线程统一设为守护线程：否则线程池未显式 shutdown 时会阻止 JVM 退出。
+        // 需要优雅收尾的池应自行注册 shutdown hook（见 BusinessThreadPool）。
+        t.setDaemon(true);
         if (t.getPriority() != Thread.NORM_PRIORITY) {
             t.setPriority(Thread.NORM_PRIORITY);
         }

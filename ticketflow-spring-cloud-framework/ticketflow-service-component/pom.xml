@@ -69,16 +69,6 @@
             <version>${revision}</version>
         </dependency>
         <dependency>
-            <groupId>org.apache.skywalking</groupId>
-            <artifactId>apm-toolkit-trace</artifactId>
-            <version>${skywalking.apm-toolkit-trace.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.skywalking</groupId>
-            <artifactId>apm-toolkit-log4j-2.x</artifactId>
-            <version>${skywalking.apm-toolkit-log4j-2.x.version}</version>
-        </dependency>
-        <dependency>
             <groupId>cn.dev33</groupId>
             <artifactId>sa-token-spring-boot3-starter</artifactId>
             <version>${sa-token.version}</version>

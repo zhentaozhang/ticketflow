@@ -33,12 +33,15 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_FAILURE_RESULT;
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_SUCCESS_RESULT;
@@ -52,6 +55,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -75,6 +80,9 @@ class PayServiceTest {
     @Mock
     private UidGenerator uidGenerator;
 
+    @Mock
+    private TransactionTemplate transactionTemplate;
+
     @InjectMocks
     private PayService payService;
 
@@ -83,6 +91,12 @@ class PayServiceTest {
         when(payStrategyContext.get(anyString())).thenReturn(payStrategyHandler);
         when(uidGenerator.getUid()).thenReturn(1000L);
         when(refundBillMapper.selectList(any(LambdaQueryWrapper.class))).thenReturn(new ArrayList<>());
+        // TransactionTemplate 在单测里直接执行回调，等价于同步事务
+        doAnswer(invocation -> {
+            Consumer<TransactionStatus> action = invocation.getArgument(0);
+            action.accept(mock(TransactionStatus.class));
+            return null;
+        }).when(transactionTemplate).executeWithoutResult(any());
     }
 
     private PayBill payBill(Integer status) {
@@ -367,6 +381,29 @@ class PayServiceTest {
         verify(payBillMapper).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
     }
 
+    @Test
+    void tradeCheck_已退款终态_渠道返回PAY不回退() {
+        // 支付宝退款后 trade_status 仍可能映射为 PAY，终态 REFUND 不允许被回写
+        when(payStrategyHandler.queryTrade(anyString()))
+                .thenReturn(tradeResult(true, PayBillStatus.PAY.getCode(), new BigDecimal("100.00")));
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.REFUND.getCode()));
+
+        payService.tradeCheck(tradeCheckDto());
+
+        verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+    }
+
+    @Test
+    void tradeCheck_已取消终态_渠道返回PAY不回退() {
+        when(payStrategyHandler.queryTrade(anyString()))
+                .thenReturn(tradeResult(true, PayBillStatus.PAY.getCode(), new BigDecimal("100.00")));
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.CANCEL.getCode()));
+
+        payService.tradeCheck(tradeCheckDto());
+
+        verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
+    }
+
     // ==================== refund ====================
 
     private RefundDto refundDto() {
@@ -461,6 +498,22 @@ class PayServiceTest {
         // 已确认累计 60 + 本次成功 40 = 100 达全额，置 REFUND
         verify(payBillMapper).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
         verify(refundBillMapper).insert(any(RefundBill.class));
+    }
+
+    @Test
+    void refund_同幂等键重复_命中已有退款单不重复调用渠道() {
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
+        RefundDto dto = refundDto();
+        dto.setRefundRequestId("closed-refund:20260804000000000001:50.00");
+        RefundBill existed = new RefundBill();
+        existed.setOutRefundNo(dto.getRefundRequestId());
+        when(refundBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(existed);
+
+        String outRefundNo = payService.refund(dto);
+
+        assertEquals("closed-refund:20260804000000000001:50.00", outRefundNo);
+        verify(payStrategyHandler, never()).refund(anyString(), any(), any(), anyString(), anyString());
+        verify(refundBillMapper, never()).insert(any(RefundBill.class));
     }
 
     @Test

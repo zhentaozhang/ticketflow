@@ -1,0 +1,47 @@
+# 本地 kind：中间件在宿主机 Docker Compose 中。
+# 用 ExternalName Service 把固定名字指到 host.docker.internal（kind 节点由 Docker Desktop 托管，
+# 该名字在 Pod 内可解析），从而让：
+#   * 只能用环境变量覆盖的服务，走 ConfigMap 里的 host.docker.internal；
+#   * ShardingSphere 在镜像构建期被 patch-jar.py 固定为 "mysql" 的主机名，靠这里解析。
+#
+# 注意：这是本地开发做法。真实集群应把中间件作为集群内 Service，或由平台提供解析。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+spec:
+  type: ExternalName
+  externalName: host.docker.internal
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  type: ExternalName
+  externalName: host.docker.internal
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nacos
+spec:
+  type: ExternalName
+  externalName: host.docker.internal
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+spec:
+  type: ExternalName
+  externalName: host.docker.internal
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+spec:
+  type: ExternalName
+  externalName: host.docker.internal

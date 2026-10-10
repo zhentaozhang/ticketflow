@@ -12,7 +12,6 @@ import com.ticketflow.dto.OrderPayDto;
 import com.ticketflow.dto.OrderSimpleListDto;
 import com.ticketflow.dto.ProgramGetDto;
 import com.ticketflow.properties.ApiVerify;
-import com.ticketflow.scheduletask.PresentationOrderDataTask;
 import com.ticketflow.scheduletask.ReconciliationTask;
 import com.ticketflow.service.OrderService;
 import com.ticketflow.service.OrderTaskService;
@@ -48,9 +47,6 @@ public class OrderController {
     
     @Autowired
     private ReconciliationTask reconciliationTask;
-    
-    @Autowired
-    private PresentationOrderDataTask orderDataTask;
     
     @Autowired
     private ApiVerify apiVerify;
@@ -135,12 +131,5 @@ public class OrderController {
     @PostMapping(value = "/simple/list")
     public ApiResponse<List<OrderListVo>> simpleList(@Valid @RequestBody OrderSimpleListDto orderSimpleListDto) {
         return ApiResponse.ok(orderService.simpleList(orderSimpleListDto));
-    }
-    
-    @Operation(summary  = "测试")
-    @PostMapping(value = "/test")
-    public ApiResponse<Void> test() {
-        orderDataTask.executeTask();
-        return ApiResponse.ok();
     }
 }

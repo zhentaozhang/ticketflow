@@ -1,0 +1,193 @@
+# 核心三服务 Deployment（gateway / order / program）。
+#
+# 设计要点：
+#   * 三个 Probe 分工：startupProbe 兜住 JVM 冷启动（不设会让 liveness 反复杀慢启动 Pod）、
+#     readinessProbe 控制是否接流量、livenessProbe 检测死锁。
+#   * resources.limits.memory 必须大于 -Xmx + MaxMetaspace（否则 Pod 被 OOMKilled，exit 137）。
+#   * 用 ConfigMap/Secret 注入环境变量；不写死镜像 tag（CD 阶段用 kubectl set image 覆盖）。
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels:
+    app: gateway
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: ticketflow/gateway:0.0.1-SNAPSHOT
+          ports:
+            - containerPort: 6085
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: app-secret
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: gateway
+            - name: SPRING_PROFILES_ACTIVE
+              value: pro
+            - name: JAVA_OPTS
+              value: "-Xms192m -Xmx384m -XX:MaxMetaspaceSize=256m"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "896Mi"
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 6085
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 6085
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 6085
+            periodSeconds: 15
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order
+  labels:
+    app: order
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: order
+  template:
+    metadata:
+      labels:
+        app: order
+    spec:
+      containers:
+        - name: order
+          image: ticketflow/order:0.0.1-SNAPSHOT
+          ports:
+            - containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: app-secret
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: order
+            - name: SPRING_PROFILES_ACTIVE
+              value: local
+            - name: JAVA_OPTS
+              value: "-Xms256m -Xmx512m -XX:MaxMetaspaceSize=300m"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "640Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            failureThreshold: 36
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8081
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8081
+            periodSeconds: 15
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: program
+  labels:
+    app: program
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: program
+  template:
+    metadata:
+      labels:
+        app: program
+    spec:
+      containers:
+        - name: program
+          image: ticketflow/program:0.0.1-SNAPSHOT
+          ports:
+            - containerPort: 6086
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: app-secret
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: program
+            - name: SPRING_PROFILES_ACTIVE
+              value: local
+            - name: JAVA_OPTS
+              value: "-Xms256m -Xmx512m -XX:MaxMetaspaceSize=300m"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "640Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 6086
+            failureThreshold: 36
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 6086
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 6086
+            periodSeconds: 15

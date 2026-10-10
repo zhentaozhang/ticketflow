@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TicketFlow SpotBugs 排除过滤器（缺陷基线）
+
+  原则：
+    * 只排除「已评估：有意为之、或属既有历史债、改动风险大于收益」的检测项；
+    * 逐条写明原因，不按文件大范围排除，保证新代码仍被检查；
+    * 新增豁免必须附原因，禁止为了绿灯清空门禁。
+
+  本次把 SpotBugs 从「报告模式」收紧为「强制门禁（High 阈值）」时，
+  对既有 High 告警做了分类：核心公共模块（ticketflow-common）的真实问题已直接修复
+  （默认编码 / 拆箱解析），无法低成本安全修复的按下表基线豁免。
+-->
+<FindBugsFilter>
+    <!-- ① 设计所需：ApplicationContextInitializer 回调里写入 static 上下文 -->
+    <Match>
+        <Class name="com.ticketflow.core.SpringUtil"/>
+        <Bug pattern="ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"/>
+    </Match>
+
+    <!-- ② 设计所需：RSA 公私钥为 public static（历史用法，允许外部赋值），加 final 会破坏 API -->
+    <Match>
+        <Class name="com.ticketflow.util.RsaSignTool"/>
+        <Bug pattern="MS_SHOULD_BE_FINAL"/>
+    </Match>
+
+    <!-- ③ SpEL 锁 key：MethodBasedEvaluationContext 的 root 故意传 null（表达式用 #参数名，不用 root） -->
+    <Match>
+        <Class name="com.ticketflow.lockinfo.AbstractLockInfoHandle"/>
+        <Bug pattern="NP_NONNULL_PARAM_VIOLATION"/>
+    </Match>
+
+    <!--
+      ④ 以下为既有历史债（集中在 vendored 验证码模块 ticketflow-captcha-*）：
+         属第三方派生代码，改动风险大于收益，先基线记录，后续如重构该模块再清理。
+    -->
+    <!-- 每次 new Random 只用一次：验证码随机数，功能正确，仅随机性质量可优化 -->
+    <Match>
+        <Class name="com.ticketflow.captcha.util.RandomUtils"/>
+        <Bug pattern="DMI_RANDOM_USED_ONLY_ONCE"/>
+    </Match>
+    <Match>
+        <Class name="com.ticketflow.captcha.service.impl.BlockPuzzleCaptchaServiceImpl"/>
+        <Bug pattern="DMI_RANDOM_USED_ONLY_ONCE"/>
+    </Match>
+    <Match>
+        <Class name="com.ticketflow.loadbalance.GrayReactiveLoadBalancer"/>
+        <Bug pattern="DMI_RANDOM_USED_ONLY_ONCE"/>
+    </Match>
+    <!-- 未显式指定字符集：验证码内部编解码，历史行为，改动需回归验证码全流程 -->
+    <Match>
+        <Class name="com.ticketflow.captcha.util.AesUtil"/>
+        <Bug pattern="DM_DEFAULT_ENCODING"/>
+    </Match>
+    <!-- 验证码配置字段非 final：外部可能赋值 -->
+    <Match>
+        <Class name="com.ticketflow.captcha.service.impl.ClickWordCaptchaServiceImpl"/>
+        <Bug pattern="MS_SHOULD_BE_FINAL"/>
+    </Match>
+    <!-- CaptchaVO 为 Serializable 但含非瞬态非可序列化字段：验证码 VO 不参与序列化传输 -->
+    <Match>
+        <Class name="com.ticketflow.captcha.model.vo.CaptchaVO"/>
+        <Bug pattern="SE_BAD_FIELD"/>
+    </Match>
+</FindBugsFilter>

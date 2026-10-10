@@ -57,12 +57,8 @@ public class AllRuleService {
         // 只检查状态为 RUN（或未设置状态视为启用）的规则
         depthRuleDtoList = depthRuleDtoList.stream().filter(depthRuleDto -> {
             if (depthRuleDto.getStatus() != null) {
-                if (depthRuleDto.getStatus().equals(RuleStatus.RUN.getCode())) {
-                    return true;
-                }else {
-                    return false;
-                }
-            }else {
+                return depthRuleDto.getStatus().equals(RuleStatus.RUN.getCode());
+            } else {
                 return true;
             }
         }).collect(Collectors.toList());

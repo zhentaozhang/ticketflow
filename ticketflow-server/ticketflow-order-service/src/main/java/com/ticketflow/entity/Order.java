@@ -50,6 +50,15 @@ public class Order extends BaseTableData implements Serializable {
 
     /** 1:未支付 2:已取消 3:已支付 4:已退单 */
     private Integer orderStatus;
+
+    /**
+     * 支付对账状态（取值见 {@link com.ticketflow.enums.ReconciliationStatus}）。
+     * <p>
+     * 和 {@link #reconciliationStatus} 分开：那个是“Redis 流水 ↔ DB 订单”的库存对账状态，
+     * 这里是“渠道账单 ↔ DB 订单”的支付对账状态。两个流程关注的不是同一件事，
+     * 共用一个字段会互相把对方标记成已完成。
+     */
+    private Integer payReconciliationStatus;
     
     /** 1:未对账 -1:对账完成有问题 2:对账完成没有问题 3:对账有问题处理完毕 */
     private Integer reconciliationStatus;

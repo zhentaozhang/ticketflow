@@ -5,7 +5,6 @@ import io.swagger.v3.oas.annotations.media.Schema.RequiredMode;
 import jakarta.validation.constraints.NotNull;
 import lombok.Data;
 
-import java.util.Collection;
 
 /**
  * 节目票档集合 dto

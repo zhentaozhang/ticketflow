@@ -1,6 +1,5 @@
 package com.ticketflow.initialize.base;
 
-import org.springframework.beans.factory.InitializingBean;
 
 import static com.ticketflow.initialize.constant.InitializeHandlerType.APPLICATION_INITIALIZING_BEAN;
 

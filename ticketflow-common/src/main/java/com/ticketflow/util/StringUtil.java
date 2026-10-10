@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -51,7 +52,7 @@ public class StringUtil {
 				while ((i = is.read()) != -1) {
 					baos.write(i);
 				}
-				result = baos.toString();
+				result = baos.toString(StandardCharsets.UTF_8);
 			}
 		}catch(IOException e) {
 			throw new RuntimeException("流转换为字符串失败！");

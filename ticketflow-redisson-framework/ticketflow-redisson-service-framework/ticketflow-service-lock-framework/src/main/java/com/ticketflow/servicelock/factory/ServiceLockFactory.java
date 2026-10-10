@@ -7,18 +7,18 @@ import lombok.AllArgsConstructor;
 
 /**
  * 分布式锁类型工厂——策略模式。
- *
+ * <p>
  * 根据 LockType 从 ManageLocker 缓存中选取对应的 ServiceLocker 实现。
  * 调用方（@ServiceLock 切面 / ServiceLockTool）只需传入 LockType，
  * 无需关心锁的具体实现（Fair/Reentrant/Read/Write）。
  **/
 @AllArgsConstructor
 public class ServiceLockFactory {
-    
-    private final ManageLocker manageLocker;
-    
 
-    public ServiceLocker getLock(LockType lockType){
+    private final ManageLocker manageLocker;
+
+
+    public ServiceLocker getLock(LockType lockType) {
         ServiceLocker lock;
         switch (lockType) {
             case Fair:

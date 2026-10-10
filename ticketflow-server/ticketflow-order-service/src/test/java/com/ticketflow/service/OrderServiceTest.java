@@ -5,6 +5,8 @@ import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.baidu.fsg.uid.UidGenerator;
 import com.ticketflow.client.PayClient;
 import com.ticketflow.client.ProgramClient;
@@ -15,6 +17,7 @@ import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.core.SpringUtil;
 import com.ticketflow.domain.OrderCreateDomain;
 import com.ticketflow.domain.OrderCreateMq;
+import com.ticketflow.domain.OrderTraceResult;
 import com.ticketflow.domain.SeatIdAndTicketUserIdDomain;
 import com.ticketflow.dto.*;
 import com.ticketflow.entity.Order;
@@ -36,19 +39,34 @@ import com.ticketflow.service.properties.OrderProperties;
 import com.ticketflow.util.ServiceLockTool;
 import com.ticketflow.vo.*;
 import jakarta.servlet.http.HttpServletRequest;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.redisson.api.RLock;
+import org.springframework.beans.BeanUtils;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_FAILURE_RESULT;
 import static com.ticketflow.constant.Constant.ALIPAY_NOTIFY_SUCCESS_RESULT;
@@ -112,7 +130,7 @@ class OrderServiceTest {
     }
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         orderService = new OrderService();
         orderServiceMock = mock(OrderService.class);
         uidGenerator = mock(UidGenerator.class);
@@ -133,8 +151,16 @@ class OrderServiceTest {
         orderTicketUserRecordMapper = mock(OrderTicketUserRecordMapper.class);
         orderProgramMapper = mock(OrderProgramMapper.class);
         delayOperateProgramDataSend = mock(DelayOperateProgramDataSend.class);
+        // createMq 用 TransactionTemplate 显式圈建单事务；单测里直接执行回调，等价于无事务语义
+        TransactionTemplate transactionTemplate = mock(TransactionTemplate.class);
+        when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+            TransactionCallback<?> callback = invocation.getArgument(0);
+            return callback.doInTransaction(mock(TransactionStatus.class));
+        });
         lock = mock(RLock.class);
         when(serviceLockTool.getLock(any(), anyString(), any())).thenReturn(lock);
+        // 回调里的订单锁改成带等待上限的 tryLock：默认拿得到锁，走原有的处理链路
+        when(lock.tryLock(anyLong(), any(TimeUnit.class))).thenReturn(true);
 
         ReflectionTestUtils.setField(orderService, "uidGenerator", uidGenerator);
         ReflectionTestUtils.setField(orderService, "orderMapper", orderMapper);
@@ -152,6 +178,7 @@ class OrderServiceTest {
         ReflectionTestUtils.setField(orderService, "orderTicketUserRecordMapper", orderTicketUserRecordMapper);
         ReflectionTestUtils.setField(orderService, "orderProgramMapper", orderProgramMapper);
         ReflectionTestUtils.setField(orderService, "delayOperateProgramDataSend", delayOperateProgramDataSend);
+        ReflectionTestUtils.setField(orderService, "transactionTemplate", transactionTemplate);
     }
 
     // ==================== 创建 doCreate/create/createByMq ====================
@@ -213,6 +240,37 @@ class OrderServiceTest {
         verify(orderProgramMapper).insert(orderProgramCaptor.capture());
         assertEquals(ORDER_NUMBER, orderProgramCaptor.getValue().getOrderNumber());
 
+        verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(1L));
+    }
+
+    @Test
+    void doCreate_同步器激活时计数延迟到事务提交后() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            String orderNumber = orderService.doCreate(buildCreateDomain());
+            assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+            // 同步器激活：incrBy 不应立即执行，而是注册到 afterCommit 回调（事务提交后）
+            verify(redisCache, never()).incrBy(any(), anyLong());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
+    void create_无事务上下文_计数立即累加() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
+        OrderCreateDto dto = new OrderCreateDto();
+        BeanUtils.copyProperties(buildCreateDomain(), dto);
+        String orderNumber = orderService.create(dto);
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+        // 无事务上下文（纯 Mockito 无 Spring 代理）：走回退分支立即累加，等价原行为
         verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(1L));
     }
 
@@ -538,12 +596,72 @@ class OrderServiceTest {
     }
 
     @Test
-    void updateOrderRelatedData更新主订单失败时抛ORDER_CANAL_ERROR() {
+    void updateOrderRelatedData支付时V4节目服务返回失败不抛异常且Lua仍执行() {
         stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class)))
+                .thenReturn(ApiResponse.error(500, "program服务不可用"));
+
+        // 事务外尽力而为：Feign 失败不阻断订单状态流转，Lua（Redis 权威）照常执行
+        assertDoesNotThrow(() -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
+
+        ArgumentCaptor<Order> updateOrderCaptor = ArgumentCaptor.forClass(Order.class);
+        verify(orderMapper).update(updateOrderCaptor.capture(), any(Wrapper.class));
+        assertEquals(OrderStatus.PAY.getCode(), updateOrderCaptor.getValue().getOrderStatus());
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+    }
+
+    @Test
+    void updateOrderRelatedData支付时V4节目服务抛异常不抛异常且Lua仍执行() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        when(programClient.operateProgramData(any(ProgramOperateDataDto.class)))
+                .thenThrow(new RuntimeException("program服务异常"));
+
+        assertDoesNotThrow(() -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
+
+        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+    }
+
+    @Test
+    void updateOrderRelatedData同步器激活时数据同步延迟到事务提交后() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
+            // 同步器激活：incrBy/Lua 不应立即执行，而是注册到 afterCommit 回调（事务提交后）
+            verify(redisCache, never()).incrBy(any(), anyLong());
+            verify(orderProgramCacheResolutionOperate, never()).programCacheReverseOperate(anyList(), any(Object[].class));
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
+    void updateOrderRelatedData主订单条件更新未命中时抛ORDER_STATUS_CHANGED() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        // 影响行数为 0 = CAS 未命中：状态已被另一条流程改掉（并发仲裁输了），属于正常结果不是故障
         when(orderMapper.update(any(Order.class), any(Wrapper.class))).thenReturn(0);
         TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
                 () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL));
-        assertEquals(BaseCode.ORDER_CANAL_ERROR.getCode(), e.getCode());
+        assertEquals(BaseCode.ORDER_STATUS_CHANGED.getCode(), e.getCode());
+    }
+
+    @Test
+    void updateOrderRelatedData主订单更新带前置状态条件() {
+        // Lambda 条件在生成 SQL 时才解析列名，纯单测需要先初始化 MP 的 TableInfo 缓存
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""), Order.class);
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
+        orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
+
+        ArgumentCaptor<Wrapper<Order>> wrapperCaptor = ArgumentCaptor.forClass(Wrapper.class);
+        verify(orderMapper).update(any(Order.class), wrapperCaptor.capture());
+        String sqlSegment = wrapperCaptor.getValue().getSqlSegment();
+        // 条件更新：WHERE 需要同时带订单号（定位）和前置状态（CAS 期望值）
+        assertTrue(sqlSegment.contains("order_number"), sqlSegment);
+        assertTrue(sqlSegment.contains("order_status"), sqlSegment);
     }
 
     @Test
@@ -553,6 +671,148 @@ class OrderServiceTest {
         TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
                 () -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL));
         assertEquals(BaseCode.ORDER_CANAL_ERROR.getCode(), e.getCode());
+    }
+
+    // ==================== 并发竞态：支付 / 取消同时到达 ====================
+
+    /**
+     * 真并发测试：两个线程同时走“支付”和“取消”，它们都先读到“未支付”，然后再去执行条件更新（CAS）。
+     * <p>
+     * 这里用一个共享状态模拟“数据库那一行上的条件更新”语义：
+     * 只有当前还是“未支付”的才改得动（影响行数 1），后到的拿到 0 行。
+     * <p>
+     * 它要证明的是：<b>即使锁完全不起作用（这里直接调方法，根本没有锁），
+     * 也只有一个赢家能完成迁移，而输家一步资源动作都不会做。</b>
+     * MySQL 行锁那一半是数据库的契约（要真库的 IT 才能端到端证明），
+     * 这里验证的是应用层不会把“两个都当赢家”。
+     */
+    @Test
+    void 支付和取消同时到达时只有一个能完成状态迁移() throws Exception {
+        AtomicReference<Integer> statusInDb = new AtomicReference<>(OrderStatus.NO_PAY.getCode());
+        CyclicBarrier bothRead = new CyclicBarrier(2);
+        when(orderMapper.selectOne(any(Wrapper.class))).thenAnswer(invocation -> {
+            Integer current = statusInDb.get();
+            Order snapshot = buildOrder(current);
+            if (Objects.equals(current, OrderStatus.NO_PAY.getCode())) {
+                // 把“读到当前状态”这一瞬间对齐：两个线程都拿到未支付才开始改，
+                // 这才是 CAS 真正要解决的场景（否则一方跑完，另一方根本不会进到争抢）
+                bothRead.await(5, TimeUnit.SECONDS);
+            }
+            return snapshot;
+        });
+        when(orderTicketUserMapper.selectList(any(Wrapper.class))).thenReturn(buildOrderTicketUserList());
+        when(orderTicketUserMapper.update(any(OrderTicketUser.class), any(Wrapper.class))).thenReturn(1);
+        // 关键：条件更新语义 —— 只有仍为“未支付”的那一个能改成功
+        when(orderMapper.update(any(Order.class), any(Wrapper.class))).thenAnswer(invocation -> {
+            Order updateOrder = invocation.getArgument(0);
+            return statusInDb.compareAndSet(OrderStatus.NO_PAY.getCode(), updateOrder.getOrderStatus()) ? 1 : 0;
+        });
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        Future<Object> payFuture = pool.submit(() -> runTransition(start, OrderStatus.PAY));
+        Future<Object> cancelFuture = pool.submit(() -> runTransition(start, OrderStatus.CANCEL));
+        start.countDown();
+
+        Object payResult = payFuture.get(10, TimeUnit.SECONDS);
+        Object cancelResult = cancelFuture.get(10, TimeUnit.SECONDS);
+        pool.shutdown();
+
+        // 恰好一个成功、一个拿到“状态已被变更”（谁赢不定，所以用集合断言）
+        List<Object> results = List.of(payResult, cancelResult);
+        assertEquals(1, results.stream().filter("ok"::equals).count(), "必须恰好一个赢家：" + results);
+        assertEquals(1, results.stream()
+                        .filter(result -> Objects.equals(result, BaseCode.ORDER_STATUS_CHANGED.getCode())).count(),
+                "输家必须拿到“状态已被变更”而不是其它错误：" + results);
+        // 数据库那一行只能变成一个终态
+        assertTrue(Objects.equals(statusInDb.get(), OrderStatus.PAY.getCode())
+                || Objects.equals(statusInDb.get(), OrderStatus.CANCEL.getCode()));
+        // 资源动作（座位收敛/回补）只能执行一次 —— 输家不能碰资源
+        verify(orderProgramCacheResolutionOperate, times(1))
+                .programCacheReverseOperate(anyList(), any(Object[].class));
+    }
+
+    private Object runTransition(CountDownLatch start, OrderStatus target) throws Exception {
+        start.await(5, TimeUnit.SECONDS);
+        try {
+            orderService.updateOrderRelatedData(ORDER_NUMBER, target);
+            return "ok";
+        } catch (TicketFlowFrameException e) {
+            return e.getCode();
+        }
+    }
+
+    // ==================== 支付对账 reconcilePayment ====================
+
+    @Test
+    void reconcilePayment没有渠道时不做任何事() {
+        Order order = buildOrder(OrderStatus.CANCEL.getCode());
+        order.setPayOrderType(null);
+
+        assertEquals(PaymentReconcileResult.NO_CHANNEL, orderService.reconcilePayment(order));
+        verify(payClient, never()).tradeCheck(any());
+        verify(payClient, never()).refund(any());
+    }
+
+    @Test
+    void reconcilePayment渠道未支付时不退款() {
+        Order order = buildOrder(OrderStatus.CANCEL.getCode());
+        order.setPayOrderType(PayChannel.WX.getCode());
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.NO_PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+
+        assertEquals(PaymentReconcileResult.NOT_PAID, orderService.reconcilePayment(order));
+        // 抢票场景里绝大多数被取消的订单都是没付过钱的，不能“盲退”
+        verify(payClient, never()).refund(any());
+    }
+
+    @Test
+    void reconcilePayment渠道已支付但本地已取消时退款() {
+        Order order = buildOrder(OrderStatus.CANCEL.getCode());
+        order.setPayOrderType(PayChannel.WX.getCode());
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+
+        assertEquals(PaymentReconcileResult.REFUNDED, orderService.reconcilePayment(order));
+
+        ArgumentCaptor<RefundDto> refundCaptor = ArgumentCaptor.forClass(RefundDto.class);
+        verify(payClient).refund(refundCaptor.capture());
+        assertEquals(String.valueOf(ORDER_NUMBER), refundCaptor.getValue().getOrderNumber());
+        assertEquals(PayChannel.WX.getValue(), refundCaptor.getValue().getChannel());
+        // 退款成功后订单置为已退单
+        ArgumentCaptor<Order> updateCaptor = ArgumentCaptor.forClass(Order.class);
+        verify(orderMapper).update(updateCaptor.capture(), any(Wrapper.class));
+        assertEquals(OrderStatus.REFUND.getCode(), updateCaptor.getValue().getOrderStatus());
+    }
+
+    @Test
+    void reconcilePayment退款失败时返回失败交下轮重试() {
+        Order order = buildOrder(OrderStatus.CANCEL.getCode());
+        order.setPayOrderType(PayChannel.ALIPAY.getCode());
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.error(500, "退款失败"));
+
+        assertEquals(PaymentReconcileResult.REFUND_FAILED, orderService.reconcilePayment(order));
+        // 退款失败不置退款状态（保持已取消，下一轮还会被扫到重试）
+        verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
+    }
+
+    @Test
+    void reconcilePayment查渠道失败时返回失败交下轮重试() {
+        Order order = buildOrder(OrderStatus.CANCEL.getCode());
+        order.setPayOrderType(PayChannel.WX.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.error(500, "渠道不可用"));
+
+        assertEquals(PaymentReconcileResult.CHECK_FAILED, orderService.reconcilePayment(order));
+        verify(payClient, never()).refund(any());
     }
 
     // ==================== checkOrderStatus ====================
@@ -641,16 +901,16 @@ class OrderServiceTest {
     }
 
     @Test
-    void updateProgramRelatedDataResolutionV4节目服务失败时抛异常() {
+    void updateProgramRelatedDataResolutionV4节目服务失败时不抛异常且Lua仍执行() {
         SeatVo seatVo = new SeatVo();
         seatVo.setId(SEAT_ID);
         when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
         when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.error(7777, "失败"));
         java.util.Map<Long, List<Long>> seatMap = java.util.Map.of(TICKET_CATEGORY_ID, List.of(SEAT_ID));
-        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
-                () -> orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.CANCEL,
-                        IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue()));
-        assertEquals(7777, e.getCode());
+        // 事务外尽力而为：Feign 失败不抛异常，Lua（Redis 权威）照常执行，DB 侧由投影任务/守恒任务观测兜底
+        assertDoesNotThrow(() -> orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.CANCEL,
+                IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue()));
+        verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
     }
 
     // ==================== 丢弃订单座位回滚 rollbackProgramSeatByDiscard ====================
@@ -956,6 +1216,27 @@ class OrderServiceTest {
     }
 
     @Test
+    void 支付回调拿不到订单锁时返回失败交渠道重试() throws Exception {
+        // 锁被另一条流程长时间持有（比如正在退款）：不能无限等，直接放弃让渠道重试
+        when(lock.tryLock(anyLong(), any(TimeUnit.class))).thenReturn(false);
+
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+
+        String wxResult = orderService.wxNotify(buildWxRequest());
+        assertEquals(WX_NOTIFY_FAILURE_RESULT, wxResult);
+        // 订单侧一步都没做：既没改状态、也没退款
+        verify(orderServiceMock, never()).updateOrderRelatedData(any(), any());
+        verify(payClient, never()).refund(any(RefundDto.class));
+
+        // 支付宝回调同一条路：验签之前就先拿锁，拿不到直接应答失败让它重试
+        String alipayResult = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+        assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, alipayResult);
+    }
+
+    @Test
     void wxNotify取消订单退款失败时返回FAIL() {
         NotifyVo notifyVo = new NotifyVo();
         notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
@@ -966,6 +1247,82 @@ class OrderServiceTest {
         String result = orderService.wxNotify(buildWxRequest());
         assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
         verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
+    }
+
+    @Test
+    void wxNotify条件更新未命中且订单已取消时进入退款并返回SUCCESS() {
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        // 第一次读（回调入口）还是未支付；第二次读（条件更新未命中后重读）已经被超时取消抢先
+        when(orderMapper.selectOne(any(Wrapper.class)))
+                .thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()), buildOrder(OrderStatus.CANCEL.getCode()));
+        doThrow(new TicketFlowFrameException(BaseCode.ORDER_STATUS_CHANGED))
+                .when(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+
+        String result = orderService.wxNotify(buildWxRequest());
+
+        assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
+        verify(payClient).refund(any(RefundDto.class));
+        ArgumentCaptor<Order> updateCaptor = ArgumentCaptor.forClass(Order.class);
+        verify(orderMapper).update(updateCaptor.capture(), any(Wrapper.class));
+        assertEquals(OrderStatus.REFUND.getCode(), updateCaptor.getValue().getOrderStatus());
+    }
+
+    @Test
+    void wxNotify条件更新未命中且订单已支付时不重复退款并返回SUCCESS() {
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        // 重读发现订单已经被另一条支付回调置为已支付：这笔支付已经处理过，不再动
+        when(orderMapper.selectOne(any(Wrapper.class)))
+                .thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()), buildOrder(OrderStatus.PAY.getCode()));
+        doThrow(new TicketFlowFrameException(BaseCode.ORDER_STATUS_CHANGED))
+                .when(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+
+        String result = orderService.wxNotify(buildWxRequest());
+
+        assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
+        verify(payClient, never()).refund(any(RefundDto.class));
+        verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
+    }
+
+    @Test
+    void wxNotify条件更新真正失败时返回FAIL等待渠道重试() {
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        // 事务已回滚（订单根本没更新）：应答成功会把这笔支付永久丢掉，必须让微信重试
+        doThrow(new TicketFlowFrameException(BaseCode.ORDER_CANAL_ERROR))
+                .when(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+
+        String result = orderService.wxNotify(buildWxRequest());
+
+        assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+        verify(payClient, never()).refund(any(RefundDto.class));
+    }
+
+    @Test
+    void alipayNotify条件更新未命中且订单已取消时进入退款并返回success() {
+        when(orderMapper.selectOne(any(Wrapper.class)))
+                .thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()), buildOrder(OrderStatus.CANCEL.getCode()));
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        doThrow(new TicketFlowFrameException(BaseCode.ORDER_STATUS_CHANGED))
+                .when(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+
+        assertEquals(ALIPAY_NOTIFY_SUCCESS_RESULT, result);
+        verify(payClient).refund(any(RefundDto.class));
     }
 
     @Test
@@ -1103,7 +1460,47 @@ class OrderServiceTest {
         assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
         verify(orderMapper).insert(any(Order.class));
         verify(redisCache).set(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_MQ, ORDER_NUMBER)),
-                eq(String.valueOf(ORDER_NUMBER)), eq(1L), eq(java.util.concurrent.TimeUnit.MINUTES));
+                eq(String.valueOf(ORDER_NUMBER)), eq(10L), eq(java.util.concurrent.TimeUnit.MINUTES));
+    }
+
+    @Test
+    void createMq重复消息_幂等成功返回原订单号() {
+        // 第一次消费：无既有订单，正常建单
+        // 第二次消费（同 orderNumber 重放）：doCreate 防重 selectOne 命中 → ORDER_EXIST
+        //  → createMq 特判为幂等成功返回原订单号，不写 DISCARD_ORDER
+        Order existOrder = new Order();
+        existOrder.setOrderNumber(ORDER_NUMBER);
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null, existOrder);
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(1L);
+        when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
+        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
+
+        String first = orderService.createMq(buildCreateMq());
+        assertEquals(String.valueOf(ORDER_NUMBER), first);
+
+        // 重复消息：不抛异常，幂等返回相同订单号
+        String second = orderService.createMq(buildCreateMq());
+        assertEquals(String.valueOf(ORDER_NUMBER), second);
+        // createMq 内不写 DISCARD_ORDER（真实失败才由 CreateOrderConsumer 外层写入）
+        verify(redisCache, never()).leftPushForList(any(RedisKeyBuild.class), any());
+    }
+
+    @Test
+    void createMq重复消息_幂等成功不触发反向恢复() {
+        Order existOrder = new Order();
+        existOrder.setOrderNumber(ORDER_NUMBER);
+        when(programClient.operateSeatLockAndTicketCategoryRemainNumber(any(ReduceRemainNumberDto.class)))
+                .thenReturn(ApiResponse.ok(true));
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(existOrder);
+        when(orderMapper.selectCount(any(Wrapper.class))).thenReturn(1L);
+
+        String orderNumber = orderService.createMq(buildCreateMq());
+
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+        // 幂等重复不执行反向恢复（不回滚已建订单的 DB 座位/余票）
+        verify(programClient, never()).operateProgramData(any(ProgramOperateDataDto.class));
     }
 
     // ==================== 查询 ====================

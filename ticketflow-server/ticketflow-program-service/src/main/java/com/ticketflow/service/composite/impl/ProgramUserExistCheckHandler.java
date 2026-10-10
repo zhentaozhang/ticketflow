@@ -2,21 +2,17 @@ package com.ticketflow.service.composite.impl;
 
 import cn.hutool.core.collection.CollectionUtil;
 import com.alibaba.fastjson.JSON;
-import com.ticketflow.client.OrderClient;
 import com.ticketflow.client.UserClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
-import com.ticketflow.dto.ProgramGetDto;
 import com.ticketflow.dto.ProgramOrderCreateDto;
 import com.ticketflow.dto.TicketUserListDto;
 import com.ticketflow.enums.BaseCode;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
-import com.ticketflow.service.ProgramService;
 import com.ticketflow.service.composite.AbstractProgramCheckHandler;
 import com.ticketflow.service.tool.TokenExpireManager;
-import com.ticketflow.vo.ProgramVo;
 import com.ticketflow.vo.TicketUserVo;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -44,12 +40,6 @@ public class ProgramUserExistCheckHandler extends AbstractProgramCheckHandler {
     
     @Autowired
     private RedisCache redisCache;
-    
-    @Autowired
-    private OrderClient orderClient;
-    
-    @Autowired
-    private ProgramService programService;
     
     @Autowired
     private TokenExpireManager tokenExpireManager;
@@ -97,45 +87,12 @@ public class ProgramUserExistCheckHandler extends AbstractProgramCheckHandler {
                 throw new TicketFlowFrameException(BaseCode.TICKET_USER_EMPTY);
             }
         }
-        ProgramGetDto programGetDto = new ProgramGetDto();
-        programGetDto.setId(programOrderCreateDto.getProgramId());
-        ProgramVo programVo = programService.detailV2(programGetDto);
-        if (Objects.isNull(programVo)) {
-            throw new TicketFlowFrameException(BaseCode.PROGRAM_NOT_EXIST);
-        }
-        // 以下注释掉的代码为之前的单人限购逻辑（ACCOUNT_ORDER_COUNT）：
-        // 通过 redis/Feign 查询用户已购数量，与 perAccountLimitPurchaseCount 比较。
-        // 当前版本移除该限制，保留注释供后续参考恢复。
-//        Integer count = 0;
-//        if (redisCache.hasKey(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT,
-//                programOrderCreateDto.getUserId(),programOrderCreateDto.getProgramId()))) {
-//            count = redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT,
-//                    programOrderCreateDto.getUserId(),programOrderCreateDto.getProgramId()), Integer.class);
-//        }else {
-//            AccountOrderCountDto accountOrderCountDto = new AccountOrderCountDto();
-//            accountOrderCountDto.setUserId(programOrderCreateDto.getUserId());
-//            accountOrderCountDto.setProgramId(programOrderCreateDto.getProgramId());
-//            ApiResponse<AccountOrderCountVo> apiResponse = orderClient.accountOrderCount(accountOrderCountDto);
-//            if (Objects.equals(apiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
-//                count = Optional.ofNullable(apiResponse.getData()).map(AccountOrderCountVo::getCount).orElse(0);
-//                redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT,
-//                                programOrderCreateDto.getUserId(),
-//                                programOrderCreateDto.getProgramId()),
-//                        count, tokenExpireManager.getTokenExpireTime() + 1, TimeUnit.MINUTES);
-//            }
-//        }
+        // 节目存在性由 BloomFilter + ProgramDetailCheckHandler.detailV2 校验，
+        // 此处不再重复调用 detailV2（每单节省一次多级缓存查询 + RBloomFilter，缓解锁竞争）。
 
         Integer seatCount = Optional.ofNullable(programOrderCreateDto.getSeatDtoList()).map(List::size).orElse(0);
 
         Integer ticketCount = Optional.ofNullable(programOrderCreateDto.getTicketCount()).orElse(0);
-//        if (seatCount != 0) {
-//            count = count + seatCount;
-//        }else if (ticketCount != 0) {
-//            count = count + ticketCount;
-//        }
-//        if (count > programVo.getPerAccountLimitPurchaseCount()) {
-//            throw new TicketFlowFrameException(BaseCode.PER_ACCOUNT_PURCHASE_COUNT_OVER_LIMIT);
-//        }
     }
     
     /**

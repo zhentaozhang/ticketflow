@@ -10,6 +10,7 @@ import org.apache.commons.codec.binary.Base64;
 
 import javax.crypto.Cipher;
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.PrivateKey;
@@ -70,7 +71,7 @@ public class RsaTool {
 	public static String encrypt(String data, PublicKey publicKey) throws Exception {
 		Cipher cipher = Cipher.getInstance("RSA");
 		cipher.init(Cipher.ENCRYPT_MODE, publicKey);
-		int inputLen = data.getBytes().length;
+		int inputLen = data.getBytes(StandardCharsets.UTF_8).length;
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
 		int offset = 0;
 		byte[] cache;
@@ -78,9 +79,9 @@ public class RsaTool {
 		// 对数据分段加密
 		while (inputLen - offset > 0) {
 			if (inputLen - offset > MAX_ENCRYPT_BLOCK) {
-				cache = cipher.doFinal(data.getBytes(), offset, MAX_ENCRYPT_BLOCK);
+				cache = cipher.doFinal(data.getBytes(StandardCharsets.UTF_8), offset, MAX_ENCRYPT_BLOCK);
 			} else {
-				cache = cipher.doFinal(data.getBytes(), offset, inputLen - offset);
+				cache = cipher.doFinal(data.getBytes(StandardCharsets.UTF_8), offset, inputLen - offset);
 			}
 			out.write(cache, 0, cache.length);
 			i++;
@@ -90,7 +91,7 @@ public class RsaTool {
 		out.close();
 		// 获取加密内容使用base64进行编码,并以UTF-8为标准转化成字符串
 		// 加密后的字符串
-		return new String(Base64.encodeBase64(encryptedData));
+		return new String(Base64.encodeBase64(encryptedData), StandardCharsets.UTF_8);
 	}
 	
 	/**
@@ -105,7 +106,7 @@ public class RsaTool {
 	public static String decrypt(String data, PrivateKey privateKey) throws Exception {
 		Cipher cipher = Cipher.getInstance("RSA");
 		cipher.init(Cipher.DECRYPT_MODE, privateKey);
-		byte[] dataBytes = Base64.decodeBase64(data.replaceAll("%2B","+").getBytes());
+		byte[] dataBytes = Base64.decodeBase64(data.replaceAll("%2B","+").getBytes(StandardCharsets.UTF_8));
 		int inputLen = dataBytes.length;
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
 		int offset = 0;
@@ -133,7 +134,7 @@ public class RsaTool {
 	 */
 	public static PrivateKey getPrivateKey(String privateKey) throws Exception {
 		KeyFactory keyFactory = KeyFactory.getInstance("RSA");
-		byte[] decodedKey = Base64.decodeBase64(privateKey.getBytes());
+		byte[] decodedKey = Base64.decodeBase64(privateKey.getBytes(StandardCharsets.UTF_8));
 		PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(decodedKey);
 		return keyFactory.generatePrivate(keySpec);
 	}
@@ -182,7 +183,7 @@ public class RsaTool {
 	 */
 	public static PublicKey getPublicKey(String publicKey) throws Exception {
 		KeyFactory keyFactory = KeyFactory.getInstance("RSA");
-		byte[] decodedKey = Base64.decodeBase64(publicKey.getBytes());
+		byte[] decodedKey = Base64.decodeBase64(publicKey.getBytes(StandardCharsets.UTF_8));
 		X509EncodedKeySpec keySpec = new X509EncodedKeySpec(decodedKey);
 		return keyFactory.generatePublic(keySpec);
 	}

@@ -81,6 +81,16 @@ public class DistributedLockConstants {
      * 交易状态检查
      * */
     public final static String TRADE_CHECK = "d_trade_check_lock";
+
+    /**
+     * 库存对账任务（多实例互斥：同一轮只让一个实例跑）
+     * */
+    public final static String RECONCILIATION_TASK_LOCK = "d_reconciliation_task_lock";
+
+    /**
+     * 支付对账任务（多实例互斥：同一轮只让一个实例跑，否则会重复问渠道）
+     * */
+    public final static String PAYMENT_RECONCILE_TASK_LOCK = "d_payment_reconcile_task_lock";
     
     /**
      * 节目服务订单创建V1

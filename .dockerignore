@@ -1,0 +1,31 @@
+# =============================================================================
+# Docker 构建上下文忽略清单（docker compose build 的 context 为仓库根目录）
+# 排除生成物/大目录，避免构建上下文过大拖慢镜像构建。
+# 注意：docker/ 必须保留 —— Dockerfile 需 COPY docker/app/entrypoint.sh。
+# =============================================================================
+.git
+.github
+.idea
+.vscode
+.codegraph
+.DS_Store
+logs
+**/logs
+target
+**/target
+node_modules
+**/node_modules
+vue3
+ticketflow-front-manage
+benchmark
+interview
+WWH
+sql
+.flattened-pom.xml
+**/.flattened-pom.xml
+*.iml
+{{HOMEBREW_PREFIX}}
+
+# 大文件 / 敏感文件不入构建上下文（Dockerfile 不需要）
+docker/otel/opentelemetry-javaagent.jar*
+docker/app/pay.env

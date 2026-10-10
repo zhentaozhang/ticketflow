@@ -136,7 +136,15 @@ public class ProgramShowTimeService extends ServiceImpl<ProgramShowTimeMapper, P
         }
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_PROGRAM_SHOW_TIME_LOCK,
                 new String[]{String.valueOf(programId)});
-        lock.lock();
+        if (!serviceLockTool.tryLock(lock, "GET_PROGRAM_SHOW_TIME_LOCK:" + programId)) {
+            // 等超时：先再查一次缓存（可能刚好被填好），仍没有就快速失败，不无锁重建
+            programShowTime = redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SHOW_TIME,
+                    programId), ProgramShowTime.class);
+            if (Objects.nonNull(programShowTime)) {
+                return programShowTime;
+            }
+            throw new TicketFlowFrameException(BaseCode.CACHE_LOAD_LOCK_TIMEOUT);
+        }
         try {
             programShowTime = redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SHOW_TIME,
                     programId), ProgramShowTime.class);

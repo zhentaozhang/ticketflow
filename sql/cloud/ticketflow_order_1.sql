@@ -22,6 +22,7 @@ CREATE TABLE `d_order_0` (
   `take_ticket_mode` varchar(256) DEFAULT NULL COMMENT '取票方式',
   `order_price` decimal(10,0) DEFAULT NULL COMMENT '订单价格',
   `pay_order_type` int(3) DEFAULT NULL COMMENT '支付订单方式',
+  `pay_reconciliation_status` int(3) DEFAULT '1' COMMENT '支付对账状态 1:未对账 2:对账完成(无需处理或已处理)',
   `order_status` int(3) DEFAULT '1' COMMENT '订单状态 1:未支付 2:已取消 3:已支付 4:已退单',
   `reconciliation_status` int(3) DEFAULT '1' COMMENT '对账状态 1:未对账 -1:对账完成有问题 2:对账完成没有问题 3:对账有问题处理完毕',
   `order_version` int(3) NOT NULL DEFAULT '1' COMMENT '创建订单的版本',
@@ -33,6 +34,7 @@ CREATE TABLE `d_order_0` (
   `status` tinyint(1) DEFAULT '1' COMMENT '1:正常 0:删除',
   PRIMARY KEY (`id`),
   UNIQUE KEY `d_order_order_number_IDX` (`order_number`) USING BTREE,
+  KEY `d_order_pay_reconcile_IDX` (`order_status`,`pay_reconciliation_status`,`cancel_order_time`) USING BTREE,
   KEY `user_id_IDX` (`user_id`) USING BTREE,
   KEY `program_id_IDX` (`program_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='订单表';
@@ -69,6 +71,7 @@ CREATE TABLE `d_order_1` (
   `take_ticket_mode` varchar(256) DEFAULT NULL COMMENT '取票方式',
   `order_price` decimal(10,0) DEFAULT NULL COMMENT '订单价格',
   `pay_order_type` int(3) DEFAULT NULL COMMENT '支付订单方式',
+  `pay_reconciliation_status` int(3) DEFAULT '1' COMMENT '支付对账状态 1:未对账 2:对账完成(无需处理或已处理)',
   `order_status` int(3) DEFAULT '1' COMMENT '订单状态 1:未支付 2:已取消 3:已支付 4:已退单',
   `reconciliation_status` int(3) DEFAULT '1' COMMENT '对账状态 1:未对账 -1:对账完成有问题 2:对账完成没有问题 3:对账有问题处理完毕',
   `order_version` int(3) NOT NULL DEFAULT '1' COMMENT '创建订单的版本',
@@ -80,6 +83,7 @@ CREATE TABLE `d_order_1` (
   `status` tinyint(1) DEFAULT '1' COMMENT '1:正常 0:删除',
   PRIMARY KEY (`id`),
   UNIQUE KEY `d_order_order_number_IDX` (`order_number`) USING BTREE,
+  KEY `d_order_pay_reconcile_IDX` (`order_status`,`pay_reconciliation_status`,`cancel_order_time`) USING BTREE,
   KEY `user_id_IDX` (`user_id`) USING BTREE,
   KEY `program_id_IDX` (`program_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='订单表';
@@ -116,6 +120,7 @@ CREATE TABLE `d_order_2` (
   `take_ticket_mode` varchar(256) DEFAULT NULL COMMENT '取票方式',
   `order_price` decimal(10,0) DEFAULT NULL COMMENT '订单价格',
   `pay_order_type` int(3) DEFAULT NULL COMMENT '支付订单方式',
+  `pay_reconciliation_status` int(3) DEFAULT '1' COMMENT '支付对账状态 1:未对账 2:对账完成(无需处理或已处理)',
   `order_status` int(3) DEFAULT '1' COMMENT '订单状态 1:未支付 2:已取消 3:已支付 4:已退单',
   `reconciliation_status` int(3) DEFAULT '1' COMMENT '对账状态 1:未对账 -1:对账完成有问题 2:对账完成没有问题 3:对账有问题处理完毕',
   `order_version` int(3) NOT NULL DEFAULT '1' COMMENT '创建订单的版本',
@@ -127,6 +132,7 @@ CREATE TABLE `d_order_2` (
   `status` tinyint(1) DEFAULT '1' COMMENT '1:正常 0:删除',
   PRIMARY KEY (`id`),
   UNIQUE KEY `d_order_order_number_IDX` (`order_number`) USING BTREE,
+  KEY `d_order_pay_reconcile_IDX` (`order_status`,`pay_reconciliation_status`,`cancel_order_time`) USING BTREE,
   KEY `user_id_IDX` (`user_id`) USING BTREE,
   KEY `program_id_IDX` (`program_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='订单表';
@@ -163,6 +169,7 @@ CREATE TABLE `d_order_3` (
   `take_ticket_mode` varchar(256) DEFAULT NULL COMMENT '取票方式',
   `order_price` decimal(10,0) DEFAULT NULL COMMENT '订单价格',
   `pay_order_type` int(3) DEFAULT NULL COMMENT '支付订单方式',
+  `pay_reconciliation_status` int(3) DEFAULT '1' COMMENT '支付对账状态 1:未对账 2:对账完成(无需处理或已处理)',
   `order_status` int(3) DEFAULT '1' COMMENT '订单状态 1:未支付 2:已取消 3:已支付 4:已退单',
   `reconciliation_status` int(3) DEFAULT '1' COMMENT '对账状态 1:未对账 -1:对账完成有问题 2:对账完成没有问题 3:对账有问题处理完毕',
   `order_version` int(3) NOT NULL DEFAULT '1' COMMENT '创建订单的版本',
@@ -174,6 +181,7 @@ CREATE TABLE `d_order_3` (
   `status` tinyint(1) DEFAULT '1' COMMENT '1:正常 0:删除',
   PRIMARY KEY (`id`),
   UNIQUE KEY `d_order_order_number_IDX` (`order_number`) USING BTREE,
+  KEY `d_order_pay_reconcile_IDX` (`order_status`,`pay_reconciliation_status`,`cancel_order_time`) USING BTREE,
   KEY `user_id_IDX` (`user_id`) USING BTREE,
   KEY `program_id_IDX` (`program_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='订单表';

@@ -8,8 +8,13 @@ logs/
 **/dependency-reduced-pom.xml
 **/.flattened-pom.xml
 
-### Local deployment ###
-docker/
+### Local deployment artifacts ###
+# Dockerfile / compose / build.sh 属于标准项目，需入库；
+# 只忽略本地运行产物（暂存的 fat-jar、agent、外置密钥、容器日志）。
+docker/app/jars/
+docker/app/pay.env
+docker/otel/opentelemetry-javaagent.jar*
+docker/**/logs/
 
 ### Local sharding config ###
 **/shardingsphere-*-local.yaml
@@ -32,12 +37,24 @@ vue3/components.d.ts
 .playwright-mcp/
 .opencode/
 
-### Docs ###
+### Docs / Markdown ###
+# 项目约定：Markdown 不入库（学习/设计/说明文档一律留本地），仅保留 README 作为项目说明。
 docs/
 ticketflow-study-plan.md
+*.md
+!README.md
+!**/README.md
 
 ### Generated benchmark outputs ###
 benchmark/results/
 
 ### Benchmark dynamic data ###
 benchmark/src/test/resources/data/seats-*.csv
+
+### Python 编译缓存 ###
+__pycache__/
+*.pyc
+
+### Benchmark outputs ###
+benchmark-results/
+

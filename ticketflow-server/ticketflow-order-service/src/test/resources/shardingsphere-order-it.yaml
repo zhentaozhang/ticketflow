@@ -54,7 +54,8 @@ rules:
         databaseStrategy:
           complex:
             shardingColumns: order_number
-            shardingAlgorithmName: database-order-complex-2t
+            # 必须和另外三张订单表用同一个库算法（位移 = 3）：本地事务要求它们落同一个库
+            shardingAlgorithmName: database-order-complex
         tableStrategy:
           complex:
             shardingColumns: order_number
@@ -78,13 +79,6 @@ rules:
           strategy: complex
           algorithmClassName: com.ticketflow.shardingsphere.TableOrderComplexGeneArithmetic
           sharding-count: 8
-      database-order-complex-2t:
-        type: CLASS_BASED
-        props:
-          strategy: complex
-          algorithmClassName: com.ticketflow.shardingsphere.DatabaseOrderComplexGeneArithmetic
-          sharding-count: 2
-          table-sharding-count: 2
       table-order-complex-2t:
         type: CLASS_BASED
         props:

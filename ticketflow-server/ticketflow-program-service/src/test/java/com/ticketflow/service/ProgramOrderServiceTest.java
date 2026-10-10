@@ -10,6 +10,7 @@ import com.ticketflow.mq.callback.FailureCallback;
 import com.ticketflow.mq.callback.SuccessCallback;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.domain.OrderCreateMq;
+import com.ticketflow.domain.PendingOrder;
 import com.ticketflow.domain.PurchaseSeat;
 import com.ticketflow.dto.DelayOrderCancelDto;
 import com.ticketflow.dto.OrderCreateDto;
@@ -30,7 +31,9 @@ import com.ticketflow.service.kafka.CreateOrderSend;
 import com.ticketflow.service.lua.ProgramCacheCreateOrderData;
 import com.ticketflow.service.lua.ProgramCacheCreateOrderResolutionOperate;
 import com.ticketflow.service.lua.ProgramCacheResolutionOperate;
+import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.core.SpringUtil;
+import com.ticketflow.redis.RedisKeyBuild;
 import com.ticketflow.vo.ProgramVo;
 import com.ticketflow.vo.SeatVo;
 import com.ticketflow.vo.TicketCategoryVo;
@@ -43,6 +46,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -64,6 +69,7 @@ class ProgramOrderServiceTest {
     @BeforeEach
     void setUp() {
         mockSpringUtil();
+        mockSeatCacheExistsCheck(redisCache);
     }
 
     private static void mockSpringUtil() {
@@ -72,6 +78,19 @@ class ProgramOrderServiceTest {
         lenient().when(mockContext.getEnvironment()).thenReturn(mockEnv);
         lenient().when(mockEnv.getProperty(eq("prefix.distinction.name"), anyString())).thenReturn("test");
         ReflectionTestUtils.setField(SpringUtil.class, "configurableApplicationContext", mockContext);
+    }
+
+    /**
+     * mock 座位三区缓存存在性检查的 Lua 执行（hasSeatResolutionCache 走 getInstance().execute）。
+     * 默认返回 0（缓存未预热），保持与旧 hasKey 默认 false 一致：走 selectSeatResolution 预热分支。
+     */
+    private static void mockSeatCacheExistsCheck(com.ticketflow.redis.RedisCache redisCache) {
+        RedisTemplate redisTemplate = mock(RedisTemplate.class);
+        lenient().when(redisCache.getInstance()).thenReturn(redisTemplate);
+        lenient().when(redisTemplate.execute(any(RedisScript.class), anyList())).thenReturn(0L);
+        // 缓存就绪探测改为一次 pipeline hasKeys：默认 4 个 key 全部不存在（等价旧 hasKey=false），走预热分支
+        lenient().when(redisCache.hasKeys(anyCollection()))
+                .thenReturn(java.util.List.of(false, false, false, false));
     }
 
     @Mock private OrderClient orderClient;
@@ -86,6 +105,7 @@ class ProgramOrderServiceTest {
     @Mock private SeatService seatService;
     @Mock private ProgramRecordTaskMapper programRecordTaskMapper;
     @Mock private com.ticketflow.redis.RedisCache redisCache;
+    @Mock private com.ticketflow.locallock.LocalLockCache localLockCache;
 
     private static final Long PROGRAM_ID = 501L;
     private static final Long USER_ID = 1001L;
@@ -366,17 +386,17 @@ class ProgramOrderServiceTest {
                     .thenReturn(remainMap);
             when(uidGenerator.getUid()).thenReturn(888L);
 
-            // 第一次 Lua 返回 40002（并发抢占），重试后成功
+            // 第一次 Lua 返回 40002（候选 50,51 被并发抢占），本地剔除后从剩余座位（52,53）重新匹配成功。
+            // no_sold 只读一次：重试用本地剩余座位，不再重读整档 hash（原实现每轮 HGETALL + 重排）。
             when(redisCache.getAllMapForHash(any(), eq(SeatVo.class)))
-                    .thenReturn(adjacentSeatMap(50L, 51L, 52L))
-                    .thenReturn(adjacentSeatMap(50L, 51L, 52L));
+                    .thenReturn(adjacentSeatMap(50L, 51L, 52L, 53L));
             ProgramCacheCreateOrderData lockedResult = new ProgramCacheCreateOrderData();
             lockedResult.setCode(BaseCode.SEAT_LOCK.getCode());
             ProgramCacheCreateOrderData successResult = new ProgramCacheCreateOrderData();
             successResult.setCode(BaseCode.SUCCESS.getCode());
             successResult.setPurchaseSeatList(List.of(
-                    createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID),
-                    createPurchaseSeat(51L, 2001L, TICKET_CATEGORY_ID)));
+                    createPurchaseSeat(52L, 2000L, TICKET_CATEGORY_ID),
+                    createPurchaseSeat(53L, 2001L, TICKET_CATEGORY_ID)));
             when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
                     .thenReturn(lockedResult)
                     .thenReturn(successResult);
@@ -386,8 +406,10 @@ class ProgramOrderServiceTest {
 
             assertNotNull(result);
             assertEquals(2, result.getPurchaseSeatList().size());
+            assertEquals(List.of(52L, 53L),
+                    result.getPurchaseSeatList().stream().map(PurchaseSeat::getId).toList());
             verify(programCacheCreateOrderResolutionOperate, times(2)).programCacheOperate(anyList(), any());
-            verify(redisCache, times(2)).getAllMapForHash(any(), eq(SeatVo.class));
+            verify(redisCache, times(1)).getAllMapForHash(any(), eq(SeatVo.class));
         }
 
         @Test
@@ -417,9 +439,11 @@ class ProgramOrderServiceTest {
             when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
                     .thenReturn(lockedResult);
 
+            // 唯一一组候选被抢占并本地剔除后，剩余座位不足以再凑出相邻票数 → SEAT_OCCUPY
+            // （旧实现每轮重读整档 hash，这里会一直拿到同一组候选并最终抛 SEAT_LOCK）
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programOrderService.createOrderOperateProgramCacheResolution(dto));
-            assertEquals(BaseCode.SEAT_LOCK.getCode(), ex.getCode());
+            assertEquals(BaseCode.SEAT_OCCUPY.getCode(), ex.getCode());
         }
 
         private Map<String, SeatVo> adjacentSeatMap(Long... seatIds) {
@@ -646,11 +670,57 @@ class ProgramOrderServiceTest {
                 return null;
             }).when(createOrderSend).sendMessage(anyString(), any(), any());
 
+            // 回滚守卫：发送失败回调先确认座位仍在锁定集合（PENDING 已回滚时跳过，避免余票二次回补）
+            when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(
+                    List.of(createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID)));
+
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programOrderService.createNewAsync(dto, ProgramOrderVersion.V4_VERSION.getValue()));
 
             // Kafka 发送失败：回滚 Redis 缓存（释放已锁座位、恢复余票）
             verify(programCacheResolutionOperate).programCacheOperate(anyList(), any());
+        }
+
+        @Test
+        void sendTimeout_DegradesToAcceptedAndWritesPending() {
+            ProgramOrderCreateDto dto = createDtoWithSeats(1);
+
+            when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
+                    .thenReturn(createShowTime());
+            when(ticketCategoryService.selectTicketCategoryListByProgramIdMultipleCache(eq(PROGRAM_ID), any()))
+                    .thenReturn(List.of(createTicketCategory(TICKET_CATEGORY_ID)));
+            when(seatService.selectSeatResolution(anyLong(), anyLong(), anyLong(), any()))
+                    .thenReturn(List.of(createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID)));
+            Map<String, Long> remainMap = new HashMap<>();
+            remainMap.put(String.valueOf(TICKET_CATEGORY_ID), 100L);
+            when(ticketCategoryService.getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID))
+                    .thenReturn(remainMap);
+            when(uidGenerator.getUid()).thenReturn(888L, 12345L);
+
+            List<PurchaseSeat> purchaseSeats = List.of(createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID));
+            ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
+            luaResult.setCode(BaseCode.SUCCESS.getCode());
+            luaResult.setPurchaseSeatList(purchaseSeats);
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(luaResult);
+            when(programService.simpleGetProgramAndShowMultipleCache(PROGRAM_ID))
+                    .thenReturn(createProgramVo());
+
+            // sendMessage 永不回调成功/失败 → latch.await 超时 → 降级为已受理并写 PENDING
+            doNothing().when(createOrderSend).sendMessage(anyString(), any(), any());
+
+            ArgumentCaptor<RedisKeyBuild> pendingKeyCaptor = ArgumentCaptor.forClass(RedisKeyBuild.class);
+            ArgumentCaptor<PendingOrder> pendingCaptor = ArgumentCaptor.forClass(PendingOrder.class);
+            String result = programOrderService.createNewAsync(dto, ProgramOrderVersion.V4_VERSION.getValue());
+
+            assertNotNull(result);
+            // 降级路径：写入 PENDING 待确认队列（不做缓存回滚，回滚由 A2 对账任务裁决）
+            verify(redisCache).leftPushForList(pendingKeyCaptor.capture(), pendingCaptor.capture());
+            assertEquals(RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_CREATE_PENDING, PROGRAM_ID),
+                    pendingKeyCaptor.getValue());
+            assertEquals(result, String.valueOf(pendingCaptor.getValue().getOrderCreateMq().getOrderNumber()));
+            // 未走发送失败回滚路径
+            verify(programCacheResolutionOperate, never()).programCacheOperate(anyList(), any());
         }
     }
 

@@ -1,6 +1,5 @@
 package com.ticketflow.service.composite.impl;
 
-import com.ticketflow.client.OrderClient;
 import com.ticketflow.client.UserClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
@@ -11,9 +10,7 @@ import com.ticketflow.enums.BaseCode;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
-import com.ticketflow.service.ProgramService;
 import com.ticketflow.service.tool.TokenExpireManager;
-import com.ticketflow.vo.ProgramVo;
 import com.ticketflow.vo.TicketUserVo;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -50,7 +47,6 @@ class ProgramUserExistCheckHandlerTest {
     private ProgramUserExistCheckHandler handler;
     private UserClient userClient;
     private RedisCache redisCache;
-    private ProgramService programService;
     private TokenExpireManager tokenExpireManager;
 
     private static final Long USER_ID = 1L;
@@ -74,18 +70,13 @@ class ProgramUserExistCheckHandlerTest {
         handler = new ProgramUserExistCheckHandler();
         userClient = mock(UserClient.class);
         redisCache = mock(RedisCache.class);
-        OrderClient orderClient = mock(OrderClient.class);
-        programService = mock(ProgramService.class);
         tokenExpireManager = mock(TokenExpireManager.class);
 
         ReflectionTestUtils.setField(handler, "userClient", userClient);
         ReflectionTestUtils.setField(handler, "redisCache", redisCache);
-        ReflectionTestUtils.setField(handler, "orderClient", orderClient);
-        ReflectionTestUtils.setField(handler, "programService", programService);
         ReflectionTestUtils.setField(handler, "tokenExpireManager", tokenExpireManager);
 
         when(tokenExpireManager.getTokenExpireTime()).thenReturn(30L);
-        when(programService.detailV2(any())).thenReturn(new ProgramVo());
     }
 
     private ProgramOrderCreateDto buildCreateDto() {
@@ -142,6 +133,6 @@ class ProgramUserExistCheckHandlerTest {
 
         handler.execute(buildCreateDto());
 
-        verify(programService).detailV2(any());
+        verify(userClient).list(any(TicketUserListDto.class));
     }
 }

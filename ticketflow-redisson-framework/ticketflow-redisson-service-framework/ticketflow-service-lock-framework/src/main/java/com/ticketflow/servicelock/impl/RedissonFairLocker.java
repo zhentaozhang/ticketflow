@@ -9,14 +9,14 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Redisson 公平锁实现——包装 redissonClient.getFairLock()。
- *
+ * <p>
  * 按等待时间顺序分配锁，避免线程饥饿，适合资源分配类场景
  */
 @AllArgsConstructor
 public class RedissonFairLocker implements ServiceLocker {
 
     private final RedissonClient redissonClient;
-    
+
     @Override
     public RLock getLock(String lockKey) {
         return redissonClient.getFairLock(lockKey);
@@ -37,7 +37,7 @@ public class RedissonFairLocker implements ServiceLocker {
     }
 
     @Override
-    public RLock lock(String lockKey, TimeUnit unit ,long leaseTime) {
+    public RLock lock(String lockKey, TimeUnit unit, long leaseTime) {
         RLock lock = redissonClient.getFairLock(lockKey);
         lock.lock(leaseTime, unit);
         return lock;
@@ -53,7 +53,7 @@ public class RedissonFairLocker implements ServiceLocker {
             return false;
         }
     }
-    
+
     @Override
     public boolean tryLock(String lockKey, TimeUnit unit, long waitTime, long leaseTime) {
         RLock lock = redissonClient.getFairLock(lockKey);

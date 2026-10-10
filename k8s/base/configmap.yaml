@@ -1,0 +1,23 @@
+# 非敏感运行时配置。敏感项走 app-secret（见 secret.yaml）。
+#
+# 注意：基础设施（MySQL/Redis/Kafka/Nacos/ES）目前在 K8s 之外（Compose/托管），
+# 因此这里的地址是占位。落地时二选一：
+#   1) 若中间件也部署在同一集群：改为 <svc>.<ns>.svc:port；
+#   2) 若中间件在集群外（本地 Compose / 云托管）：改为可达的主机名或 IP。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  TZ: "Asia/Shanghai"
+  NACOS_SERVER_ADDR: "REPLACE_NACOS_HOST:8848"
+  REDIS_HOST: "REPLACE_REDIS_HOST"
+  REDIS_PORT: "6379"
+  KAFKA_BOOTSTRAP_SERVERS: "REPLACE_KAFKA_HOST:9092"
+  MYSQL_HOST: "REPLACE_MYSQL_HOST"
+  MYSQL_PORT: "3306"
+  ES_ADDR: "REPLACE_ES_HOST:9200"
+  # 开启 Spring Boot liveness/readiness 探针端点（供 K8s Probe 使用）
+  MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+  # OpenTelemetry（沿用镜像内 agent 约定）
+  ENABLE_OTEL: "false"

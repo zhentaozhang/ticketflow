@@ -9,19 +9,19 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Redisson 写锁实现——包装 redissonClient.getReadWriteLock().writeLock()。
- *
+ * <p>
  * 写锁独占，与读锁互斥；适合写多或数据一致性要求高的场景
  */
 @AllArgsConstructor
 public class RedissonWriteLocker implements ServiceLocker {
 
     private final RedissonClient redissonClient;
-    
+
     @Override
     public RLock getLock(String lockKey) {
         return redissonClient.getReadWriteLock(lockKey).writeLock();
     }
-    
+
     @Override
     public RLock lock(String lockKey) {
         RLock lock = redissonClient.getReadWriteLock(lockKey).writeLock();
@@ -37,7 +37,7 @@ public class RedissonWriteLocker implements ServiceLocker {
     }
 
     @Override
-    public RLock lock(String lockKey, TimeUnit unit ,long leaseTime) {
+    public RLock lock(String lockKey, TimeUnit unit, long leaseTime) {
         RLock lock = redissonClient.getReadWriteLock(lockKey).writeLock();
         lock.lock(leaseTime, unit);
         return lock;
@@ -53,7 +53,7 @@ public class RedissonWriteLocker implements ServiceLocker {
             return false;
         }
     }
-    
+
     @Override
     public boolean tryLock(String lockKey, TimeUnit unit, long waitTime, long leaseTime) {
         RLock lock = redissonClient.getReadWriteLock(lockKey).writeLock();

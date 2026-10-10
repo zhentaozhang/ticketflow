@@ -1,0 +1,26 @@
+# 本地 kind 开发环境 overlay。
+#
+# 使用步骤（需先安装 kind 并创建集群）：
+#   brew install kind
+#   kind create cluster --name ticketflow
+#   bash ./docker/build.sh images                       # 构建镜像（tag=0.0.1-SNAPSHOT）
+#   kind load docker-image ticketflow/gateway:0.0.1-SNAPSHOT --name ticketflow
+#   kind load docker-image ticketflow/order:0.0.1-SNAPSHOT   --name ticketflow
+#   kind load docker-image ticketflow/program:0.0.1-SNAPSHOT --name ticketflow
+#   kubectl apply -k k8s/overlays/dev
+#
+# 说明：
+#   * 本地 kind 直接用 build.sh 产出的 0.0.1-SNAPSHOT 标签（kind load 已导入该 tag）。
+#   * CD 阶段部署到真实集群时，用 `kubectl set image deploy/<svc> <svc>=<registry>/ticketflow-<svc>:<sha>`
+#     覆盖为带 commit SHA 的镜像，而不是改这里。
+#   * 镜像归属：运行时镜像由 CD（set image 部署 / rollout undo 回滚）独占管理，本文件的
+#     image 仅作 bootstrap 默认值。rollout undo 不更新 last-applied 注解，故勿对已部署对象再 apply -k。
+#   * ConfigMap 中中间件地址需按实际环境修改（见 base/configmap.yaml）。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ticketflow
+resources:
+  - ../../base
+  - host-services.yaml
+patches:
+  - path: configmap-patch.yaml

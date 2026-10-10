@@ -1,0 +1,21 @@
+# 统一入口：所有外部流量经 gateway，后端服务不直接暴露。
+# 需要集群安装 Ingress Controller（kind 可装 ingress-nginx）。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ticketflow
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: ticketflow.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 6085

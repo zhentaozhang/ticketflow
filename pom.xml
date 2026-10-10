@@ -49,9 +49,10 @@
 		<java.version>17</java.version>
 		<project.sourceEncoding>UTF-8</project.sourceEncoding>
 		<project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-		<spring-boot.version>3.3.0</spring-boot.version>
-		<spring-cloud.version>2023.0.2</spring-cloud.version>
-		<spring-cloud-alibaba.version>2023.0.1.0</spring-cloud-alibaba.version>
+		<spring-boot.version>3.5.16</spring-boot.version>
+		<spring-cloud.version>2025.0.3</spring-cloud.version>
+		<spring-cloud-alibaba.version>2025.0.0.0</spring-cloud-alibaba.version>
+		<sentinel.version>1.8.10</sentinel.version>
 		<oshi-core.version>6.2.2</oshi-core.version>
 		<jdk.version>17</jdk.version>
 		<nacos.version>2.0.3</nacos.version>
@@ -70,17 +71,17 @@
 		<jjwt.version>0.9.1</jjwt.version>
 		<hutool.version>5.8.25</hutool.version>
 		<log4j.version>2.17.0</log4j.version>
-		<pagehelper.version>5.2.0</pagehelper.version>
+		<pagehelper.version>5.3.1</pagehelper.version>
 		<commons-collections.version>3.2.2</commons-collections.version>
 		<spring-boot-admin-starter-server.version>3.3.0</spring-boot-admin-starter-server.version>
 		<mybatis-plus.version>3.5.7</mybatis-plus.version>
 		<mybatis-plus-generator.version>3.5.7</mybatis-plus-generator.version>
-		<freemarker.version>2.3.29</freemarker.version>
+		<freemarker.version>2.3.35</freemarker.version>
 		<druid.version>1.1.10</druid.version>
 		<spring-boot-admin-starter-client.version>2.3.1</spring-boot-admin-starter-client.version>
 		<knife4j.version>4.3.0</knife4j.version>
 		<openapi.swagger.version>2.2.0</openapi.swagger.version>
-		<redisson.version>3.32.0</redisson.version>
+		<redisson.version>3.52.0</redisson.version>
 		<qps-helper.version>1.1.3-RELEASE</qps-helper.version>
 		<alipay-sdk-java-version>4.38.197.ALL</alipay-sdk-java-version>
 		<wechatpay-java-version>0.2.17</wechatpay-java-version>
@@ -90,12 +91,12 @@
 		<caffeine.version>2.9.3</caffeine.version>
 		<jaxb.version>2.3.0</jaxb.version>
 		<activation.version>1.1.1</activation.version>
-		<spotless-maven-plugin.version>2.22.1</spotless-maven-plugin.version>
 		<opencsv.version>5.9</opencsv.version>
-		<skywalking.apm-toolkit-trace.version>9.4.0</skywalking.apm-toolkit-trace.version>
-		<skywalking.apm-toolkit-log4j-2.x.version>9.4.0</skywalking.apm-toolkit-log4j-2.x.version>
 		<sa-token.version>1.43.0</sa-token.version>
 		<lombok.version>1.18.38</lombok.version>
+		<maven-checkstyle.version>3.3.1</maven-checkstyle.version>
+		<maven-spotbugs.version>4.8.6.3</maven-spotbugs.version>
+		<jacoco.version>0.8.12</jacoco.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -105,6 +106,63 @@
 	</dependencies>
 	<dependencyManagement>
 		<dependencies>
+			<!--
+			  安全补丁覆盖：Spring Boot / Spring Cloud BOM 尚未跟进的 HIGH/CRITICAL CVE。
+			  放在 BOM import 之前，Maven 以首个声明为准，从而覆盖 BOM 管理的版本。
+			  来源：Trivy 镜像扫描（scripts/scan-images.sh）。
+			-->
+			<dependency>
+				<groupId>io.netty</groupId>
+				<artifactId>netty-bom</artifactId>
+				<version>4.1.137.Final</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.tomcat.embed</groupId>
+				<artifactId>tomcat-embed-core</artifactId>
+				<version>10.1.60</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.tomcat.embed</groupId>
+				<artifactId>tomcat-embed-el</artifactId>
+				<version>10.1.60</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.tomcat.embed</groupId>
+				<artifactId>tomcat-embed-websocket</artifactId>
+				<version>10.1.60</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.httpcomponents.core5</groupId>
+				<artifactId>httpcore5</artifactId>
+				<version>5.4.3</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.httpcomponents.core5</groupId>
+				<artifactId>httpcore5-h2</artifactId>
+				<version>5.4.3</version>
+			</dependency>
+			<dependency>
+				<groupId>com.google.protobuf</groupId>
+				<artifactId>protobuf-java</artifactId>
+				<version>3.25.5</version>
+			</dependency>
+			<dependency>
+				<groupId>org.bouncycastle</groupId>
+				<artifactId>bcprov-jdk18on</artifactId>
+				<version>1.85</version>
+			</dependency>
+			<dependency>
+				<groupId>commons-beanutils</groupId>
+				<artifactId>commons-beanutils</artifactId>
+				<version>1.11.0</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.zookeeper</groupId>
+				<artifactId>zookeeper</artifactId>
+				<version>3.9.5</version>
+			</dependency>
 			<dependency>
 				<groupId>org.testcontainers</groupId>
 				<artifactId>testcontainers-bom</artifactId>
@@ -224,6 +282,66 @@
 					</execution>
 				</executions>
 			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-checkstyle-plugin</artifactId>
+				<version>${maven-checkstyle.version}</version>
+				<configuration>
+					<configLocation>${maven.multiModuleProjectDirectory}/config/checkstyle/checkstyle.xml</configLocation>
+					<includeTestSourceDirectory>false</includeTestSourceDirectory>
+					<consoleOutput>true</consoleOutput>
+					<!-- 计数阈值：warning 也要计入，否则 summary 恒为 0 -->
+					<violationSeverity>warning</violationSeverity>
+					<!-- 强制门禁：命中即失败（基线已清零；新违规将拦截构建） -->
+					<failsOnError>true</failsOnError>
+					<failOnViolation>true</failOnViolation>
+					<linkXRef>false</linkXRef>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>com.github.spotbugs</groupId>
+				<artifactId>spotbugs-maven-plugin</artifactId>
+				<version>${maven-spotbugs.version}</version>
+				<configuration>
+					<excludeFilterFile>${maven.multiModuleProjectDirectory}/config/spotbugs/exclude.xml</excludeFilterFile>
+					<effort>Max</effort>
+					<threshold>High</threshold>
+					<!-- 强制门禁：High 阈值命中即失败（基线 0） -->
+					<failOnError>true</failOnError>
+					<xmlOutput>true</xmlOutput>
+				</configuration>
+			</plugin>
 		</plugins>
 	</build>
+
+	<profiles>
+		<!-- 覆盖率：mvn -Pcoverage test -> target/site/jacoco/index.html（不影响默认构建） -->
+		<profile>
+			<id>coverage</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.jacoco</groupId>
+						<artifactId>jacoco-maven-plugin</artifactId>
+						<version>${jacoco.version}</version>
+						<executions>
+							<execution>
+								<id>prepare-agent</id>
+								<goals>
+									<goal>prepare-agent</goal>
+								</goals>
+							</execution>
+							<execution>
+								<id>report</id>
+								<phase>test</phase>
+								<goals>
+									<goal>report</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 </project>

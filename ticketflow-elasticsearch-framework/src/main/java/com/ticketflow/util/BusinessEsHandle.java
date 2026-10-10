@@ -13,37 +13,28 @@ import org.apache.http.HttpEntity;
 import org.apache.http.entity.ContentType;
 import org.apache.http.nio.entity.NStringEntity;
 import org.apache.http.util.EntityUtils;
-import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.json.JsonXContent;
-import org.elasticsearch.index.query.BoolQueryBuilder;
-import org.elasticsearch.index.query.QueryBuilder;
-import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.rest.RestStatus;
-import org.elasticsearch.search.builder.SearchSourceBuilder;
-import org.elasticsearch.search.sort.FieldSortBuilder;
-import org.elasticsearch.search.sort.SortBuilders;
-import org.elasticsearch.search.sort.SortOrder;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
 /**
- * ES 业务操作封装（RestClient 原生 HTTP 方式，非 Spring Data）。
+ * ES 业务操作封装（低层 RestClient + JSON DSL，非 Spring Data）。
  * 提供：索引创建/删除、文档增删改查、Bool 复合查询、分页搜索、高亮。
  * esSwitch=false 时所有操作静默跳过（调试/降级用）。
  * esTypeSwitch 兼容 ES 6.x（type）与 7.x+（无 type）两种模式。
+ * <p>
+ * 说明：ES 8 起不再提供 org.elasticsearch:elasticsearch 核心中的 QueryBuilder/XContentBuilder，
+ * 本类改为直接构造 JSON DSL（fastjson），只依赖 elasticsearch-rest-client 的 RestClient/Request/Response。
  */
 @Slf4j
 @AllArgsConstructor
@@ -67,43 +58,49 @@ public class BusinessEsHandle {
      * @param list      参数集合
      */
     public void createIndex(String indexName, String indexType, List<EsDocumentMappingDto> list) throws IOException {
-        if (!esSwitch) {
+        if (!Boolean.TRUE.equals(esSwitch)) {
             return;
         }
         if (CollectionUtil.isEmpty(list)) {
             return;
         }
-        IndexRequest indexRequest = new IndexRequest();
-        XContentBuilder builder = JsonXContent.contentBuilder().startObject().startObject("mappings");
-        if (esTypeSwitch) {
-            builder = builder.startObject(indexType);
-        }
-        builder = builder.startObject("properties");
+        JSONObject properties = new JSONObject();
         for (EsDocumentMappingDto esDocumentMappingDto : list) {
             String paramName = esDocumentMappingDto.getParamName();
             String paramType = esDocumentMappingDto.getParamType();
+            JSONObject field = new JSONObject();
             if ("text".equals(paramType)) {
-                Map<String, Map<String, Object>> map1 = new HashMap<>(8);
-                Map<String, Object> map2 = new HashMap<>(8);
-                map2.put("type", "keyword");
-                map2.put("ignore_above", 256);
-                map1.put("keyword", map2);
-                builder = builder.startObject(paramName).field("type", "text").field("fields", map1).endObject();
+                field.put("type", "text");
+                JSONObject keyword = new JSONObject();
+                keyword.put("type", "keyword");
+                keyword.put("ignore_above", 256);
+                JSONObject fields = new JSONObject();
+                fields.put("keyword", keyword);
+                field.put("fields", fields);
             } else {
-                builder = builder.startObject(paramName).field("type", paramType).endObject();
+                field.put("type", paramType);
             }
+            properties.put(paramName, field);
         }
-        if (esTypeSwitch) {
-            builder.endObject();
+        JSONObject mappings = new JSONObject();
+        if (Boolean.TRUE.equals(esTypeSwitch)) {
+            JSONObject typeWrap = new JSONObject();
+            typeWrap.put("properties", properties);
+            mappings.put(indexType, typeWrap);
+        } else {
+            mappings.put("properties", properties);
         }
-        builder = builder.endObject().endObject().startObject("settings").field("number_of_shards", 1)
-                .field("number_of_replicas", 1).endObject().endObject();
+        JSONObject settings = new JSONObject();
+        settings.put("number_of_shards", 1);
+        settings.put("number_of_replicas", 1);
+        JSONObject root = new JSONObject();
+        root.put("mappings", mappings);
+        root.put("settings", settings);
 
-        indexRequest.source(builder);
-        String source = indexRequest.source().utf8ToString();
+        String source = root.toJSONString();
         log.info("create index execute dsl : {}", source);
         HttpEntity entity = new NStringEntity(source, ContentType.APPLICATION_JSON);
-        execute("PUT", "/" + indexName, entity);
+        consumeQuietly(execute("PUT", "/" + indexName, entity));
     }
 
     /**
@@ -114,20 +111,22 @@ public class BusinessEsHandle {
      * @return boolean
      */
     public boolean checkIndex(String indexName, String indexType) {
-        if (!esSwitch) {
+        if (!Boolean.TRUE.equals(esSwitch)) {
             return false;
         }
         try {
             String path;
-            if (esTypeSwitch) {
+            if (Boolean.TRUE.equals(esTypeSwitch)) {
                 path = "/" + indexName + "/" + indexType + "/_mapping";
             } else {
                 path = "/" + indexName + "/_mapping";
             }
             Response response = execute("GET", path, null);
-            return response.getStatusLine().getStatusCode() == RestStatus.OK.getStatus();
+            boolean exists = response.getStatusLine().getStatusCode() == 200;
+            consumeQuietly(response);
+            return exists;
         } catch (Exception e) {
-            if (e instanceof ResponseException && ((ResponseException) e).getResponse().getStatusLine().getStatusCode() == RestStatus.NOT_FOUND.getStatus()) {
+            if (e instanceof ResponseException && ((ResponseException) e).getResponse().getStatusLine().getStatusCode() == 404) {
                 log.warn("index not exist ! indexName:{}, indexType:{}", indexName, indexType);
             } else {
                 log.error("checkIndex error", e);
@@ -143,12 +142,14 @@ public class BusinessEsHandle {
      * @return boolean
      */
     public boolean deleteIndex(String indexName) {
-        if (!esSwitch) {
+        if (!Boolean.TRUE.equals(esSwitch)) {
             return false;
         }
         try {
             Response response = execute("DELETE", "/" + indexName, null);
-            return response.getStatusLine().getStatusCode() == RestStatus.OK.getStatus();
+            boolean deleted = response.getStatusLine().getStatusCode() == 200;
+            consumeQuietly(response);
+            return deleted;
         } catch (Exception e) {
             log.error("deleteIndex error", e);
         }
@@ -164,14 +165,14 @@ public class BusinessEsHandle {
      * @return boolean
      */
     public boolean add(String indexName, String indexType, Map<String, Object> params) {
-        if (!esSwitch) {
+        if (!Boolean.TRUE.equals(esSwitch)) {
             return false;
         }
         if (CollectionUtil.isEmpty(params)) {
             return false;
         }
         String endpoint;
-        if (esTypeSwitch) {
+        if (Boolean.TRUE.equals(esTypeSwitch)) {
             endpoint = "/" + indexName + "/" + indexType;
         } else {
             endpoint = "/" + indexName + "/_doc";
@@ -189,14 +190,14 @@ public class BusinessEsHandle {
      * @return boolean
      */
     public boolean add(String indexName, String indexType, String documentId, Map<String, Object> params) {
-        if (!esSwitch) {
+        if (!Boolean.TRUE.equals(esSwitch)) {
             return false;
         }
         if (CollectionUtil.isEmpty(params)) {
             return false;
         }
         String endpoint;
-        if (esTypeSwitch) {
+        if (Boolean.TRUE.equals(esTypeSwitch)) {
             endpoint = "/" + indexName + "/" + indexType + "/" + documentId;
         } else {
             endpoint = "/" + indexName + "/_doc/" + documentId;
@@ -211,6 +212,7 @@ public class BusinessEsHandle {
             log.info("add dsl : {}", jsonString);
             Response indexResponse = execute(method, endpoint, entity);
             int statusCode = indexResponse.getStatusLine().getStatusCode();
+            consumeQuietly(indexResponse);
             return statusCode == 201 || statusCode == 200;
         } catch (Exception e) {
             log.error("add error", e);
@@ -227,7 +229,7 @@ public class BusinessEsHandle {
      * @return boolean 全部批次成功返回 true
      */
     public boolean batchAdd(String indexName, String indexType, List<Map<String, Object>> params) {
-        if (!esSwitch) {
+        if (!Boolean.TRUE.equals(esSwitch)) {
             return false;
         }
         if (CollectionUtil.isEmpty(params)) {
@@ -251,7 +253,7 @@ public class BusinessEsHandle {
                 bulkBody.append(JSON.toJSONString(param)).append('\n');
             }
             String endpoint;
-            if (esTypeSwitch) {
+            if (Boolean.TRUE.equals(esTypeSwitch)) {
                 endpoint = "/" + indexName + "/" + indexType + "/_bulk";
             } else {
                 endpoint = "/" + indexName + "/_bulk";
@@ -259,7 +261,7 @@ public class BusinessEsHandle {
             log.info("batchAdd dsl : {}", bulkBody);
             HttpEntity entity = new NStringEntity(bulkBody.toString(), ContentType.create(NDJSON_CONTENT_TYPE, StandardCharsets.UTF_8));
             Response response = execute("POST", endpoint, entity);
-            if (response.getStatusLine().getStatusCode() != RestStatus.OK.getStatus()) {
+            if (response.getStatusLine().getStatusCode() != 200) {
                 log.error("batchAdd http error, indexName:{}, statusCode:{}", indexName, response.getStatusLine().getStatusCode());
                 return false;
             }
@@ -287,11 +289,10 @@ public class BusinessEsHandle {
      */
     public <T> List<T> query(String indexName, String indexType, List<EsDataQueryDto> esDataQueryDtoList, Class<T> clazz) throws IOException {
         List<T> list = new ArrayList<>();
-        if (!esSwitch) {
+        if (!Boolean.TRUE.equals(esSwitch)) {
             return list;
         }
-        SearchSourceBuilder sourceBuilder = getSearchSourceBuilder(esDataQueryDtoList, null, null);
-        executeQuery(indexName, indexType, list, null, clazz, sourceBuilder, null);
+        executeQuery(indexName, indexType, list, null, clazz, getSearchDsl(esDataQueryDtoList, null, null, null, null), null);
         return list;
     }
 
@@ -316,82 +317,153 @@ public class BusinessEsHandle {
      * @param indexName          索引名字
      * @param indexType          索引类型
      * @param esDataQueryDtoList 参数
-     * @param sortParam          排序参数 不排序则为空 如果进行了排序，会返回es中的排序字段sort，需要用户在返回的实体类中添加sort字段
-     * @param sortOrder          升序还是降序，为空则降序
+     * @param sortParam          排序字段 不排序则为空 如果进行了排序，会返回es中的排序字段sort，需要用户在返回的实体类中添加sort字段
+     * @param sortOrder          升序还是降序（"asc"/"desc"），为空则降序
      * @param pageNo             页码
      * @param pageSize           页大小
      * @param clazz              返回的类型
      * @return PageInfo
      */
-    public <T> PageInfo<T> queryPage(String indexName, String indexType, List<EsDataQueryDto> esDataQueryDtoList, String sortParam, SortOrder sortOrder, Integer pageNo, Integer pageSize, Class<T> clazz) throws IOException {
+    public <T> PageInfo<T> queryPage(String indexName, String indexType, List<EsDataQueryDto> esDataQueryDtoList, String sortParam, String sortOrder, Integer pageNo, Integer pageSize, Class<T> clazz) throws IOException {
         List<T> list = new ArrayList<>();
         PageInfo<T> pageInfo = new PageInfo<>(list);
         pageInfo.setPageNum(pageNo);
         pageInfo.setPageSize(pageSize);
-        if (!esSwitch) {
+        if (!Boolean.TRUE.equals(esSwitch)) {
             return pageInfo;
         }
         if (Objects.isNull(pageNo) || Objects.isNull(pageSize) || pageNo <= 0 || pageSize <= 0) {
             log.warn("queryPage invalid page params, indexName:{}, pageNo:{}, pageSize:{}", indexName, pageNo, pageSize);
             return pageInfo;
         }
-        SearchSourceBuilder sourceBuilder = getSearchSourceBuilder(esDataQueryDtoList, sortParam, sortOrder);
-        sourceBuilder.from((pageNo - 1) * pageSize);
-        sourceBuilder.size(pageSize);
-        executeQuery(indexName, indexType, list, pageInfo, clazz, sourceBuilder, null);
+        int from = (pageNo - 1) * pageSize;
+        String dsl = getSearchDsl(esDataQueryDtoList, sortParam, sortOrder, from, pageSize);
+        executeQuery(indexName, indexType, list, pageInfo, clazz, dsl, null);
         return pageInfo;
     }
 
-    private SearchSourceBuilder getSearchSourceBuilder(List<EsDataQueryDto> esDataQueryDtoList, String sortParam, SortOrder sortOrder) {
-        SearchSourceBuilder sourceBuilder = new SearchSourceBuilder();
-        if (Objects.isNull(sortOrder)) {
-            sortOrder = SortOrder.DESC;
-        }
-        if (StringUtil.isNotEmpty(sortParam)) {
-            FieldSortBuilder sort = SortBuilders.fieldSort(sortParam);
-            sort.order(sortOrder);
-            sourceBuilder.sort(sort);
-        }
-        BoolQueryBuilder boolQuery = QueryBuilders.boolQuery();
-        for (EsDataQueryDto esDataQueryDto : esDataQueryDtoList) {
-            String paramName = esDataQueryDto.getParamName();
-            Object paramValue = esDataQueryDto.getParamValue();
-            Date startTime = esDataQueryDto.getStartTime();
-            Date endTime = esDataQueryDto.getEndTime();
-            boolean analyse = esDataQueryDto.isAnalyse();
+    /**
+     * 由查询条件列表构造 JSON DSL（bool.must：term/match/terms/range 的 AND 组合）。
+     */
+    private String getSearchDsl(List<EsDataQueryDto> esDataQueryDtoList, String sortParam, String sortOrder, Integer from, Integer size) {
+        JSONArray must = new JSONArray();
+        if (CollectionUtil.isNotEmpty(esDataQueryDtoList)) {
+            for (EsDataQueryDto esDataQueryDto : esDataQueryDtoList) {
+                String paramName = esDataQueryDto.getParamName();
+                Object paramValue = esDataQueryDto.getParamValue();
+                Date startTime = esDataQueryDto.getStartTime();
+                Date endTime = esDataQueryDto.getEndTime();
+                boolean analyse = esDataQueryDto.isAnalyse();
 
-            if (Objects.nonNull(paramValue)) {
-                if (paramValue instanceof Collection) {
-                    if (analyse) {
-                        BoolQueryBuilder builds = QueryBuilders.boolQuery();
+                if (Objects.nonNull(paramValue)) {
+                    if (paramValue instanceof Collection) {
                         Collection<?> collection = (Collection<?>) paramValue;
-                        for (Object value : collection) {
-                            builds.should(QueryBuilders.matchQuery(paramName, value));
+                        if (analyse) {
+                            JSONArray should = new JSONArray();
+                            for (Object value : collection) {
+                                should.add(matchQuery(paramName, value));
+                            }
+                            must.add(boolQuery(null, should, null));
+                        } else {
+                            must.add(termsQuery(paramName, collection));
                         }
-                        boolQuery.must(builds);
                     } else {
-                        QueryBuilder builds = QueryBuilders.termsQuery(paramName, (Collection<?>) paramValue);
-                        boolQuery.must(builds);
+                        must.add(analyse ? matchQuery(paramName, paramValue) : termQuery(paramName, paramValue));
                     }
-                } else {
-                    QueryBuilder builds;
-                    if (analyse) {
-                        builds = QueryBuilders.matchQuery(paramName, paramValue);
-                    } else {
-                        builds = QueryBuilders.termQuery(paramName, paramValue);
-                    }
-                    boolQuery.must(builds);
+                }
+                if (Objects.nonNull(startTime) || Objects.nonNull(endTime)) {
+                    must.add(rangeQuery(paramName, startTime, endTime));
                 }
             }
-            if (Objects.nonNull(startTime) || Objects.nonNull(endTime)) {
-                QueryBuilder builds = QueryBuilders.rangeQuery(paramName)
-                        .from(startTime).to(endTime).includeLower(true);
-                boolQuery.must(builds);
-            }
         }
-        sourceBuilder.trackTotalHits(true);
-        sourceBuilder.query(boolQuery);
-        return sourceBuilder;
+
+        JSONObject bool = new JSONObject();
+        bool.put("must", must);
+        JSONObject query = new JSONObject();
+        query.put("bool", bool);
+
+        JSONObject dsl = new JSONObject();
+        dsl.put("query", query);
+        if (StringUtil.isNotEmpty(sortParam)) {
+            JSONArray sort = new JSONArray();
+            sort.add(fieldSort(sortParam, sortOrder));
+            dsl.put("sort", sort);
+        }
+        dsl.put("track_total_hits", true);
+        if (Objects.nonNull(from)) {
+            dsl.put("from", from);
+        }
+        if (Objects.nonNull(size)) {
+            dsl.put("size", size);
+        }
+        return dsl.toJSONString();
+    }
+
+    private JSONObject termQuery(String field, Object value) {
+        JSONObject body = new JSONObject();
+        body.put(field, value);
+        JSONObject query = new JSONObject();
+        query.put("term", body);
+        return query;
+    }
+
+    private JSONObject matchQuery(String field, Object value) {
+        JSONObject body = new JSONObject();
+        body.put(field, value);
+        JSONObject query = new JSONObject();
+        query.put("match", body);
+        return query;
+    }
+
+    private JSONObject termsQuery(String field, Collection<?> values) {
+        JSONArray array = new JSONArray();
+        array.addAll(values);
+        JSONObject body = new JSONObject();
+        body.put(field, array);
+        JSONObject query = new JSONObject();
+        query.put("terms", body);
+        return query;
+    }
+
+    private JSONObject rangeQuery(String field, Date startTime, Date endTime) {
+        JSONObject bounds = new JSONObject();
+        // 用 epoch 毫秒，而不是 Date 对象：fastjson 会把 Date 序列化成 "yyyy-MM-dd HH:mm:ss"，
+        // ES 的 date 字段（默认 strict_date_optional_time||epoch_millis）不接受该格式，会 400。
+        if (Objects.nonNull(startTime)) {
+            bounds.put("gte", startTime.getTime());
+        }
+        if (Objects.nonNull(endTime)) {
+            bounds.put("lte", endTime.getTime());
+        }
+        JSONObject body = new JSONObject();
+        body.put(field, bounds);
+        JSONObject query = new JSONObject();
+        query.put("range", body);
+        return query;
+    }
+
+    private JSONObject fieldSort(String field, String order) {
+        JSONObject orderBody = new JSONObject();
+        orderBody.put("order", "asc".equalsIgnoreCase(order) ? "asc" : "desc");
+        JSONObject sort = new JSONObject();
+        sort.put(field, orderBody);
+        return sort;
+    }
+
+    private JSONObject boolQuery(JSONArray must, JSONArray should, JSONArray mustNot) {
+        JSONObject bool = new JSONObject();
+        if (Objects.nonNull(must)) {
+            bool.put("must", must);
+        }
+        if (Objects.nonNull(should)) {
+            bool.put("should", should);
+        }
+        if (Objects.nonNull(mustNot)) {
+            bool.put("must_not", mustNot);
+        }
+        JSONObject query = new JSONObject();
+        query.put("bool", bool);
+        return query;
     }
 
     /**
@@ -400,17 +472,16 @@ public class BusinessEsHandle {
      * 支持 highlight 回填和高亮字段替换、sort 值提取。
      */
     public <T> void executeQuery(String indexName, String indexType, List<T> list, PageInfo<T> pageInfo, Class<T> clazz,
-                                 SearchSourceBuilder sourceBuilder, List<String> highLightFieldNameList) throws IOException {
-        String string = sourceBuilder.toString();
-        HttpEntity entity = new NStringEntity(string, ContentType.APPLICATION_JSON);
+                                 String searchDsl, List<String> highLightFieldNameList) throws IOException {
+        HttpEntity entity = new NStringEntity(searchDsl, ContentType.APPLICATION_JSON);
         StringBuilder endpointStringBuilder = new StringBuilder("/" + indexName);
-        if (esTypeSwitch) {
+        if (Boolean.TRUE.equals(esTypeSwitch)) {
             endpointStringBuilder.append("/").append(indexType).append("/_search");
         } else {
             endpointStringBuilder.append("/_search");
         }
         String endpoint = endpointStringBuilder.toString();
-        log.info("query execute query dsl : {}", string);
+        log.info("query execute query dsl : {}", searchDsl);
         Response response = execute("POST", endpoint, entity);
         String result = EntityUtils.toString(response.getEntity());
         if (StringUtil.isEmpty(result)) {
@@ -426,7 +497,7 @@ public class BusinessEsHandle {
         }
         Long value = null;
         // ES 6.x: hits.total 直接为数字；ES 7.x+: hits.total 为 {value, relation} 对象
-        if (esTypeSwitch) {
+        if (Boolean.TRUE.equals(esTypeSwitch)) {
             value = hits.getLong("total");
         } else {
             JSONObject totalJsonObject = hits.getJSONObject("total");
@@ -478,12 +549,13 @@ public class BusinessEsHandle {
     }
 
     public void deleteByDocumentId(String index, String documentId) {
-        if (!esSwitch) {
+        if (!Boolean.TRUE.equals(esSwitch)) {
             return;
         }
         try {
             Response response = execute("DELETE", "/" + index + "/_doc/" + documentId, null);
             log.info("deleteByDocumentId result : {}", response.getStatusLine().getReasonPhrase());
+            consumeQuietly(response);
         } catch (Exception e) {
             log.error("deleteByDocumentId error", e);
         }
@@ -498,5 +570,18 @@ public class BusinessEsHandle {
             request.setEntity(entity);
         }
         return restClient.performRequest(request);
+    }
+
+    /**
+     * 释放低层 RestClient 的响应实体。
+     * <p>
+     * RestClient 的连接在实体被消费/关闭前不会归还连接池：只读状态码而不消费实体的调用
+     * 会逐个泄漏连接，累计后连接池耗尽。仅读状态码的调用一律在读完状态后调用本方法。
+     */
+    private void consumeQuietly(Response response) {
+        if (Objects.isNull(response)) {
+            return;
+        }
+        EntityUtils.consumeQuietly(response.getEntity());
     }
 }

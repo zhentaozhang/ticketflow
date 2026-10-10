@@ -1,0 +1,40 @@
+# 高并发流量的弹性：按 CPU 利用率自动扩缩容。
+# 注意：需要集群安装 metrics-server（kind 默认没有，需单独安装）。
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: program
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: program
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60

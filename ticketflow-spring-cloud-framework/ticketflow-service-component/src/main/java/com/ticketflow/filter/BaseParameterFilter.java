@@ -16,23 +16,21 @@ import java.io.IOException;
 
 import static com.ticketflow.constant.Constant.CODE;
 import static com.ticketflow.constant.Constant.GRAY_PARAMETER;
-import static com.ticketflow.constant.Constant.TRACE_ID;
 import static com.ticketflow.constant.Constant.USER_ID;
 
 /**
  * 下游微服务接收端过滤器。
  * <p>
  * 作用：
- * 1. 接收上游 Gateway 或其他微服务传递过来的公共请求参数。
- * 2. 将请求中的 traceId、用户信息、灰度标识等保存到当前线程上下文。
- * 3. 将 traceId 等信息放入 MDC，用于日志链路追踪。
- * 4. 请求结束后清理上下文，避免线程复用导致数据污染。
+ * 1. 接收上游 Gateway 或其他微服务传递过来的业务公共请求参数（灰度标识/用户信息/渠道等）。
+ * 2. 将参数保存到当前线程上下文（ThreadLocal + MDC）。
+ * 3. 请求结束后清理上下文，避免线程复用导致数据污染。
  * <p>
  * 调用链路：
  * <p>
  * Gateway
  * ↓
- * 注入 Header 参数(traceId/userId/gray/code)
+ * 注入 Header 参数(userId/gray/code)
  * ↓
  * Feign 调用其他微服务
  * ↓
@@ -40,12 +38,15 @@ import static com.ticketflow.constant.Constant.USER_ID;
  * ↓
  * ThreadLocal + MDC 保存上下文
  *
+ * 说明：链路追踪上下文（trace_id/span_id）由 OpenTelemetry Java Agent 注入 MDC，
+ * 本过滤器只负责 userId/gray/code 等业务上下文。
  */
 
-// BaseParameterFilter 是微服务中的上下文传递过滤器，继承 OncePerRequestFilter，
-// 在请求进入服务时从 Header 中获取 Gateway 传递的 traceId、用户信息、灰度标识等公共参数，
-// 并保存到 ThreadLocal 供业务代码使用，同时写入 MDC 实现日志链路追踪。
+// BaseParameterFilter 是微服务中的业务上下文传递过滤器，继承 OncePerRequestFilter，
+// 在请求进入服务时从 Header 中获取 Gateway 传递的 userId、灰度标识、渠道等公共参数，
+// 保存到 ThreadLocal 供业务代码使用，并写入 MDC 供日志过滤。
 // 请求结束后通过 finally 清理 ThreadLocal 和 MDC，避免线程复用导致的数据污染和内存泄漏。
+// 注：链路追踪上下文（trace_id/span_id）由 OpenTelemetry Java Agent 注入，不在此处理。
 @Slf4j
 public class BaseParameterFilter extends OncePerRequestFilter {
 
@@ -91,9 +92,6 @@ public class BaseParameterFilter extends OncePerRequestFilter {
          * 这些参数通常由 Gateway 或 Feign 拦截器进行传递。
          */
 
-        // 请求链路唯一标识，用于全链路日志追踪
-        String traceId = request.getHeader(TRACE_ID);
-
         // 灰度发布标识，用于灰度流量控制
         String gray = request.getHeader(GRAY_PARAMETER);
 
@@ -107,24 +105,10 @@ public class BaseParameterFilter extends OncePerRequestFilter {
         try {
 
             /*
-             * 保存 traceId。
-             *
-             * BaseParameterHolder：
-             * 保存当前请求线程中的公共参数。
-             *
-             * MDC：
-             * 保存日志上下文信息。
-             */
-            if (StringUtil.isNotEmpty(traceId)) {
-
-                BaseParameterHolder.setParameter(TRACE_ID, traceId);
-
-                MDC.put(TRACE_ID, traceId);
-            }
-
-
-            /*
              * 保存灰度标识。
+             *
+             * BaseParameterHolder：保存当前请求线程中的业务公共参数。
+             * MDC：写入日志上下文，便于日志按灰度标识过滤。
              */
             if (StringUtil.isNotEmpty(gray)) {
 
@@ -179,11 +163,6 @@ public class BaseParameterFilter extends OncePerRequestFilter {
              * 如果 ThreadLocal 中的数据不删除，
              * 后续请求可能读取到之前请求的数据。
              */
-
-            // 清理 traceId
-            BaseParameterHolder.removeParameter(TRACE_ID);
-            MDC.remove(TRACE_ID);
-
 
             // 清理灰度参数
             BaseParameterHolder.removeParameter(GRAY_PARAMETER);

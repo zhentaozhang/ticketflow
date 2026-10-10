@@ -29,4 +29,13 @@ public class RefundDto {
     
     @Schema(name ="reason", type ="String", description ="退款原因")
     private String reason;
+
+    /**
+     * 退款请求幂等键（可选但强烈建议提供）。
+     * 作为渠道侧退款单号（outRefundNo）与 d_refund_bill.out_refund_no 唯一键：
+     * 同一 refundRequestId 的重试（超时/消息重投）不会产生第二笔退款。
+     * 为空时退化为每次生成新单号（旧行为，不幂等）。
+     */
+    @Schema(name ="refundRequestId", type ="String", description ="退款请求幂等键")
+    private String refundRequestId;
 }

@@ -594,7 +594,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      */
     public ProgramVo getByIdMultipleCache(Long programId, Date showTime) {
         return localCacheProgram.getCache(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId).getRelKey(),
-                key -> {
+                key -> {    // 加载函数，只有 miss 才执行
                     log.info("查询节目详情 从本地缓存没有查询到 节目id : {}", programId);
                     ProgramVo programVo = getById(programId, DateUtils.countBetweenSecond(DateUtils.now(), showTime),
                             TimeUnit.SECONDS);
@@ -652,20 +652,28 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      * 内部 Redis 不存在时获取 ReentrantLock，二次检查后查 DB 回填，
      * 避免同一个节目在缓存过期瞬间被重复加载（cache stampede）。
      */
-    @ServiceLock(lockType = LockType.Read, name = PROGRAM_LOCK, keys = {"#programId"})
+    @ServiceLock(lockType = LockType.Read, name = PROGRAM_LOCK, keys = {"#programId"})  //分布式读锁
     public ProgramVo getById(Long programId, Long expireTime, TimeUnit timeUnit) {
         ProgramVo programVo =
                 redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId), ProgramVo.class);
         if (Objects.nonNull(programVo)) {
             return programVo;
-        }
+        }  // Redis 命中直接返回
         log.info("查询节目详情 从Redis缓存没有查询到 节目id : {}", programId);
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_PROGRAM_LOCK, new String[]{String.valueOf(programId)});
-        lock.lock();
+        if (!serviceLockTool.tryLock(lock, "GET_PROGRAM_LOCK:" + programId)) {
+            // 等超时：先再查一次缓存（可能刚好被填好），仍没有就快速失败，不无锁重建
+            programVo = redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId),
+                    ProgramVo.class);
+            if (Objects.nonNull(programVo)) {
+                return programVo;
+            }
+            throw new TicketFlowFrameException(BaseCode.CACHE_LOAD_LOCK_TIMEOUT);
+        }
         try {
             return redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId)
                     , ProgramVo.class,
-                    () -> createProgramVo(programId)
+                    () -> createProgramVo(programId)   //查 DB 回填
                     , expireTime,
                     timeUnit);
         } finally {
@@ -694,7 +702,16 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
             return programGroupVo;
         }
         RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_PROGRAM_LOCK, new String[]{String.valueOf(programGroupId)});
-        lock.lock();
+        if (!serviceLockTool.tryLock(lock, "GET_PROGRAM_GROUP_LOCK:" + programGroupId)) {
+            // 等超时：先再查一次缓存（可能刚好被填好），仍没有就快速失败，不无锁重建
+            programGroupVo = redisCache.get(
+                    RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, programGroupId),
+                    ProgramGroupVo.class);
+            if (Objects.nonNull(programGroupVo)) {
+                return programGroupVo;
+            }
+            throw new TicketFlowFrameException(BaseCode.CACHE_LOAD_LOCK_TIMEOUT);
+        }
         try {
             programGroupVo = redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, programGroupId),
                     ProgramGroupVo.class);
@@ -761,6 +778,10 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     public Boolean operateSeatLockAndTicketCategoryRemainNumber(ReduceRemainNumberDto reduceRemainNumberDto) {
         List<TicketCategoryCountDto> ticketCategoryCountDtoList = reduceRemainNumberDto.getTicketCategoryCountDtoList();
         List<Long> seatIdList = reduceRemainNumberDto.getSeatIdList();
+        // 空座位列表直接抛业务异常，避免生成 "id IN ()" 触发 ShardingSphere SQL 解析异常
+        if (CollectionUtil.isEmpty(seatIdList)) {
+            throw new TicketFlowFrameException(BaseCode.SEAT_NOT_EXIST);
+        }
 
         // MyBatis Plus LambdaQueryWrapper：用面向对象方式拼 WHERE 条件，避免写死字符串字段名
         // 相当于：SELECT * FROM d_seat WHERE program_id = ? AND id IN (?, ?, ?)
@@ -819,6 +840,10 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     @Transactional(rollbackFor = Exception.class)
     public Boolean operateProgramData(ProgramOperateDataDto programOperateDataDto) {
         List<Long> seatIdList = programOperateDataDto.getSeatIdList();
+        // 空座位列表直接抛业务异常，避免生成 "id IN ()" 触发 ShardingSphere SQL 解析异常
+        if (CollectionUtil.isEmpty(seatIdList)) {
+            throw new TicketFlowFrameException(BaseCode.SEAT_NOT_EXIST);
+        }
         LambdaQueryWrapper<Seat> seatLambdaQueryWrapper =
                 Wrappers.lambdaQuery(Seat.class)
                         .eq(Seat::getProgramId, programOperateDataDto.getProgramId())
@@ -838,8 +863,12 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         Integer orderVersion = programOperateDataDto.getOrderVersion();
         // V1-V3：直接在 DB 检查 SOLD 并更新（无 LOCK 中间态）；orderVersion 为空按历史版本语义处理
         if (!ProgramOrderVersion.V4_VERSION.getValue().equals(orderVersion)) {
+            // V1-V3：无 LOCK 中间态，按请求的 sellStatus 直接落库。
+            // 支付（SOLD）：座位置 SOLD 并扣减 remain；取消（NO_SOLD）：座位置 NO_SOLD 并归还 remain。
+            // 修正点：原先无视 sellStatus 一律按支付处理（置 SOLD + 扣库存），取消会被当成支付。
+            boolean toSold = Objects.equals(programOperateDataDto.getSellStatus(), SellStatus.SOLD.getCode());
             for (Seat seat : seatList) {
-                if (Objects.equals(seat.getSellStatus(), SellStatus.SOLD.getCode())) {
+                if (toSold && Objects.equals(seat.getSellStatus(), SellStatus.SOLD.getCode())) {
                     throw new TicketFlowFrameException(BaseCode.SEAT_SOLD);
                 }
             }
@@ -848,13 +877,19 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
                             .eq(Seat::getProgramId, programOperateDataDto.getProgramId())
                             .in(Seat::getId, seatIdList);
             Seat updateSeat = new Seat();
-            updateSeat.setSellStatus(SellStatus.SOLD.getCode());
+            updateSeat.setSellStatus(toSold ? SellStatus.SOLD.getCode() : SellStatus.NO_SOLD.getCode());
             seatMapper.update(updateSeat, seatLambdaUpdateWrapper);
-            List<TicketCategoryCountDto> ticketCategoryCountDtoList = programOperateDataDto.getTicketCategoryCountDtoList();
-            int updateRemainNumberCount =
-                    ticketCategoryMapper.batchUpdateRemainNumber(ticketCategoryCountDtoList, programOperateDataDto.getProgramId());
-            if (updateRemainNumberCount != ticketCategoryCountDtoList.size()) {
-                throw new TicketFlowFrameException(BaseCode.UPDATE_TICKET_CATEGORY_COUNT_NOT_CORRECT);
+            // 逐票档扣减/归还库存：复用带 remain_number 下限保护的单条 SQL，
+            // 替代原先 `<foreach>` 拼接多条 UPDATE（多票档时是非法 SQL）的批量方法。
+            for (TicketCategoryCountDto ticketCategoryCountDto : programOperateDataDto.getTicketCategoryCountDtoList()) {
+                int affected = toSold
+                        ? ticketCategoryMapper.reduceRemainNumber(ticketCategoryCountDto.getCount(),
+                                ticketCategoryCountDto.getTicketCategoryId(), programOperateDataDto.getProgramId())
+                        : ticketCategoryMapper.increaseRemainNumber(ticketCategoryCountDto.getCount(),
+                                ticketCategoryCountDto.getTicketCategoryId(), programOperateDataDto.getProgramId());
+                if (affected <= 0) {
+                    throw new TicketFlowFrameException(BaseCode.UPDATE_TICKET_CATEGORY_COUNT_NOT_CORRECT);
+                }
             }
         } else {
             // V4：座位有 LOCK 中间态，必须从 LOCK→SOLD（支付）或 LOCK→NO_SOLD（取消）
@@ -865,6 +900,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
             }
 
             Seat updateSeat = new Seat();
+            List<TicketCategoryCountDto> ticketCategoryCountDtoList = programOperateDataDto.getTicketCategoryCountDtoList();
             //订单支付成功的操作
             if (Objects.equals(programOperateDataDto.getSellStatus(), SellStatus.SOLD.getCode())) {
                 updateSeat.setSellStatus(SellStatus.SOLD.getCode());
@@ -874,16 +910,14 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
                                 .in(Seat::getId, seatIdList);
                 seatMapper.update(updateSeat, seatLambdaUpdateWrapper);
             } else if (Objects.equals(programOperateDataDto.getSellStatus(), SellStatus.NO_SOLD.getCode())) {
-                //订单取消的操作  
+                //订单取消的操作：无论 NO_SOLD 还是 LOCK 都置回 NO_SOLD
                 updateSeat.setSellStatus(SellStatus.NO_SOLD.getCode());
                 LambdaUpdateWrapper<Seat> seatLambdaUpdateWrapper =
                         Wrappers.lambdaUpdate(Seat.class)
                                 .eq(Seat::getProgramId, programOperateDataDto.getProgramId())
                                 .in(Seat::getId, seatIdList);
                 seatMapper.update(updateSeat, seatLambdaUpdateWrapper);
-                List<TicketCategoryCountDto> ticketCategoryCountDtoList = programOperateDataDto.getTicketCategoryCountDtoList();
                 int updateRemainNumberCount = 0;
-                //把库存增加回去
                 for (TicketCategoryCountDto ticketCategoryCountDto : ticketCategoryCountDtoList) {
                     updateRemainNumberCount = updateRemainNumberCount + ticketCategoryMapper.increaseRemainNumber(
                             ticketCategoryCountDto.getCount(), ticketCategoryCountDto.getTicketCategoryId(),
@@ -1174,12 +1208,12 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     public Boolean invalid(final ProgramInvalidDto programInvalidDto) {
         Program program = new Program();
         program.setId(programInvalidDto.getId());
-        program.setProgramStatus(BusinessStatus.NO.getCode());
+        program.setProgramStatus(BusinessStatus.NO.getCode());  // ① 更新 DB：状态改为下架
         int result = programMapper.updateById(program);
         if (result > 0) {
-            delRedisData(programInvalidDto.getId());
-            redisStreamPushHandler.push(String.valueOf(programInvalidDto.getId()));
-            programEs.deleteByProgramId(programInvalidDto.getId());
+            delRedisData(programInvalidDto.getId());  // ② 删 Redis 所有相关 key
+            redisStreamPushHandler.push(String.valueOf(programInvalidDto.getId()));  // ③ 广播失效事件
+            programEs.deleteByProgramId(programInvalidDto.getId());  // ④ 删 ES 索引
             return true;
         } else {
             return false;
@@ -1206,7 +1240,18 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     public void delLocalCache(Long programId) {
         log.info("删除本地缓存 programId : {}", programId);
         localCacheProgram.del(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId).getRelKey());
-        localCacheProgramGroup.del(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, programId).getRelKey());
+        // 分组本地缓存的 key 是 programGroupId（见 getProgramGroupMultipleCache），
+        // 不是 programId；原来用 programId 删，导致分组缓存失效不掉、只能等 5 分钟上界。
+        try {
+            Program program = programMapper.selectById(programId);
+            if (Objects.nonNull(program) && Objects.nonNull(program.getProgramGroupId())) {
+                localCacheProgramGroup.del(
+                        RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, program.getProgramGroupId()).getRelKey());
+            }
+        } catch (Exception e) {
+            // 分组缓存删不掉不影响其余本地缓存失效，记日志即可
+            log.warn("删除节目组本地缓存失败 programId : {}", programId, e);
+        }
         localCacheProgramShowTime.del(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SHOW_TIME, programId).getRelKey());
         localCacheTicketCategory.del(programId);
     }

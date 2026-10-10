@@ -1,0 +1,47 @@
+# 后端服务仅集群内暴露（ClusterIP），由 Ingress 统一经 gateway 接入。
+# 不映射固定宿主端口，才能让 Deployment 自由扩缩容（对比 Compose 的固定端口限制）。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels:
+    app: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: gateway
+  ports:
+    - name: http
+      port: 6085
+      targetPort: 6085
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order
+  labels:
+    app: order
+spec:
+  type: ClusterIP
+  selector:
+    app: order
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: program
+  labels:
+    app: program
+spec:
+  type: ClusterIP
+  selector:
+    app: program
+  ports:
+    - name: http
+      port: 6086
+      targetPort: 6086

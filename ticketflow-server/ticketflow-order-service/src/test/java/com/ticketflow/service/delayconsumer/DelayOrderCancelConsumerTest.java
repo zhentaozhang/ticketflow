@@ -8,7 +8,9 @@ import com.ticketflow.dto.InsertMessageConsumerRecordDto;
 import com.ticketflow.dto.MessageIdDto;
 import com.ticketflow.dto.OrderCancelDto;
 import com.ticketflow.dto.UpdateMessageConsumerRecordDto;
+import com.ticketflow.enums.BaseCode;
 import com.ticketflow.enums.MessageConsumerStatus;
+import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.module.DelayOrderCancelMessageModule;
 import com.ticketflow.service.OrderService;
 import com.ticketflow.vo.MessageConsumerRecordVo;
@@ -92,6 +94,42 @@ class DelayOrderCancelConsumerTest {
         verify(apiDataClient).updateMessageConsumerRecord(captor.capture());
         assertEquals(9L, captor.getValue().getId());
         assertEquals(MessageConsumerStatus.CONSUMER_SUCCESS.getCode(), captor.getValue().getMessageConsumerStatus());
+    }
+
+    @Test
+    void 取消抛订单已支付终态_视为消费成功() {
+        when(apiDataClient.getMessageConsumerByMessageId(any(MessageIdDto.class))).thenReturn(ApiResponse.ok(null));
+        MessageConsumerRecordVo recordVo = new MessageConsumerRecordVo();
+        recordVo.setId(9L);
+        recordVo.setMessageConsumerCount(1);
+        when(apiDataClient.insertMessageConsumerRecord(any(InsertMessageConsumerRecordDto.class)))
+                .thenReturn(ApiResponse.ok(recordVo));
+        when(orderService.cancel(any(OrderCancelDto.class)))
+                .thenThrow(new TicketFlowFrameException(BaseCode.ORDER_PAY));
+
+        delayOrderCancelConsumer.execute(buildContent());
+
+        ArgumentCaptor<UpdateMessageConsumerRecordDto> captor = ArgumentCaptor.forClass(UpdateMessageConsumerRecordDto.class);
+        verify(apiDataClient).updateMessageConsumerRecord(captor.capture());
+        assertEquals(MessageConsumerStatus.CONSUMER_SUCCESS.getCode(), captor.getValue().getMessageConsumerStatus());
+    }
+
+    @Test
+    void 取消抛订单不存在_标记失败保留重试() {
+        when(apiDataClient.getMessageConsumerByMessageId(any(MessageIdDto.class))).thenReturn(ApiResponse.ok(null));
+        MessageConsumerRecordVo recordVo = new MessageConsumerRecordVo();
+        recordVo.setId(9L);
+        recordVo.setMessageConsumerCount(1);
+        when(apiDataClient.insertMessageConsumerRecord(any(InsertMessageConsumerRecordDto.class)))
+                .thenReturn(ApiResponse.ok(recordVo));
+        when(orderService.cancel(any(OrderCancelDto.class)))
+                .thenThrow(new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST));
+
+        delayOrderCancelConsumer.execute(buildContent());
+
+        ArgumentCaptor<UpdateMessageConsumerRecordDto> captor = ArgumentCaptor.forClass(UpdateMessageConsumerRecordDto.class);
+        verify(apiDataClient).updateMessageConsumerRecord(captor.capture());
+        assertEquals(MessageConsumerStatus.CONSUMER_FAIL.getCode(), captor.getValue().getMessageConsumerStatus());
     }
 
     @Test

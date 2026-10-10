@@ -32,19 +32,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Slf4j
 @EnableConfigurationProperties(RedisStreamConfigProperties.class)
 public class RedisStreamAutoConfig {
-    
+
     @Bean
-    public RedisStreamPushHandler redisStreamPushHandler(StringRedisTemplate stringRedisTemplate, 
+    public RedisStreamPushHandler redisStreamPushHandler(StringRedisTemplate stringRedisTemplate,
                                                          RedisStreamConfigProperties redisStreamConfigProperties) {
         return new RedisStreamPushHandler(stringRedisTemplate, redisStreamConfigProperties);
     }
-    
+
     @Bean
-    public RedisStreamHandler redisStreamHandler(RedisStreamPushHandler redisStreamPushHandler, 
+    public RedisStreamHandler redisStreamHandler(RedisStreamPushHandler redisStreamPushHandler,
                                                  StringRedisTemplate stringRedisTemplate) {
         return new RedisStreamHandler(redisStreamPushHandler, stringRedisTemplate);
     }
-    
+
     /**
      * 主要做的是将OrderStreamListener监听绑定消费者，用于接收消息
      *
@@ -52,38 +52,42 @@ public class RedisStreamAutoConfig {
      * @return StreamMessageListenerContainer
      */
     @Bean
-    @ConditionalOnBean(MessageConsumer.class)
+    @ConditionalOnBean(MessageConsumer.class)  // 有消费者才创建容器
     public StreamMessageListenerContainer<String, ObjectRecord<String, String>> streamMessageListenerContainer(
-            RedisConnectionFactory redisConnectionFactory, 
-            RedisStreamConfigProperties redisStreamConfigProperties, 
-            RedisStreamHandler redisStreamHandler, 
+
+            RedisConnectionFactory redisConnectionFactory,
+            RedisStreamConfigProperties redisStreamConfigProperties,
+            RedisStreamHandler redisStreamHandler,
             MessageConsumer messageConsumer) {
-        StreamMessageListenerContainer.StreamMessageListenerContainerOptions<String, ObjectRecord<String, String>> 
+        // 监听容器选项：轮询5秒、批量10条、专属线程池
+        StreamMessageListenerContainer.StreamMessageListenerContainerOptions<String, ObjectRecord<String, String>>
                 options = StreamMessageListenerContainer.StreamMessageListenerContainerOptions.builder()
-                    .pollTimeout(Duration.ofSeconds(5))
-                    .batchSize(10)
-                    .targetType(String.class)
-                    .errorHandler(t -> log.error("出现异常", t))
-                    .executor(createThreadPool()).build();
-        StreamMessageListenerContainer<String, ObjectRecord<String, String>> container = 
+                .pollTimeout(Duration.ofSeconds(5))
+                .batchSize(10)
+                .targetType(String.class)
+                .errorHandler(t -> log.error("出现异常", t))
+                .executor(createThreadPool()).build();  // 核心=CPU核数，拒绝策略CallerRuns
+        StreamMessageListenerContainer<String, ObjectRecord<String, String>> container =
                 StreamMessageListenerContainer.create(redisConnectionFactory, options);
         checkConsumerType(redisStreamConfigProperties.getConsumerType());
         RedisStreamListener redisStreamListener = new RedisStreamListener(messageConsumer);
         if (RedisStreamConstant.GROUP.equals(redisStreamConfigProperties.getConsumerType())) {
-            redisStreamHandler.streamBindingGroup(redisStreamConfigProperties.getStreamName(), 
+            // 消费组模式：先初始化 stream+group，再按"组内未消费"位置接收
+            redisStreamHandler.streamBindingGroup(redisStreamConfigProperties.getStreamName(),
                     redisStreamConfigProperties.getConsumerGroup());
-            container.receiveAutoAck(Consumer.from(redisStreamConfigProperties.getConsumerGroup(), 
-                    redisStreamConfigProperties.getConsumerName()), 
-                    StreamOffset.create(redisStreamConfigProperties.getStreamName(), ReadOffset.lastConsumed()), 
+            container.receiveAutoAck(Consumer.from(redisStreamConfigProperties.getConsumerGroup(),
+                            redisStreamConfigProperties.getConsumerName()),
+                    StreamOffset.create(redisStreamConfigProperties.getStreamName(), ReadOffset.lastConsumed()),
                     redisStreamListener);
         } else {
+            // 广播模式（本项目用这个！）：每个消费者从 stream 开头消费全部消息
             container.receive(StreamOffset.fromStart(redisStreamConfigProperties.getStreamName()), redisStreamListener);
         }
         container.start();
         return container;
     }
-    
-    public ThreadPoolExecutor createThreadPool(){
+
+    public ThreadPoolExecutor createThreadPool() {
         int coreThreadCount = Runtime.getRuntime().availableProcessors();
         AtomicInteger threadCount = new AtomicInteger(1);
         return new ThreadPoolExecutor(
@@ -99,7 +103,8 @@ public class RedisStreamAutoConfig {
                 },
                 new ThreadPoolExecutor.CallerRunsPolicy());
     }
-    public void checkConsumerType(String consumerType){
+
+    public void checkConsumerType(String consumerType) {
         if ((!RedisStreamConstant.GROUP.equals(consumerType)) && (!RedisStreamConstant.BROADCAST.equals(consumerType))) {
             throw new TicketFlowFrameException(BaseCode.REDIS_STREAM_CONSUMER_TYPE_NOT_EXIST);
         }

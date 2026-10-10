@@ -12,7 +12,6 @@ import java.util.Collection;
 
 import static com.ticketflow.constant.Constant.CODE;
 import static com.ticketflow.constant.Constant.GRAY_PARAMETER;
-import static com.ticketflow.constant.Constant.TRACE_ID;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,9 +35,8 @@ class FeignRequestInterceptorTest {
     }
 
     @Test
-    void applyShouldPropagateTraceIdCodeAndGrayFromRequest() {
+    void applyShouldPropagateCodeAndGrayFromRequest() {
         HttpServletRequest request = mock(HttpServletRequest.class);
-        when(request.getHeader(TRACE_ID)).thenReturn("trace-1");
         when(request.getHeader(CODE)).thenReturn("2");
         when(request.getHeader(GRAY_PARAMETER)).thenReturn("true");
         RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
@@ -47,7 +45,6 @@ class FeignRequestInterceptorTest {
 
         interceptor.apply(template);
 
-        assertEquals(headerValue(template, TRACE_ID), "trace-1");
         assertEquals(headerValue(template, CODE), "2");
         assertEquals(headerValue(template, GRAY_PARAMETER), "true");
     }
@@ -55,7 +52,6 @@ class FeignRequestInterceptorTest {
     @Test
     void applyShouldFallbackToServerGrayWhenRequestHasNoGray() {
         HttpServletRequest request = mock(HttpServletRequest.class);
-        when(request.getHeader(TRACE_ID)).thenReturn("trace-1");
         when(request.getHeader(CODE)).thenReturn("2");
         when(request.getHeader(GRAY_PARAMETER)).thenReturn(null);
         RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));

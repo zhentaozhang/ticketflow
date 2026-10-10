@@ -11,7 +11,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PostConstruct;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 /**
@@ -46,7 +45,10 @@ public class LocalCacheProgramShowTime {
                     @Override
                     public long expireAfterCreate(@NonNull final String key, @NonNull final ProgramShowTime value, 
                                                   final long currentTime) {
-                        return TimeUnit.SECONDS.toNanos(DateUtils.countBetweenSecond(DateUtils.now(),value.getShowTime()));
+                        // 这里单位本来就是对的（秒），但要补上本地缓存的上界：
+                        // 过期时间可以长达几十天，一旦漏了失效消息就会长期拿旧值。
+                        return LocalCacheTtl.capNanos(
+                                DateUtils.countBetweenSecond(DateUtils.now(), value.getShowTime()));
                     }
                     
                     @Override

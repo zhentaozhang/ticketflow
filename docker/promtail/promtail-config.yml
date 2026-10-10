@@ -1,0 +1,26 @@
+# =============================================================================
+# Promtail 配置：采集宿主机挂载进来的应用日志（compose 将 ../logs/container
+# 挂载到容器 /var/log/ticketflow），推送到 Loki。
+#
+# 为什么走文件而不是 Docker 日志驱动：macOS 上 Docker Desktop 无法直接访问
+# /var/lib/docker/containers，而应用日志已由 compose 绑定挂载到宿主机，直接 tail 更可靠。
+# =============================================================================
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: ticketflow-app
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: ticketflow-app
+          # 每个服务一个子目录：/var/log/ticketflow/<svc>/log.log
+          __path__: /var/log/ticketflow/*/*.log

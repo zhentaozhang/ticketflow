@@ -37,8 +37,6 @@ import java.util.Enumeration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-import static com.ticketflow.constant.Constant.TRACE_ID;
-
 /**
  * Json日志布局基类。Log4j2 Json布局的抽象基类，提供通用的Json格式化逻辑。
  */
@@ -47,6 +45,12 @@ abstract class BaseJsonLayout extends AbstractStringLayout {
     private static final String LINE_SEPARATOR = "\r\n";
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
     private static volatile String cachedLocalIp;
+
+    /**
+     * OpenTelemetry Java Agent 注入 MDC 的链路上下文 Key（W3C Trace Context 标准字段）。
+     */
+    private static final String TRACE_ID_KEY = "trace_id";
+    private static final String SPAN_ID_KEY = "span_id";
 
     protected final ObjectWriter jsonWriter;
     protected final String lineSeparator;
@@ -121,12 +125,15 @@ abstract class BaseJsonLayout extends AbstractStringLayout {
     }
 
     /**
-     * 添加链路追踪信息
+     * 添加链路追踪信息（W3C Trace Context 标准字段）。
+     * trace_id/span_id 由 OpenTelemetry Java Agent 注入 MDC；
+     * 无值时给默认 "-"，避免 ES 字段映射问题。
      */
     private void appendTraceInfo(Map<String, Object> logData) {
-        String traceId = MDC.get(TRACE_ID);
-        // 如果没有 traceId，给一个默认值，避免 ES 字段映射问题
-        logData.put("traceId", StringUtil.isNotEmpty(traceId) ? traceId : "-");
+        String traceId = MDC.get(TRACE_ID_KEY);
+        String spanId = MDC.get(SPAN_ID_KEY);
+        logData.put("trace_id", StringUtil.isNotEmpty(traceId) ? traceId : "-");
+        logData.put("span_id", StringUtil.isNotEmpty(spanId) ? spanId : "-");
     }
 
     /**

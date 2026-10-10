@@ -1,4 +1,5 @@
-# 支付宝回调地址（需替换为公网可访问的地址）
-# orderPayNotifyUrl: http://your-domain:6085/ticketflow/order/order/alipay/notify
-# 支付成功页面
-# orderPayReturnUrl: http://your-domain/order/paySuccess
+# 支付回调/跳转地址：pro 环境必须由环境变量注入真实公网地址，避免沿用 localhost 默认值导致回调丢失。
+# 依赖 shardingsphere-order-pro.yaml 提供分片数据源（否则 pro profile 启动即失败）。
+orderPayNotifyUrl: ${ORDER_PAY_NOTIFY_URL:http://127.0.0.1:6085/ticketflow/order/order/alipay/notify}
+orderPayReturnUrl: ${ORDER_PAY_RETURN_URL:http://127.0.0.1:5173/order/paySuccess}
+wxPayNotifyUrl: ${WX_PAY_NOTIFY_URL:http://127.0.0.1:6085/ticketflow/order/order/wx/notify}

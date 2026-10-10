@@ -19,7 +19,6 @@ import org.springframework.stereotype.Component;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 /**
  * 退款状态确认定时任务（默认每5分钟）。

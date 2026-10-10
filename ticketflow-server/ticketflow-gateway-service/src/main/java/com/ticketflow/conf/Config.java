@@ -55,13 +55,19 @@ public class Config implements WebFluxConfigurer {
     
     @Bean
     public ThreadPoolExecutor threadPoolExecutor(){
+        // 有界队列 + CallerRunsPolicy：原无界队列会让线程数永远停在 core，
+        // 下游（Feign）变慢时任务在队列里无限堆积直至 OOM；有界后由调用方兜底执行形成背压。
         return new ThreadPoolExecutor(Runtime.getRuntime().availableProcessors(),
                 Runtime.getRuntime().availableProcessors()+10,
                 60,
                 TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(),
-                r -> new Thread(
-                        Thread.currentThread().getThreadGroup(), r,
-                        "listen-start-thread-" + threadCount.getAndIncrement()));
+                new LinkedBlockingQueue<>(256),
+                r -> {
+                    Thread t = new Thread(Thread.currentThread().getThreadGroup(), r,
+                            "gateway-feign-thread-" + threadCount.getAndIncrement());
+                    t.setDaemon(true);
+                    return t;
+                },
+                new ThreadPoolExecutor.CallerRunsPolicy());
     }
 }

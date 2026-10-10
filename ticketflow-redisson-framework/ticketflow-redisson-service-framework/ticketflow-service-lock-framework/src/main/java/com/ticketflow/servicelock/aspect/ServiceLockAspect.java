@@ -1,9 +1,9 @@
 /**
  * @ServiceLock 注解的 AOP 实现——自动加锁 / 解锁 / 超时处理。
- *
+ * <p>
  * 流程：解析 @ServiceLock → LockInfoHandleFactory 获取锁信息 →
- *       ServiceLockFactory 获取对应锁类型 → lock() → 执行业务 → unlock()
- *
+ * ServiceLockFactory 获取对应锁类型 → lock() → 执行业务 → unlock()
+ * <p>
  * 锁等待超时时委托 LockTimeOutStrategy 处理（当前为快速失败）
  */
 package com.ticketflow.servicelock.aspect;
@@ -31,31 +31,28 @@ import java.lang.reflect.Method;
 import java.util.concurrent.TimeUnit;
 
 /**
+ *
  **/
 @Slf4j
 @Aspect
 @Order(-10)
 @AllArgsConstructor
 public class ServiceLockAspect {
-    
-    private final LockInfoHandleFactory lockInfoHandleFactory;
-    
-    private final ServiceLockFactory serviceLockFactory;
-    
 
-    @Around("@annotation(servicelock)")
+    private final LockInfoHandleFactory lockInfoHandleFactory;
+
+    private final ServiceLockFactory serviceLockFactory;
+
+
+    @Around("@annotation(servicelock)")        // ① 拦截"方法上有注解"的调用
     public Object around(ProceedingJoinPoint joinPoint, ServiceLock servicelock) throws Throwable {
         return lockAndProceed(joinPoint, servicelock);
     }
 
-    /**
-     * 类级 @ServiceLock 支持：类注解作为默认锁配置；方法上已有 @ServiceLock 时直接放行，
-     * 交由方法级切面处理（避免双重加锁），语义与 @Transactional 一致（方法级覆盖类级）。
-     */
-    @Around("@within(servicelock)")
+    @Around("@within(servicelock)")            // ② 拦截"类上有注解"的调用
     public Object aroundClass(ProceedingJoinPoint joinPoint, ServiceLock servicelock) throws Throwable {
-        if (isMethodAnnotated(joinPoint)) {
-            return joinPoint.proceed();
+        if (isMethodAnnotated(joinPoint)) {    // 方法自己也有注解？
+            return joinPoint.proceed();        // → 放行，交给①处理，避免加两次锁
         }
         return lockAndProceed(joinPoint, servicelock);
     }
@@ -75,38 +72,42 @@ public class ServiceLockAspect {
     }
 
     private Object lockAndProceed(ProceedingJoinPoint joinPoint, ServiceLock servicelock) throws Throwable {
+        // ① 防呆：如果发现事务已经开了才来拿锁 → 时序错了，打 warn 提醒
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
             log.warn("serviceLock:{} 在已开启的事务内获取，锁释放可能早于事务提交，存在竞态；请将 @ServiceLock 与 @Transactional 标注在同一方法",
                     servicelock.name());
         }
+        // ② 算锁 key
         LockInfoHandle lockInfoHandle = lockInfoHandleFactory.getLockInfoHandle(LockInfoType.SERVICE_LOCK);
-        String lockName = lockInfoHandle.getLockName(joinPoint, servicelock.name(),servicelock.keys());
+        String lockName = lockInfoHandle.getLockName(joinPoint, servicelock.name(), servicelock.keys());
+        // ③ 读注解配置
         LockType lockType = servicelock.lockType();
         long waitTime = servicelock.waitTime();
         TimeUnit timeUnit = servicelock.timeUnit();
-
+        // ④ 按类型拿锁
         ServiceLocker lock = serviceLockFactory.getLock(lockType);
+        // ⑤ 抢锁（tryLock 而非 lock！）
         boolean result = lock.tryLock(lockName, timeUnit, waitTime);
 
-        if (result) {
+        if (result) {                        // 抢到了
             try {
-                return joinPoint.proceed();
-            }finally{
-                lock.unlock(lockName);
+                return joinPoint.proceed();  // 放行：开事务 → 执行业务
+            } finally {
+                lock.unlock(lockName);       // 业务（含事务提交）结束后解锁，finally 保证异常也解锁
             }
-        }else {
-            log.warn("Timeout while acquiring serviceLock:{}",lockName);
+        } else {                             // 没抢到（等满 waitTime）
+            log.warn("Timeout while acquiring serviceLock:{}", lockName);
             String customLockTimeoutStrategy = servicelock.customLockTimeoutStrategy();
             if (StringUtil.isNotEmpty(customLockTimeoutStrategy)) {
-                return handleCustomLockTimeoutStrategy(customLockTimeoutStrategy, joinPoint);
+                return handleCustomLockTimeoutStrategy(customLockTimeoutStrategy, joinPoint);  // 自定义策略
             }
-            servicelock.lockTimeoutStrategy().handler(lockName);
-            // 兜底：即使超时策略实现不抛异常，也绝不在未持有锁的情况下执行业务
+            servicelock.lockTimeoutStrategy().handler(lockName);   // 默认：FAIL 抛异常
+            // 兜底：就算超时策略实现不抛异常，也绝不在没拿到锁的情况下执行业务
             throw new RuntimeException(lockName + "请求频繁");
         }
     }
 
-    public Object handleCustomLockTimeoutStrategy(String customLockTimeoutStrategy,JoinPoint joinPoint) {
+    public Object handleCustomLockTimeoutStrategy(String customLockTimeoutStrategy, JoinPoint joinPoint) {
         // prepare invocation context
         Method currentMethod = ((MethodSignature) joinPoint.getSignature()).getMethod();
         Object target = joinPoint.getTarget();
@@ -115,7 +116,7 @@ public class ServiceLockAspect {
             handleMethod = target.getClass().getDeclaredMethod(customLockTimeoutStrategy, currentMethod.getParameterTypes());
             handleMethod.setAccessible(true);
         } catch (NoSuchMethodException e) {
-            throw new RuntimeException("Illegal annotation param customLockTimeoutStrategy :" + customLockTimeoutStrategy,e);
+            throw new RuntimeException("Illegal annotation param customLockTimeoutStrategy :" + customLockTimeoutStrategy, e);
         }
         Object[] args = joinPoint.getArgs();
 
@@ -124,9 +125,9 @@ public class ServiceLockAspect {
         try {
             result = handleMethod.invoke(target, args);
         } catch (IllegalAccessException e) {
-            throw new RuntimeException("Fail to illegal access custom lock timeout handler: " + customLockTimeoutStrategy ,e);
+            throw new RuntimeException("Fail to illegal access custom lock timeout handler: " + customLockTimeoutStrategy, e);
         } catch (InvocationTargetException e) {
-            throw new RuntimeException("Fail to invoke custom lock timeout handler: " + customLockTimeoutStrategy ,e);
+            throw new RuntimeException("Fail to invoke custom lock timeout handler: " + customLockTimeoutStrategy, e);
         }
         return result;
     }
