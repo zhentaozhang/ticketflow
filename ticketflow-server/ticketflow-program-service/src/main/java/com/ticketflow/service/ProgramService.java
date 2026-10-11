@@ -1098,11 +1098,20 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
                 }
             }
         }
-        //删除缓存相关数据
-        delRedisData(programId);
-        //删除本地缓存数据
-        delLocalCache(programId);
+        //统一清理集中缓存、本实例本地缓存并广播通知集群各实例
+        evictProgramCache(programId);
         return true;
+    }
+
+    /**
+     * 统一节目缓存失效：清理 Redis 集中缓存、当前实例本地缓存，并通过 Redis Stream 广播通知集群所有实例。
+     *
+     * @param programId 节目 id
+     */
+    public void evictProgramCache(Long programId) {
+        delRedisData(programId);
+        delLocalCache(programId);
+        redisStreamPushHandler.push(String.valueOf(programId));
     }
 
     /**
@@ -1143,9 +1152,8 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         program.setProgramStatus(BusinessStatus.NO.getCode());  // ① 更新 DB：状态改为下架
         int result = programMapper.updateById(program);
         if (result > 0) {
-            delRedisData(programInvalidDto.getId());  // ② 删 Redis 所有相关 key
-            redisStreamPushHandler.push(String.valueOf(programInvalidDto.getId()));  // ③ 广播失效事件
-            programEs.deleteByProgramId(programInvalidDto.getId());  // ④ 删 ES 索引
+            evictProgramCache(programInvalidDto.getId());  // ② 统一清理缓存并广播失效
+            programEs.deleteByProgramId(programInvalidDto.getId());  // ③ 删 ES 索引
             return true;
         } else {
             return false;

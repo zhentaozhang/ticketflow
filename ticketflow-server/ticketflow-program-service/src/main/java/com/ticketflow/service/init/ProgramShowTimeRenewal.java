@@ -61,10 +61,8 @@ public class ProgramShowTimeRenewal extends AbstractApplicationPostConstructHand
                         ProgramDocumentParamName.INDEX_NAME);
             }
             for (Long programId : programIdSet) {
-                //将redis中的数据也删除
-                programService.delRedisData(programId);
-                //将本地缓存数据也删除
-                programService.delLocalCache(programId);
+                //统一删除 Redis 缓存、本实例本地缓存并广播通知集群其它实例
+                programService.evictProgramCache(programId);
             }
         }
     }
