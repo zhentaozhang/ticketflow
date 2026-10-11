@@ -472,74 +472,6 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     }
 
     /**
-     * 查询节目详情V1
-     *
-     * @param programGetDto 查询节目数据的入参
-     * @return 执行后的结果
-     *
-     */
-    public ProgramVo detailV1(ProgramGetDto programGetDto) {
-        compositeContainer.execute(CompositeCheckType.PROGRAM_DETAIL_CHECK.getValue(), programGetDto);
-        return getDetail(programGetDto);
-    }
-
-    /**
-     * 查询节目详情V2
-     *
-     * @param programGetDto 查询节目数据的入参
-     * @return 执行后的结果
-     *
-     */
-    public ProgramVo detailV2(ProgramGetDto programGetDto) {
-        compositeContainer.execute(CompositeCheckType.PROGRAM_DETAIL_CHECK.getValue(), programGetDto);
-        return getDetailV2(programGetDto);
-    }
-
-    /**
-     * 查询节目详情执行
-     *
-     * @param programGetDto 查询节目数据的入参
-     * @return 执行后的结果
-     *
-     */
-    public ProgramVo getDetail(ProgramGetDto programGetDto) {
-        // 1. 查询场次时间 + 节目详情（三级缓存兜底）
-        ProgramShowTime programShowTime = programShowTimeService.selectProgramShowTimeByProgramId(programGetDto.getId());
-        ProgramVo programVo = programService.getById(programGetDto.getId(), DateUtils.countBetweenSecond(DateUtils.now(),
-                programShowTime.getShowTime()), TimeUnit.SECONDS);
-        programVo.setShowTime(programShowTime.getShowTime());
-        programVo.setShowDayTime(programShowTime.getShowDayTime());
-        programVo.setShowWeekTime(programShowTime.getShowWeekTime());
-
-        // 2. 查询节目分组信息
-        ProgramGroupVo programGroupVo = programService.getProgramGroup(programVo.getProgramGroupId());
-        programVo.setProgramGroupVo(programGroupVo);
-
-        // 3. 预热购票人列表和下单数量（高热节目 + 已登录用户）
-        preloadTicketUserList(programVo.getHighHeat());
-
-        preloadAccountOrderCount(programVo.getId());
-
-        // 4. 查询分类名称
-        ProgramCategory programCategory = getProgramCategory(programVo.getProgramCategoryId());
-        if (Objects.nonNull(programCategory)) {
-            programVo.setProgramCategoryName(programCategory.getName());
-        }
-        ProgramCategory parentProgramCategory = getProgramCategory(programVo.getParentProgramCategoryId());
-        if (Objects.nonNull(parentProgramCategory)) {
-            programVo.setParentProgramCategoryName(parentProgramCategory.getName());
-        }
-
-        // 5. 查询票档列表
-        List<TicketCategoryVo> ticketCategoryVoList =
-                ticketCategoryService.selectTicketCategoryListByProgramId(programVo.getId(),
-                        DateUtils.countBetweenSecond(DateUtils.now(), programShowTime.getShowTime()), TimeUnit.SECONDS);
-        programVo.setTicketCategoryVoList(ticketCategoryVoList);
-
-        return programVo;
-    }
-
-    /**
      * 查询节目详情V2执行
      *
      * @param programGetDto 查询节目数据的入参
@@ -1218,17 +1150,6 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         } else {
             return false;
         }
-    }
-
-    /**
-     * 仅从本地缓存查询节目详情，不走 Redis 和 DB。
-     * 用于并发场景下获取当前线程可见的快照数据。
-     *
-     * @param programGetDto 节目查询入参
-     * @return 节目详情，本地缓存不存在时返回 null
-     */
-    public ProgramVo localDetail(final ProgramGetDto programGetDto) {
-        return localCacheProgram.getCache(String.valueOf(programGetDto.getId()));
     }
 
     /**

@@ -73,28 +73,10 @@ public class ProgramController {
         return ApiResponse.ok(programService.detail(programGetDto));
     }
 
-    @Operation(summary = "查询详情V1(根据id)")
-    @PostMapping(value = "/detail/v1")
-    public ApiResponse<ProgramVo> getDetailV1(@Valid @RequestBody ProgramGetDto programGetDto) {
-        return ApiResponse.ok(programService.detailV1(programGetDto));
-    }
-
-    @Operation(summary = "查询详情V2(根据id)")
-    @PostMapping(value = "/detail/v2")
-    public ApiResponse<ProgramVo> getDetailV2(@Valid @RequestBody ProgramGetDto programGetDto) {
-        return ApiResponse.ok(programService.detailV2(programGetDto));
-    }
-
     @Operation(summary = "节目失效(根据id)")
     @PostMapping(value = "/invalid")
     public ApiResponse<Boolean> invalid(@Valid @RequestBody ProgramInvalidDto programInvalidDto) {
         return ApiResponse.ok(programService.invalid(programInvalidDto));
-    }
-
-    @Operation(summary = "查看节目详情本地缓存(根据id)")
-    @PostMapping(value = "/local/detail")
-    public ApiResponse<ProgramVo> localDetail(@Valid @RequestBody ProgramGetDto programGetDto) {
-        return ApiResponse.ok(programService.localDetail(programGetDto));
     }
 
     @Operation(summary = "将要压测的节目相关数据进行预热(根据id)")
