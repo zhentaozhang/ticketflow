@@ -3,6 +3,7 @@ package com.ticketflow.service.kafka;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.ticketflow.core.SpringUtil;
+import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.mq.callback.FailureCallback;
 import com.ticketflow.mq.callback.SuccessCallback;
 import lombok.AllArgsConstructor;
@@ -46,15 +47,23 @@ public class CreateOrderSend {
         if (log.isDebugEnabled()) {
             log.debug("创建订单kafka发送消息 key : {} 消息体 : {}", key, message);
         }
-        CompletableFuture<SendResult<String, String>> completableFuture =
-                kafkaTemplate.send(SpringUtil.getPrefixDistinctionName() + "-" + kafkaTopic.getTopic(), key, message);
-        completableFuture.whenComplete((result, ex) -> {
-            if (Objects.isNull(ex)) {
-                successCallback.onSuccess(result);
-            } else {
-                failureCallback.onFailure(ex);
+        try {
+            CompletableFuture<SendResult<String, String>> completableFuture =
+                    kafkaTemplate.send(SpringUtil.getPrefixDistinctionName() + "-" + kafkaTopic.getTopic(), key, message);
+            if (completableFuture == null) {
+                failureCallback.onFailure(new TicketFlowFrameException("KafkaTemplate send returned null future"));
+                return;
             }
-        });
+            completableFuture.whenComplete((result, ex) -> {
+                if (Objects.isNull(ex)) {
+                    successCallback.onSuccess(result);
+                } else {
+                    failureCallback.onFailure(ex);
+                }
+            });
+        } catch (Throwable t) {
+            failureCallback.onFailure(t);
+        }
     }
 
     /**
@@ -81,15 +90,23 @@ public class CreateOrderSend {
             if (log.isDebugEnabled()) {
                 log.debug("创建订单kafka发送消息 消息体 : {}", message);
             }
-            CompletableFuture<SendResult<String, String>> completableFuture =
-                    kafkaTemplate.send(SpringUtil.getPrefixDistinctionName() + "-" + kafkaTopic.getTopic(), message);
-            completableFuture.whenComplete((result, ex) -> {
-                if (Objects.isNull(ex)) {
-                    successCallback.onSuccess(result);
-                } else {
-                    failureCallback.onFailure(ex);
+            try {
+                CompletableFuture<SendResult<String, String>> completableFuture =
+                        kafkaTemplate.send(SpringUtil.getPrefixDistinctionName() + "-" + kafkaTopic.getTopic(), message);
+                if (completableFuture == null) {
+                    failureCallback.onFailure(new TicketFlowFrameException("KafkaTemplate send returned null future"));
+                    return;
                 }
-            });
+                completableFuture.whenComplete((result, ex) -> {
+                    if (Objects.isNull(ex)) {
+                        successCallback.onSuccess(result);
+                    } else {
+                        failureCallback.onFailure(ex);
+                    }
+                });
+            } catch (Throwable t) {
+                failureCallback.onFailure(t);
+            }
         }
     }
 }

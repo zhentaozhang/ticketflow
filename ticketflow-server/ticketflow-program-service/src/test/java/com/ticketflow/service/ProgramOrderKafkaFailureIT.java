@@ -104,6 +104,8 @@ class ProgramOrderKafkaFailureIT {
     void mockKafkaSendFailure() {
         when(kafkaTemplate.send(anyString(), anyString()))
                 .thenReturn(CompletableFuture.failedFuture(new KafkaException("mock send failure")));
+        when(kafkaTemplate.send(anyString(), anyString(), anyString()))
+                .thenReturn(CompletableFuture.failedFuture(new KafkaException("mock send failure")));
     }
 
     @Autowired
