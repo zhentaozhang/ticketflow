@@ -164,6 +164,26 @@ public interface RedisCache {
      */
     void set(RedisKeyBuild redisKeyBuild, Object object, long ttl, TimeUnit timeUnit);
 
+    /**
+     * 如果不存在则设置缓存
+     *
+     * @param redisKeyBuild 缓存key
+     * @param object        缓存对象
+     * @param ttl           过期时间
+     * @param timeUnit      时间单位
+     * @return 是否设置成功
+     */
+    Boolean setIfAbsent(RedisKeyBuild redisKeyBuild, Object object, long ttl, TimeUnit timeUnit);
+
+    /**
+     * 如果不存在则设置缓存
+     *
+     * @param redisKeyBuild 缓存key
+     * @param object        缓存对象
+     * @return 是否设置成功
+     */
+    Boolean setIfAbsent(RedisKeyBuild redisKeyBuild, Object object);
+
 
     /**
      * 增加(自增长), 负数则为自减

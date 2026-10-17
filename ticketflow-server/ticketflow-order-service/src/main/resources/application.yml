@@ -31,7 +31,7 @@ spring:
         WRITE_NUMBERS_AS_STRINGS: true
   datasource:
     driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
-    url: jdbc:shardingsphere:classpath:shardingsphere-order-${spring.profiles.active}.yaml
+    url: jdbc:shardingsphere:classpath:shardingsphere-order-${SHARDING_PROFILE:${spring.profiles.active}}.yaml
     # 外层 Hikari 逻辑连接池：create_order 消费并发 48，池必须 ≥48，否则消费线程抢连接超时丢单
     hikari:
       maximum-pool-size: 64
@@ -72,6 +72,7 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       topic: create_order
+      concurrency: 48
     listener:
       # 一批消费记录全部处理成功后才提交 offset（至少一次语义），配合错误处理器实现退避重试
       ack-mode: batch
@@ -103,6 +104,9 @@ feign:
       enabled: true
   client:
     config:
+      default:
+        connect-timeout: 3000
+        read-timeout: 5000
       # UserClient 超时（contextId 固定，与前缀解耦）。
       # user-service 购票人查询为本地 DB 简单查询，3s/5s 兜底慢与挂，避免默认 60s read-timeout 拖垮下单线程
       userClient:

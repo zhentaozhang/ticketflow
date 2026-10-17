@@ -341,8 +341,9 @@ public class ProgramEs {
             pageVo = PageUtil.convertPage(pageInfo, programListVo -> programListVo);
 
         } catch (Exception e) {
-            // 14. 异常处理：记录错误日志，返回空的分页结果
+            // 14. 异常处理：记录错误日志，返回 null 触发服务层降级 DB
             log.error("search error", e);
+            return null;
         }
         return pageVo;
     }

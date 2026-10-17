@@ -30,7 +30,7 @@ spring:
         WRITE_NUMBERS_AS_STRINGS: true
   datasource:
     driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
-    url: jdbc:shardingsphere:classpath:shardingsphere-user-${spring.profiles.active}.yaml
+    url: jdbc:shardingsphere:classpath:shardingsphere-user-${SHARDING_PROFILE:${spring.profiles.active}}.yaml
   data:  
     redis:
       database: 0

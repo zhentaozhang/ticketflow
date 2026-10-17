@@ -17,13 +17,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class LocalCacheTtlTest {
 
     @Test
-    void 演出还很远时取上界值() {
+    void 演出还很远时取随机扰动上界() {
         // 30 天 = 2592000 秒，远大于上界
         long thirtyDays = TimeUnit.DAYS.toSeconds(30);
 
-        assertEquals(LocalCacheTtl.CACHE_TTL_CAP_SECONDS, LocalCacheTtl.cap(thirtyDays));
-        assertEquals(TimeUnit.SECONDS.toNanos(LocalCacheTtl.CACHE_TTL_CAP_SECONDS),
-                LocalCacheTtl.capNanos(thirtyDays));
+        long cap = LocalCacheTtl.cap(thirtyDays);
+        assertTrue(cap >= LocalCacheTtl.MIN_TTL_CAP_SECONDS && cap <= LocalCacheTtl.MAX_TTL_CAP_SECONDS,
+                "上界应在 [MIN_TTL_CAP_SECONDS, MAX_TTL_CAP_SECONDS] 随机区间内");
+
+        long capNanos = LocalCacheTtl.capNanos(thirtyDays);
+        assertTrue(capNanos >= TimeUnit.SECONDS.toNanos(LocalCacheTtl.MIN_TTL_CAP_SECONDS)
+                && capNanos <= TimeUnit.SECONDS.toNanos(LocalCacheTtl.MAX_TTL_CAP_SECONDS));
     }
 
     @Test

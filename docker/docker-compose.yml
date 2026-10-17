@@ -53,6 +53,8 @@ x-app-env: &app-env
   OTEL_LOGS_EXPORTER: "none"         # 日志继续落本地文件/JSON
   # 声明式配置：DROP /actuator/* 的 SERVER span（消除 Prometheus 抓取/健康检查噪音），见 /otel/otel-agent-config.yaml
   OTEL_CONFIG_FILE: /otel/otel-agent-config.yaml
+  # 容器内使用独立分片配置（指向 mysql:3306），不污染全局 SPRING_PROFILES_ACTIVE
+  SHARDING_PROFILE: docker
 
 # 应用服务默认资源限额（本地开发留足 JVM 堆外/元空间余量）。
 # container_name 一律不写：避免固定容器名导致无法 --scale 扩缩。
@@ -92,7 +94,7 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_general_ci
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      test: [ "CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot" ]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -106,9 +108,9 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: ["redis-server", "--appendonly", "yes"]
+    command: [ "redis-server", "--appendonly", "yes" ]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -143,7 +145,7 @@ services:
       ALLOW_PLAINTEXT_LISTENER: "yes"
       KAFKA_KRAFT_CLUSTER_ID: abcDEFghijKLmnopQRStuv
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1 || exit 1" ]
       interval: 15s
       timeout: 10s
       retries: 10
@@ -166,7 +168,7 @@ services:
       JVM_XMX: 512m
       TIME_ZONE: Asia/Shanghai
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8848/nacos/v1/console/health/readiness >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:8848/nacos/v1/console/health/readiness >/dev/null 2>&1 || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -281,9 +283,9 @@ services:
     depends_on:
       - loki
 
-# ---------------------------------------------------------------------------
-# 应用服务
-# ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # 应用服务
+  # ---------------------------------------------------------------------------
 
   gateway:
     image: ticketflow/gateway:0.0.1-SNAPSHOT
@@ -300,7 +302,7 @@ services:
       <<: *app-env
       OTEL_SERVICE_NAME: gateway
       SPRING_PROFILES_ACTIVE: pro
-      JAVA_OPTS: "-Xms192m -Xmx384m -XX:MaxMetaspaceSize:256m"
+      JAVA_OPTS: "-Xms192m -Xmx384m -XX:MaxMetaspaceSize=256m"
       # 关闭非签名普通访问：客户端 no_verify=true 不能跳过验签/token（application-pro.yml 亦已置 false）
       ALLOW_NORMAL_ACCESS: "false"
       # Sentinel 控制台地址（容器内 8858；宿主机访问 http://localhost:8082）
@@ -314,7 +316,7 @@ services:
       kafka: { condition: service_healthy }
       nacos: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6085/actuator/health >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:6085/actuator/health >/dev/null 2>&1 || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -344,7 +346,7 @@ services:
       redis: { condition: service_healthy }
       nacos: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6082/actuator/health >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:6082/actuator/health >/dev/null 2>&1 || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -374,7 +376,7 @@ services:
       redis: { condition: service_healthy }
       nacos: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6083/actuator/health >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:6083/actuator/health >/dev/null 2>&1 || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -405,7 +407,7 @@ services:
       kafka: { condition: service_healthy }
       nacos: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6084/actuator/health >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:6084/actuator/health >/dev/null 2>&1 || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -438,7 +440,7 @@ services:
       nacos: { condition: service_healthy }
       elasticsearch: { condition: service_started }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6086/actuator/health >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:6086/actuator/health >/dev/null 2>&1 || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -471,7 +473,7 @@ services:
       kafka: { condition: service_healthy }
       nacos: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/actuator/health >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:8081/actuator/health >/dev/null 2>&1 || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -506,7 +508,7 @@ services:
       redis: { condition: service_healthy }
       nacos: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6087/actuator/health >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:6087/actuator/health >/dev/null 2>&1 || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -533,7 +535,7 @@ services:
     depends_on:
       nacos: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -u admin:admin http://127.0.0.1:10082/actuator/health >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS -u admin:admin http://127.0.0.1:10082/actuator/health >/dev/null 2>&1 || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -565,7 +567,7 @@ services:
       nacos: { condition: service_healthy }
       elasticsearch: { condition: service_started }
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6088/actuator/health >/dev/null 2>&1 || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:6088/actuator/health >/dev/null 2>&1 || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 10

@@ -68,12 +68,18 @@ public class RedissonFairLocker implements ServiceLocker {
     @Override
     public void unlock(String lockKey) {
         RLock lock = redissonClient.getFairLock(lockKey);
-        lock.unlock();
+        // 仅在当前线程确实持锁时才解锁：租约超时/重连后当前线程可能已不再持锁，
+        // 直接 unlock 会抛 IllegalMonitorStateException，在 finally 中掩盖业务真实异常
+        if (lock.isHeldByCurrentThread()) {
+            lock.unlock();
+        }
     }
 
     @Override
     public void unlock(RLock lock) {
-        lock.unlock();
+        if (lock.isHeldByCurrentThread()) {
+            lock.unlock();
+        }
     }
 
 }

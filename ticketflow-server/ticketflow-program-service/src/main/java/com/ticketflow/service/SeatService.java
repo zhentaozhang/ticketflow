@@ -22,10 +22,9 @@ import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.mapper.SeatMapper;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
+import com.ticketflow.service.cache.CacheTtlUtil;
 import com.ticketflow.service.lua.ProgramSeatCacheData;
 import com.ticketflow.servicelock.LockType;
-import com.ticketflow.servicelock.annotion.ServiceLock;
-import com.ticketflow.util.DateUtils;
 import com.ticketflow.util.ServiceLockTool;
 import com.ticketflow.vo.ProgramVo;
 import com.ticketflow.vo.SeatRelateInfoVo;
@@ -39,6 +38,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -46,7 +46,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static com.ticketflow.core.DistributedLockConstants.GET_SEAT_LOCK;
-import static com.ticketflow.core.DistributedLockConstants.SEAT_LOCK;
 
 /**
  * 座位管理 Service（CRUD + Redis 缓存管理 + 数据同步）。
@@ -115,7 +114,6 @@ public class SeatService extends ServiceImpl<SeatMapper, Seat> {
      * 查询顺序：Redis 三区 hash（no_sold + lock + sold）→ 缓存未命中则 DB 加载
      * 写入缓存时按 sellStatus 拆分到三个 hash 中，TTL 由调用方控制
      */
-    @ServiceLock(lockType = LockType.Read, name = SEAT_LOCK, keys = {"#programId", "#ticketCategoryId"})
     public List<SeatVo> selectSeatResolution(Long programId, Long ticketCategoryId, Long expireTime, TimeUnit timeUnit) {
         List<SeatVo> seatVoList = getSeatVoListByCacheResolution(programId, ticketCategoryId);
         if (CollectionUtil.isNotEmpty(seatVoList)) {
@@ -156,6 +154,12 @@ public class SeatService extends ServiceImpl<SeatMapper, Seat> {
                                 programId, ticketCategoryId), noSoldSeatVoList.stream()
                                 .collect(Collectors.toMap(s -> String.valueOf(s.getId()), s -> s, (v1, v2) -> v2))
                         , expireTime, timeUnit);
+
+                Map<String, List<SeatVo>> rowSeatMap = noSoldSeatVoList.stream()
+                        .sorted(Comparator.comparingInt(SeatVo::getColCode))
+                        .collect(Collectors.groupingBy(s -> String.valueOf(s.getRowCode()), LinkedHashMap::new, Collectors.toList()));
+                redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_ROW_INDEX,
+                                programId, ticketCategoryId), rowSeatMap, expireTime, timeUnit);
             }
             if (CollectionUtil.isNotEmpty(lockSeatVoList)) {
                 redisCache.putHash(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH,
@@ -174,7 +178,9 @@ public class SeatService extends ServiceImpl<SeatMapper, Seat> {
                     .thenComparingInt(SeatVo::getColCode)).collect(Collectors.toList());
             return seatVoList;
         } finally {
-            lock.unlock();
+            if (lock != null && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 
@@ -220,7 +226,7 @@ public class SeatService extends ServiceImpl<SeatMapper, Seat> {
         List<SeatVo> seatVos = new ArrayList<>();
         for (TicketCategoryVo ticketCategoryVo : ticketCategoryVoList) {
             seatVos.addAll(selectSeatResolution(seatListDto.getProgramId(), ticketCategoryVo.getId(),
-                    DateUtils.countBetweenSecond(DateUtils.now(), programShowTime.getShowTime()), TimeUnit.SECONDS));
+                    CacheTtlUtil.calculateExpireSeconds(programShowTime.getShowTime()), TimeUnit.SECONDS));
         }
 
         if (programVo.getPermitChooseSeat().equals(BusinessStatus.NO.getCode())) {
@@ -280,5 +286,14 @@ public class SeatService extends ServiceImpl<SeatMapper, Seat> {
         }
 
         return saveBatch(seatList);
+    }
+
+    /**
+     * 获取轻量排级未售座位索引（用于不选座快速匹配相邻座位）。
+     * 优先从 Redis 缓存读取（大小仅几十 KB）；若缺失则安全回退由 selectSeatResolution 加载。
+     */
+    public Map<String, List<SeatVo>> getRowSeatIndex(Long programId, Long ticketCategoryId) {
+        return redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_ROW_INDEX,
+                programId, ticketCategoryId), Map.class);
     }
 }

@@ -150,6 +150,22 @@ class DatabaseOrderComplexGeneArithmeticTest {
         assertEquals(List.of("ds_1"), new ArrayList<>(cross));
     }
 
+    @Test
+    void doSharding_mobile_routeToSingleDb() {
+        String mobile = "13800138000";
+        long hash = mobile.hashCode() & 0x7FFFFFFF;
+        Collection<String> result = doSharding(DB_NAMES, colsOfString("mobile", mobile));
+        assertEquals(List.of(expectedDb(hash)), new ArrayList<>(result));
+    }
+
+    @Test
+    void doSharding_email_routeToSingleDb() {
+        String email = "test@ticketflow.com";
+        long hash = email.hashCode() & 0x7FFFFFFF;
+        Collection<String> result = doSharding(DB_NAMES, colsOfString("email", email));
+        assertEquals(List.of(expectedDb(hash)), new ArrayList<>(result));
+    }
+
     private Map<String, Collection<Long>> colsOfString(String column, String value) {
         Map<String, Collection<Long>> map = new LinkedHashMap<>();
         map.put(column, (Collection<Long>) (Collection<?>) List.of(value));

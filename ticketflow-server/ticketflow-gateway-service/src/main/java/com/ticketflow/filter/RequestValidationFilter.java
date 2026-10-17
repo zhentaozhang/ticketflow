@@ -106,6 +106,10 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
 
     @Override
     public Mono<Void> filter(final ServerWebExchange exchange, final GatewayFilterChain chain) {
+        String path = exchange.getRequest().getPath().value();
+        if (path.startsWith("/actuator")) {
+            return chain.filter(exchange);
+        }
         if (rateLimiterProperty.getRateSwitch()) {
             rateLimiter.acquire();
             try {
@@ -216,13 +220,19 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
         if ((!allowNormalAccess) && (VERIFY_VALUE.equals(noVerify))) {
             throw new TicketFlowFrameException(BaseCode.ONLY_SIGNATURE_ACCESS_IS_ALLOWED);
         }
-        // 需要签名验证且 URL 不在跳过列表：执行加密解密 + RSA 验签 + Token 校验
+        boolean needCheckTokenResult = needCheckToken(url);
+        String encrypt = request.getHeaders() != null ? request.getHeaders().getFirst(ENCRYPT) : null;
+        code = bodyContent.get(CODE);
+        if (StringUtil.isEmpty(code) && request.getHeaders() != null) {
+            code = request.getHeaders().getFirst(CODE);
+        }
+        if (StringUtil.isEmpty(code) && request.getQueryParams() != null) {
+            code = request.getQueryParams().getFirst(CODE);
+        }
+        token = request.getHeaders() != null ? request.getHeaders().getFirst(TOKEN) : null;
+
+        // 1. 参数与签名校验：当请求有 Body 且不在跳过列表时，执行解密与 RSA 验签
         if (checkParameter(originalBody, noVerify) && !skipCheckParameter(url)) {
-
-            String encrypt = request.getHeaders().getFirst(ENCRYPT);
-            code = bodyContent.get(CODE);
-            token = request.getHeaders().getFirst(TOKEN);
-
             // 根据渠道 code 获取渠道配置（含公钥、密钥、tokenSecret）
             GetChannelDataVo channelDataVo = channelDataService.getChannelDataByCode(code);
 
@@ -237,30 +247,37 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
                 throw new TicketFlowFrameException(BaseCode.RSA_SIGN_ERROR);
             }
 
-            // Token 检查：URL 在 checkTokenPaths 中则必须携带 token
-            boolean skipCheckTokenResult = skipCheckToken(url);
-            if (!skipCheckTokenResult && StringUtil.isEmpty(token)) {
+            requestBody = bodyContent.get(BUSINESS_BODY);
+        }
+
+        // 2. Token 校验：独立于 Body 是否存在。只要 URL 属于受保护路径（needCheckTokenResult），必须校验 Token
+        if (needCheckTokenResult) {
+            if (StringUtil.isEmpty(token)) {
                 ArgumentError argumentError = new ArgumentError();
-                argumentError.setArgumentName(token);
+                argumentError.setArgumentName(TOKEN);
                 argumentError.setMessage("token参数为空");
                 List<ArgumentError> argumentErrorList = new ArrayList<>();
                 argumentErrorList.add(argumentError);
                 throw new ArgumentException(BaseCode.ARGUMENT_EMPTY.getCode(), argumentErrorList);
             }
-
-            // 需要 token 时，解析 JWT 获取 userId
-            if (!skipCheckTokenResult) {
-                UserVo userVo = tokenService.getUser(token, code, channelDataVo.getTokenSecret());
-                userId = userVo.getId();
+            if (StringUtil.isEmpty(code)) {
+                ArgumentError argumentError = new ArgumentError();
+                argumentError.setArgumentName(CODE);
+                argumentError.setMessage("code参数为空");
+                List<ArgumentError> argumentErrorList = new ArrayList<>();
+                argumentErrorList.add(argumentError);
+                throw new ArgumentException(BaseCode.ARGUMENT_EMPTY.getCode(), argumentErrorList);
             }
+            GetChannelDataVo channelDataVo = channelDataService.getChannelDataByCode(code);
+            UserVo userVo = tokenService.getUser(token, code, channelDataVo.getTokenSecret());
+            userId = userVo.getId();
+        }
 
-            // 部分接口需要 userId 但 token 检查被跳过时，额外尝试通过 token 获取（getUserIdPaths 白名单）
-            if (StringUtil.isEmpty(userId) && checkNeedUserId(url) && StringUtil.isNotEmpty(token)) {
-                UserVo userVo = tokenService.getUser(token, code, channelDataVo.getTokenSecret());
-                userId = userVo.getId();
-            }
-
-            requestBody = bodyContent.get(BUSINESS_BODY);
+        // 3. 部分公开接口额外尝试通过 token 提取 userId（若携带了 token）
+        if (StringUtil.isEmpty(userId) && checkNeedUserId(url) && StringUtil.isNotEmpty(token) && StringUtil.isNotEmpty(code)) {
+            GetChannelDataVo channelDataVo = channelDataService.getChannelDataByCode(code);
+            UserVo userVo = tokenService.getUser(token, code, channelDataVo.getTokenSecret());
+            userId = userVo.getId();
         }
         // 所有请求统一执行 API 限流（按 IP+userID+URL 滑动窗口）
         apiRestrictService.apiRestrict(userId, url, request);
@@ -316,14 +333,18 @@ public class RequestValidationFilter implements GlobalFilter, Ordered {
         return -2;
     }
 
-    public boolean skipCheckToken(String url) {
-        for (String skipCheckTokenPath : gatewayProperty.getCheckTokenPaths()) {
+    public boolean needCheckToken(String url) {
+        for (String checkTokenPath : gatewayProperty.getCheckTokenPaths()) {
             PathMatcher matcher = new AntPathMatcher();
-            if (matcher.match(skipCheckTokenPath, url)) {
-                return false;
+            if (matcher.match(checkTokenPath, url)) {
+                return true;
             }
         }
-        return true;
+        return false;
+    }
+
+    public boolean skipCheckToken(String url) {
+        return !needCheckToken(url);
     }
 
     public boolean skipCheckParameter(String url) {

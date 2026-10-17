@@ -36,6 +36,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -48,16 +49,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @ActiveProfiles("it")
 class OrderFlowIT {
 
-    private static final int MYSQL_FIXED_PORT = 13306;
-
     @Container
     static MySQLContainer mysql = new MySQLContainer(DockerImageName.parse("mysql:8.0"))
             .withPassword("root");
-
-    static {
-        // shardingsphere-order-it.yaml（src/test/resources）静态指向 13306，故固定宿主端口
-        mysql.setPortBindings(List.of(MYSQL_FIXED_PORT + ":3306"));
-    }
 
     @Container
     static GenericContainer<?> redis = new GenericContainer<>(DockerImageName.parse("redis:7"))
@@ -68,10 +62,25 @@ class OrderFlowIT {
 
     @DynamicPropertySource
     static void dynamicProps(DynamicPropertyRegistry registry) {
-        // application.yml 中 ${spring.profiles.active} 占位符会展开为 local（property 值），
-        // 导致默认加载 local yaml（3306/本地开发），必须显式指向 it yaml（13306/testcontainers）
-        registry.add("spring.datasource.url",
-                () -> "jdbc:shardingsphere:classpath:shardingsphere-order-it.yaml");
+        String yamlContent;
+        try (var in = OrderFlowIT.class.getClassLoader().getResourceAsStream("shardingsphere-order-it.yaml")) {
+            if (in == null) {
+                throw new IllegalStateException("找不到 shardingsphere-order-it.yaml");
+            }
+            yamlContent = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new RuntimeException("读取 shardingsphere-order-it.yaml 失败", e);
+        }
+        yamlContent = yamlContent.replaceAll("127\\.0\\.0\\.1:\\d+", "127.0.0.1:" + mysql.getFirstMappedPort());
+        try {
+            Path tempConfigFile = Files.createTempFile("shardingsphere-order-it-", ".yaml");
+            tempConfigFile.toFile().deleteOnExit();
+            Files.writeString(tempConfigFile, yamlContent);
+            registry.add("spring.datasource.url",
+                    () -> "jdbc:shardingsphere:absolutepath:" + tempConfigFile.toAbsolutePath());
+        } catch (Exception e) {
+            throw new RuntimeException("创建临时 ShardingSphere 配置文件失败", e);
+        }
         // Boot 3.x 前缀 spring.data.redis.*（Redisson 与 RedisTemplate 均读取）
         registry.add("spring.data.redis.host", redis::getHost);
         registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
@@ -94,7 +103,7 @@ class OrderFlowIT {
                 "ticketflow_order_0.sql",
                 "ticketflow_order_1.sql");
         try (Connection connection = DriverManager.getConnection(
-                "jdbc:mysql://127.0.0.1:" + MYSQL_FIXED_PORT + "/?useSSL=false&allowPublicKeyRetrieval=true",
+                "jdbc:mysql://127.0.0.1:" + mysql.getFirstMappedPort() + "/?useSSL=false&allowPublicKeyRetrieval=true",
                 "root", "root");
              Statement statement = connection.createStatement()) {
             for (String script : scripts) {
@@ -178,7 +187,7 @@ class OrderFlowIT {
     }
 
     @Test
-    void doCreate_真实写库并计数_成功下单() {
+    void doCreate_真实写库_成功下单() {
         Long userId = 20260808L;
         Long orderNumber = geneOrderNumber(userId, 1);
 
@@ -192,10 +201,11 @@ class OrderFlowIT {
         assertEquals(userId, order.getUserId());
         assertEquals("电子票", order.getDistributionMode());
 
+        // 限购计数已统一由 program 侧 Lua 脚本维护，doCreate 仅专注真实落库，不进行二次累加
         Long count = redisCache.get(
                 RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, userId, 10L),
                 Long.class);
-        assertEquals(2L, count);
+        assertNull(count);
     }
 
     @Test

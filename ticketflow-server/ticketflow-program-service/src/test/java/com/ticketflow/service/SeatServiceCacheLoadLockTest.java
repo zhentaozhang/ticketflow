@@ -103,6 +103,7 @@ class SeatServiceCacheLoadLockTest {
     @Test
     void 拿到锁时走原来的重建链路() {
         when(serviceLockTool.tryLock(any(RLock.class), anyString())).thenReturn(true);
+        when(lock.isHeldByCurrentThread()).thenReturn(true);
         SeatVo seatVo = new SeatVo();
         seatVo.setId(3000L);
         seatVo.setSellStatus(com.ticketflow.enums.SellStatus.NO_SOLD.getCode());

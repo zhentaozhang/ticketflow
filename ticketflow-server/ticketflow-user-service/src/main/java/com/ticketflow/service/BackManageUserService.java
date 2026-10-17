@@ -60,7 +60,7 @@ public class BackManageUserService {
         backManageLoginVo.setId("1");
         backManageLoginVo.setRealName("admin");
         backManageLoginVo.setUsername(backManageLoginDto.getUsername());
-        backManageLoginVo.setPassword(backManageLoginDto.getPassword());
+        backManageLoginVo.setPassword(null);
         backManageLoginVo.setAccessToken(StpUtil.getTokenValue());
         return backManageLoginVo;
     }

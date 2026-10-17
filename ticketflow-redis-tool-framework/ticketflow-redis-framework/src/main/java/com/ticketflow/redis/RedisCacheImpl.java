@@ -12,6 +12,7 @@ import org.springframework.data.redis.core.ZSetOperations;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -78,7 +79,9 @@ public class RedisCacheImpl implements RedisCache {
         }
         List<T> tList = supplier.get();
         if (CacheUtil.isEmpty(tList)) {
-            return null;
+            long emptyTtlSeconds = Math.max(10L, Math.min(timeUnit.toSeconds(ttl), 60L));
+            set(redisKeyBuild, Collections.emptyList(), emptyTtlSeconds, TimeUnit.SECONDS);
+            return Collections.emptyList();
         }
         set(redisKeyBuild, tList, ttl, timeUnit);
         return tList;
@@ -152,6 +155,22 @@ public class RedisCacheImpl implements RedisCache {
         String key = redisKeyBuild.getRelKey();
         String json = object instanceof String ? (String) object : JSON.toJSONString(object);
         redisTemplate.opsForValue().set(key, json, ttl, timeUnit);
+    }
+
+    @Override
+    public Boolean setIfAbsent(RedisKeyBuild redisKeyBuild, Object object, long ttl, TimeUnit timeUnit) {
+        CacheUtil.checkNotBlank(redisKeyBuild);
+        String key = redisKeyBuild.getRelKey();
+        String json = object instanceof String ? (String) object : JSON.toJSONString(object);
+        return redisTemplate.opsForValue().setIfAbsent(key, json, ttl, timeUnit);
+    }
+
+    @Override
+    public Boolean setIfAbsent(RedisKeyBuild redisKeyBuild, Object object) {
+        CacheUtil.checkNotBlank(redisKeyBuild);
+        String key = redisKeyBuild.getRelKey();
+        String json = object instanceof String ? (String) object : JSON.toJSONString(object);
+        return redisTemplate.opsForValue().setIfAbsent(key, json);
     }
 
 

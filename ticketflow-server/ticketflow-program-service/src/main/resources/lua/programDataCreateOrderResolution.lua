@@ -38,10 +38,13 @@ local program_id = KEYS[4]
 local record_hash_key = KEYS[5]
 local identifier_id = KEYS[6]
 local record_type = KEYS[7]
+local account_order_count_key = KEYS[8]
 
 -- 解析请求参数。
 local ticket_count_list = cjson.decode(ARGV[1])
 local ticket_user_id_list = cjson.decode(ARGV[3])
+local per_account_limit = ARGV[4] and tonumber(ARGV[4]) or 0
+local current_purchase_count = ARGV[5] and tonumber(ARGV[5]) or 0
 
 -- 保存最终可以购买的座位，同时构建票档和座位的变更记录。
 local purchase_seat_list = {}
@@ -54,9 +57,17 @@ local total_seat_vo_price = 0
 -- 锁定状态。
 local lock_status = 2
 
--- 第一阶段：校验票档和余票。
--- 这里只做校验，不立即扣库存，避免前面座位校验失败后产生数据变化。
+-- 第一阶段：校验票档和余票，以及单账号限购。
+-- 这里只做校验，不立即扣库存，避免前面校验失败后产生数据变化。
 if (type == 1) then
+	if (per_account_limit > 0 and account_order_count_key and account_order_count_key ~= "#") then
+		local history_count_str = redis.call('get', account_order_count_key)
+		local history_count = history_count_str and tonumber(history_count_str) or 0
+		if (history_count + current_purchase_count > per_account_limit) then
+			return string.format('{"%s": %d}', 'code', 50009)
+		end
+	end
+
 	for index, ticket_count in ipairs(ticket_count_list) do
 
 		local ticket_remain_number_hash_key =
@@ -159,6 +170,12 @@ if (type == 1) then
 			end
 
 			-- 构建座位状态变更流水，并绑定购票人。
+			-- 优先使用每个座位自身携带的 ticketUserId，彻底解决跨票档打乱顺序的问题；无则按下标兜底
+			local matched_ticket_user_id = seat_dto.ticketUserId
+			if not matched_ticket_user_id and ticket_user_id_list then
+				matched_ticket_user_id = ticket_user_id_list[seat_index]
+			end
+
 			for index3, ticket_category_record in pairs(ticket_category_record_list) do
 				if ticket_category_record.ticketCategoryId == seat_vo.ticketCategoryId then
 
@@ -171,9 +188,9 @@ if (type == 1) then
 					seat_record.seatId = id
 					seat_record.beforeStatus = seat_vo.sellStatus
 					seat_record.afterStatus = lock_status
-					seat_record.ticketUserId = ticket_user_id_list[seat_index]
+					seat_record.ticketUserId = matched_ticket_user_id
 
-					seat_vo.ticketUserId = ticket_user_id_list[seat_index]
+					seat_vo.ticketUserId = matched_ticket_user_id
 
 					table.insert(
 						ticket_category_record.seatRecordList,
@@ -236,6 +253,14 @@ for index, ticket_count in ipairs(ticket_count_list) do
 		ticket_remain_number_hash_key,
 		ticket_category_id,
 		"-" .. count)
+end
+
+-- 原子累加单账号购买数量，并设置默认30分钟TTL
+if (per_account_limit > 0 and account_order_count_key and account_order_count_key ~= "#") then
+	redis.call('incrby', account_order_count_key, current_purchase_count)
+	if redis.call('ttl', account_order_count_key) < 0 then
+		redis.call('expire', account_order_count_key, 1800)
+	end
 end
 
 -- 第五阶段：将座位从“未售”迁移到“锁定”。

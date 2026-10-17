@@ -1,5 +1,6 @@
 package com.ticketflow;
 
+import com.ticketflow.trace.TraceContextUtil;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.connection.stream.ObjectRecord;
@@ -30,9 +31,10 @@ public class RedisStreamPushHandler {
     private static final long STREAM_MAX_LENGTH = 10000L;
 
     public RecordId push(String msg) {
+        String wrappedMsg = TraceContextUtil.wrap(msg);
         ObjectRecord<String, String> record = StreamRecords.newRecord()
                 .in(redisStreamConfigProperties.getStreamName())   // 写进 stream（配置：invalid_program）
-                .ofObject(msg)                                    // 消息体（节目ID字符串）
+                .ofObject(wrappedMsg)                             // 消息体（包含信封与 TraceContext）
                 .withId(RecordId.autoGenerate());                 // 自动生成消息ID（时间戳-序号）
         RecordId recordId = this.stringRedisTemplate.opsForStream().add(record);
         // 近似裁剪：XADD + XTRIM 两步，不用 pipeline。失效通知本身很少（运营改数据才发），

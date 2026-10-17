@@ -41,4 +41,7 @@ public class SeatDto implements Serializable {
     @Schema(name ="price", type ="BigDecimal", description ="座位价格",requiredMode= RequiredMode.REQUIRED)
     @NotNull
     private BigDecimal price;
+
+    @Schema(name = "ticketUserId", type = "Long", description = "购票人id")
+    private Long ticketUserId;
 }

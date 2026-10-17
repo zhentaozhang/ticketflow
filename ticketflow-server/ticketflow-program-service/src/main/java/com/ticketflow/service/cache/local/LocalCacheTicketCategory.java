@@ -1,21 +1,16 @@
 package com.ticketflow.service.cache.local;
 
-import com.ticketflow.core.RedisKeyManage;
-import com.ticketflow.redis.RedisCache;
-import com.ticketflow.redis.RedisKeyBuild;
 import com.ticketflow.vo.TicketCategoryVo;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import org.checkerframework.checker.index.qual.NonNegative;
 import org.checkerframework.checker.nullness.qual.NonNull;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PostConstruct;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 /**
@@ -38,11 +33,8 @@ public class LocalCacheTicketCategory {
     @Value("${maximumSize:10000}")
     private Long maximumSize;
     
-    @Autowired
-    private RedisCache redisCache;
-    
     /**
-     * 初始化 Caffeine 缓存，过期时间与 Redis 中票档数据的 TTL 保持一致。
+     * 初始化 Caffeine 缓存，存活时间在 [240s, 300s] 之间随机抖动。
      * 读取/更新不重置过期时间。
      */
     @PostConstruct
@@ -53,11 +45,8 @@ public class LocalCacheTicketCategory {
                     @Override
                     public long expireAfterCreate(@NonNull final Long key, @NonNull final List<TicketCategoryVo> value,
                                                   final long currentTime) {
-                        // 与 Redis 里票档数据的 TTL 对齐；但要补上本地缓存上界，
-                        // 并且把“键不存在/没设过期时间”返回的负数归为零（立即过期）
-                        long redisExpireMillis = redisCache.getExpire(RedisKeyBuild.createRedisKey
-                                (RedisKeyManage.PROGRAM_TICKET_CATEGORY_LIST, key), TimeUnit.MILLISECONDS);
-                        return LocalCacheTtl.capNanos(TimeUnit.MILLISECONDS.toSeconds(redisExpireMillis));
+                        // 纯本地内存纳秒计算，引入 240~300s 随机扰动，完全消除同步网络调用
+                        return LocalCacheTtl.capNanos(LocalCacheTtl.MAX_TTL_CAP_SECONDS);
                     }
                     
                     @Override

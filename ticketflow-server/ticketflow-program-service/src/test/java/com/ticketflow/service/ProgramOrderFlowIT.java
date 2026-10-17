@@ -58,7 +58,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @ActiveProfiles("it")
 class ProgramOrderFlowIT {
 
-    private static final int MYSQL_FIXED_PORT = 13307;
     private static final String CREATE_ORDER_TOPIC = "ticketflow-create_order";
 
     /** 种子节目：基因路由落 ds_0 / *_0 表 */
@@ -72,11 +71,6 @@ class ProgramOrderFlowIT {
     static MySQLContainer mysql = new MySQLContainer(DockerImageName.parse("mysql:8.0"))
             .withPassword("root");
 
-    static {
-        // shardingsphere-program-it.yaml（src/test/resources）静态指向 13307，故固定宿主端口
-        mysql.setPortBindings(List.of(MYSQL_FIXED_PORT + ":3306"));
-    }
-
     @Container
     static GenericContainer<?> redis = new GenericContainer<>(DockerImageName.parse("redis:7"))
             .withExposedPorts(6379);
@@ -86,10 +80,25 @@ class ProgramOrderFlowIT {
 
     @DynamicPropertySource
     static void dynamicProps(DynamicPropertyRegistry registry) {
-        // application.yml 中 ${spring.profiles.active} 占位符会展开为 local（property 值），
-        // 导致默认加载 local yaml（3306/standalone），必须显式指向 it yaml（13307/testcontainers）
-        registry.add("spring.datasource.url",
-                () -> "jdbc:shardingsphere:classpath:shardingsphere-program-it.yaml");
+        String yamlContent;
+        try (var in = ProgramOrderFlowIT.class.getClassLoader().getResourceAsStream("shardingsphere-program-it.yaml")) {
+            if (in == null) {
+                throw new IllegalStateException("找不到 shardingsphere-program-it.yaml");
+            }
+            yamlContent = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new RuntimeException("读取 shardingsphere-program-it.yaml 失败", e);
+        }
+        yamlContent = yamlContent.replaceAll("127\\.0\\.0\\.1:\\d+", "127.0.0.1:" + mysql.getFirstMappedPort());
+        try {
+            Path tempConfigFile = Files.createTempFile("shardingsphere-program-it-", ".yaml");
+            tempConfigFile.toFile().deleteOnExit();
+            Files.writeString(tempConfigFile, yamlContent);
+            registry.add("spring.datasource.url",
+                    () -> "jdbc:shardingsphere:absolutepath:" + tempConfigFile.toAbsolutePath());
+        } catch (Exception e) {
+            throw new RuntimeException("创建临时 ShardingSphere 配置文件失败", e);
+        }
         registry.add("spring.data.redis.host", redis::getHost);
         registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
@@ -133,7 +142,7 @@ class ProgramOrderFlowIT {
                 "ticketflow_program_1.sql");
         // allowMultiQueries：整脚本一次执行，由 MySQL 服务端解析分号（INSERT 内含 HTML 文本分号，客户端拆分不可行）
         try (Connection connection = DriverManager.getConnection(
-                "jdbc:mysql://127.0.0.1:" + MYSQL_FIXED_PORT
+                "jdbc:mysql://127.0.0.1:" + mysql.getFirstMappedPort()
                         + "/?useSSL=false&allowPublicKeyRetrieval=true&allowMultiQueries=true",
                 "root", "root");
              Statement statement = connection.createStatement()) {

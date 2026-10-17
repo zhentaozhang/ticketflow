@@ -19,10 +19,9 @@ import com.ticketflow.mapper.ProgramMapper;
 import com.ticketflow.mapper.TicketCategoryMapper;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
+import com.ticketflow.service.cache.CacheTtlUtil;
 import com.ticketflow.service.cache.local.LocalCacheTicketCategory;
 import com.ticketflow.servicelock.LockType;
-import com.ticketflow.servicelock.annotion.ServiceLock;
-import com.ticketflow.util.DateUtils;
 import com.ticketflow.util.ServiceLockTool;
 import com.ticketflow.vo.TicketCategoryDetailVo;
 import com.ticketflow.vo.TicketCategoryVo;
@@ -41,8 +40,6 @@ import java.util.stream.Collectors;
 
 import static com.ticketflow.core.DistributedLockConstants.GET_REMAIN_NUMBER_LOCK;
 import static com.ticketflow.core.DistributedLockConstants.GET_TICKET_CATEGORY_LOCK;
-import static com.ticketflow.core.DistributedLockConstants.REMAIN_NUMBER_LOCK;
-import static com.ticketflow.core.DistributedLockConstants.TICKET_CATEGORY_LOCK;
 
 /**
  * 票档服务核心逻辑。
@@ -102,7 +99,7 @@ public class TicketCategoryService extends ServiceImpl<TicketCategoryMapper, Tic
      */
     public List<TicketCategoryVo> selectTicketCategoryListByProgramIdMultipleCache(Long programId, Date showTime){
         return localCacheTicketCategory.getCache(programId,key -> selectTicketCategoryListByProgramId(programId, 
-                DateUtils.countBetweenSecond(DateUtils.now(),showTime), TimeUnit.SECONDS));
+                CacheTtlUtil.calculateExpireSeconds(showTime), TimeUnit.SECONDS));
     }
     
     /**
@@ -114,7 +111,6 @@ public class TicketCategoryService extends ServiceImpl<TicketCategoryMapper, Tic
      * @param timeUnit 时间单位
      * @return 票档 Vo 列表
      */
-    @ServiceLock(lockType= LockType.Read,name = TICKET_CATEGORY_LOCK,keys = {"#programId"})
     public List<TicketCategoryVo> selectTicketCategoryListByProgramId(Long programId,Long expireTime,TimeUnit timeUnit){
         List<TicketCategoryVo> ticketCategoryVoList = 
                 redisCache.getValueIsList(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_TICKET_CATEGORY_LIST, 
@@ -151,7 +147,9 @@ public class TicketCategoryService extends ServiceImpl<TicketCategoryMapper, Tic
                         }).collect(Collectors.toList());
                     }, expireTime, timeUnit);
         }finally {
-            lock.unlock();
+            if (lock != null && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
     
@@ -167,7 +165,6 @@ public class TicketCategoryService extends ServiceImpl<TicketCategoryMapper, Tic
      * Redis 存储结构：Hash，field = ticketCategoryId, value = remainNumber
      * key = PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION:{programId}:{ticketCategoryId}
      */
-    @ServiceLock(lockType= LockType.Read,name = REMAIN_NUMBER_LOCK,keys = {"#programId","#ticketCategoryId"})
     public Map<String, Long> getRedisRemainNumberResolution(Long programId,Long ticketCategoryId){
         // 第一层：@ServiceLock(Read) 允许并发读，首次 Redis Hash 查询
         Map<String, Long> ticketCategoryRemainNumber =
@@ -208,7 +205,9 @@ public class TicketCategoryService extends ServiceImpl<TicketCategoryMapper, Tic
                     programId,ticketCategoryId),map);
             return map;
         }finally {
-            lock.unlock();
+            if (lock != null && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
     

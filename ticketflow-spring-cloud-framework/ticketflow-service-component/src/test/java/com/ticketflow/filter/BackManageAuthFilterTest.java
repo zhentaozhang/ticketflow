@@ -1,17 +1,16 @@
 package com.ticketflow.filter;
 
+import cn.dev33.satoken.stp.StpLogic;
 import cn.dev33.satoken.stp.StpUtil;
 import com.ticketflow.properties.BackManageProperties;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.Test;
-import org.mockito.MockedStatic;
 
 import java.io.PrintWriter;
 
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -55,9 +54,17 @@ class BackManageAuthFilterTest {
         FilterChain chain = mock(FilterChain.class);
         BackManageAuthFilter filter = new BackManageAuthFilter(new BackManageProperties());
 
-        try (MockedStatic<StpUtil> stpUtil = mockStatic(StpUtil.class)) {
-            stpUtil.when(StpUtil::isLogin).thenReturn(true);
+        StpLogic oldLogic = StpUtil.stpLogic;
+        try {
+            StpUtil.setStpLogic(new StpLogic("login") {
+                @Override
+                public boolean isLogin() {
+                    return true;
+                }
+            });
             filter.doFilter(request, response, chain);
+        } finally {
+            StpUtil.setStpLogic(oldLogic);
         }
 
         verify(chain).doFilter(request, response);
@@ -74,9 +81,17 @@ class BackManageAuthFilterTest {
         FilterChain chain = mock(FilterChain.class);
         BackManageAuthFilter filter = new BackManageAuthFilter(new BackManageProperties());
 
-        try (MockedStatic<StpUtil> stpUtil = mockStatic(StpUtil.class)) {
-            stpUtil.when(StpUtil::isLogin).thenReturn(false);
+        StpLogic oldLogic = StpUtil.stpLogic;
+        try {
+            StpUtil.setStpLogic(new StpLogic("login") {
+                @Override
+                public boolean isLogin() {
+                    return false;
+                }
+            });
             filter.doFilter(request, response, chain);
+        } finally {
+            StpUtil.setStpLogic(oldLogic);
         }
 
         verify(chain, never()).doFilter(request, response);

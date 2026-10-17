@@ -16,6 +16,7 @@ import com.ticketflow.client.OrderClient;
 import com.ticketflow.client.UserClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
+import com.ticketflow.service.cache.CacheTtlUtil;
 import com.ticketflow.dto.AccountOrderCountDto;
 import com.ticketflow.dto.AreaGetDto;
 import com.ticketflow.dto.AreaSelectDto;
@@ -46,6 +47,7 @@ import com.ticketflow.enums.CompositeCheckType;
 import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.enums.SellStatus;
 import com.ticketflow.exception.TicketFlowFrameException;
+import com.ticketflow.handler.BloomFilterHandler;
 import com.ticketflow.initialize.impl.composite.CompositeContainer;
 import com.ticketflow.mapper.ProgramCategoryMapper;
 import com.ticketflow.mapper.ProgramGroupMapper;
@@ -68,7 +70,6 @@ import com.ticketflow.service.es.ProgramEs;
 import com.ticketflow.service.lua.ProgramDelCacheData;
 import com.ticketflow.service.tool.TokenExpireManager;
 import com.ticketflow.servicelock.LockType;
-import com.ticketflow.servicelock.annotion.ServiceLock;
 import com.ticketflow.threadlocal.BaseParameterHolder;
 import com.ticketflow.util.DateUtils;
 import com.ticketflow.util.ServiceLockTool;
@@ -104,9 +105,8 @@ import java.util.stream.Collectors;
 
 import static com.ticketflow.constant.Constant.CODE;
 import static com.ticketflow.constant.Constant.USER_ID;
+import static com.ticketflow.core.DistributedLockConstants.GET_PROGRAM_GROUP_LOCK;
 import static com.ticketflow.core.DistributedLockConstants.GET_PROGRAM_LOCK;
-import static com.ticketflow.core.DistributedLockConstants.PROGRAM_GROUP_LOCK;
-import static com.ticketflow.core.DistributedLockConstants.PROGRAM_LOCK;
 import static com.ticketflow.core.RepeatExecuteLimitConstants.PAY_OR_CANCEL_PROGRAM_ORDER;
 import static com.ticketflow.core.RepeatExecuteLimitConstants.REDUCE_REMAIN_NUMBER;
 import static com.ticketflow.util.DateUtils.FORMAT_DATE;
@@ -205,6 +205,9 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     @Autowired
     private SeatService seatService;
 
+    @Autowired
+    private BloomFilterHandler bloomFilterHandler;
+
     /**
      * 添加节目
      *
@@ -217,6 +220,9 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         BeanUtil.copyProperties(programAddDto, program);
         program.setId(uidGenerator.getUid());
         programMapper.insert(program);
+        if (Objects.nonNull(bloomFilterHandler)) {
+            bloomFilterHandler.add(String.valueOf(program.getId()));
+        }
         return program.getId();
     }
 
@@ -230,12 +236,17 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     public PageVo<ProgramListVo> search(ProgramSearchDto programSearchDto) {
         //将入参的参数进行具体的组装
         setQueryTime(programSearchDto);
-        //使用elasticsearch查询
-        PageVo<ProgramListVo> pageVo = programEs.search(programSearchDto);
-        if (pageVo != null && CollectionUtil.isNotEmpty(pageVo.getList())) {
-            return pageVo;
+        try {
+            //使用elasticsearch查询
+            PageVo<ProgramListVo> pageVo = programEs.search(programSearchDto);
+            // 只要 ES 正常响应（即使结果为空列表，说明无匹配节目），即直接返回，避免冷门词穿透回源 MySQL
+            if (pageVo != null) {
+                return pageVo;
+            }
+        } catch (Exception e) {
+            log.error("ES 检索异常，降级走 DB 兜底查询 programSearchDto : {}", JSON.toJSONString(programSearchDto), e);
         }
-        //ES 无数据或不可用时走 DB 兜底（DB 侧无搜索词条件，仅按分类/时间过滤）
+        // ES 不可用或抛出异常时走 DB 兜底（DB 侧无搜索词全文检索，仅按分类/时间过滤）
         return dbSelectPage(programSearchDto);
     }
 
@@ -247,10 +258,13 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      *
      */
     public List<ProgramHomeVo> selectHomeList(ProgramListDto programListDto) {
-
-        List<ProgramHomeVo> programHomeVoList = programEs.selectHomeList(programListDto);
-        if (CollectionUtil.isNotEmpty(programHomeVoList)) {
-            return programHomeVoList;
+        try {
+            List<ProgramHomeVo> programHomeVoList = programEs.selectHomeList(programListDto);
+            if (CollectionUtil.isNotEmpty(programHomeVoList)) {
+                return programHomeVoList;
+            }
+        } catch (Exception e) {
+            log.error("ES 查询主页异常，降级走 DB 兜底查询 programListDto : {}", JSON.toJSONString(programListDto), e);
         }
         return dbSelectHomeList(programListDto);
     }
@@ -467,7 +481,13 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      *
      */
     public ProgramVo detail(ProgramGetDto programGetDto) {
-        compositeContainer.execute(CompositeCheckType.PROGRAM_DETAIL_CHECK.getValue(), programGetDto);
+        String cacheKey = RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programGetDto.getId()).getRelKey();
+        ProgramVo cached = localCacheProgram.getCache(cacheKey);
+        // 快速通道：本地已有缓存时证明该节目合法存在且有效，跳过远程布隆过滤器网络往返
+        if (Objects.isNull(cached)) {
+            // 慢速通道：未命中本地缓存（首次访问或冷数据），校验布隆过滤器防止非法 ID 穿透至 Redis 和 DB
+            compositeContainer.execute(CompositeCheckType.PROGRAM_DETAIL_CHECK.getValue(), programGetDto);
+        }
         return getDetailV2(programGetDto);
     }
 
@@ -483,7 +503,11 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         ProgramShowTime programShowTime =
                 programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(programGetDto.getId());
 
-        ProgramVo programVo = programService.getByIdMultipleCache(programGetDto.getId(), programShowTime.getShowTime());
+        ProgramVo cachedProgramVo = programService.getByIdMultipleCache(programGetDto.getId(), programShowTime.getShowTime());
+
+        // 深层隔离克隆：独立实例化主 VO，保护 Caffeine 堆内数据不可变
+        ProgramVo programVo = new ProgramVo();
+        BeanUtil.copyProperties(cachedProgramVo, programVo);
 
         programVo.setShowTime(programShowTime.getShowTime());
         programVo.setShowDayTime(programShowTime.getShowDayTime());
@@ -508,10 +532,10 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
             programVo.setParentProgramCategoryName(parentProgramCategory.getName());
         }
 
-        // 5. 多级缓存查询票档列表
+        // 5. 多级缓存查询票档列表，独立实例化集合，防止外部修改集合结构
         List<TicketCategoryVo> ticketCategoryVoList = ticketCategoryService
                 .selectTicketCategoryListByProgramIdMultipleCache(programVo.getId(), programShowTime.getShowTime());
-        programVo.setTicketCategoryVoList(ticketCategoryVoList);
+        programVo.setTicketCategoryVoList(ticketCategoryVoList != null ? new ArrayList<>(ticketCategoryVoList) : null);
 
         return programVo;
     }
@@ -528,7 +552,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         return localCacheProgram.getCache(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId).getRelKey(),
                 key -> {    // 加载函数，只有 miss 才执行
                     log.info("查询节目详情 从本地缓存没有查询到 节目id : {}", programId);
-                    ProgramVo programVo = getById(programId, DateUtils.countBetweenSecond(DateUtils.now(), showTime),
+                    ProgramVo programVo = getById(programId, CacheTtlUtil.calculateExpireSeconds(showTime),
                             TimeUnit.SECONDS);
                     programVo.setShowTime(showTime);
                     return programVo;
@@ -565,11 +589,13 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
             throw new TicketFlowFrameException(BaseCode.PROGRAM_SHOW_TIME_NOT_EXIST);
         }
 
-        ProgramVo programVo = simpleGetByIdMultipleCache(programId);
-        if (Objects.isNull(programVo)) {
+        ProgramVo cachedVo = simpleGetByIdMultipleCache(programId);
+        if (Objects.isNull(cachedVo)) {
             throw new TicketFlowFrameException(BaseCode.PROGRAM_NOT_EXIST);
         }
 
+        ProgramVo programVo = new ProgramVo();
+        BeanUtil.copyProperties(cachedVo, programVo);
         programVo.setShowTime(programShowTime.getShowTime());
         programVo.setShowDayTime(programShowTime.getShowDayTime());
         programVo.setShowWeekTime(programShowTime.getShowWeekTime());
@@ -580,11 +606,9 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
     /**
      * 三级缓存兜底：本地 Caffeine → Redis → DB（double-checked locking）
      *
-     * @ServiceLock(Read) 允许并发读，但防止 N 个线程同时进入该方法；
      * 内部 Redis 不存在时获取 ReentrantLock，二次检查后查 DB 回填，
      * 避免同一个节目在缓存过期瞬间被重复加载（cache stampede）。
      */
-    @ServiceLock(lockType = LockType.Read, name = PROGRAM_LOCK, keys = {"#programId"})  //分布式读锁
     public ProgramVo getById(Long programId, Long expireTime, TimeUnit timeUnit) {
         ProgramVo programVo =
                 redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId), ProgramVo.class);
@@ -609,7 +633,9 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
                     , expireTime,
                     timeUnit);
         } finally {
-            lock.unlock();
+            if (lock != null && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 
@@ -626,14 +652,13 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
                 key -> getProgramGroup(programGroupId));
     }
 
-    @ServiceLock(lockType = LockType.Read, name = PROGRAM_GROUP_LOCK, keys = {"#programGroupId"})
     public ProgramGroupVo getProgramGroup(Long programGroupId) {
         ProgramGroupVo programGroupVo =
                 redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, programGroupId), ProgramGroupVo.class);
         if (Objects.nonNull(programGroupVo)) {
             return programGroupVo;
         }
-        RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_PROGRAM_LOCK, new String[]{String.valueOf(programGroupId)});
+        RLock lock = serviceLockTool.getLock(LockType.Reentrant, GET_PROGRAM_GROUP_LOCK, new String[]{String.valueOf(programGroupId)});
         if (!serviceLockTool.tryLock(lock, "GET_PROGRAM_GROUP_LOCK:" + programGroupId)) {
             // 等超时：先再查一次缓存（可能刚好被填好），仍没有就快速失败，不无锁重建
             programGroupVo = redisCache.get(
@@ -650,11 +675,13 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
             if (Objects.isNull(programGroupVo)) {
                 programGroupVo = createProgramGroupVo(programGroupId);
                 redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, programGroupId), programGroupVo,
-                        DateUtils.countBetweenSecond(DateUtils.now(), programGroupVo.getRecentShowTime()), TimeUnit.SECONDS);
+                        CacheTtlUtil.calculateExpireSeconds(programGroupVo.getRecentShowTime()), TimeUnit.SECONDS);
             }
             return programGroupVo;
         } finally {
-            lock.unlock();
+            if (lock != null && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 
@@ -702,10 +729,10 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      * 2. 校验每个座位都是"未售卖"状态
      * 3. 改座位状态为"锁定" + 扣减对应票档的 remainNumber
      *
-     * @RepeatExecuteLimit 防止 Kafka 重复消费导致超卖
+     * @RepeatExecuteLimit durationTime=0 仅在执行期间防并发冲突，避免 60s 拦截导致网络重试被抛异常误弃
      * @Transactional 保证 seat.update + ticketCategory.reduceRemainNumber 在同一个事务里
      */
-    @RepeatExecuteLimit(name = REDUCE_REMAIN_NUMBER, keys = {"#reduceRemainNumberDto.programId", "#reduceRemainNumberDto.seatIdList"}, durationTime = 60)
+    @RepeatExecuteLimit(name = REDUCE_REMAIN_NUMBER, keys = {"#reduceRemainNumberDto.programId", "#reduceRemainNumberDto.seatIdList"}, durationTime = 0)
     @Transactional(rollbackFor = Exception.class)
     public Boolean operateSeatLockAndTicketCategoryRemainNumber(ReduceRemainNumberDto reduceRemainNumberDto) {
         List<TicketCategoryCountDto> ticketCategoryCountDtoList = reduceRemainNumberDto.getTicketCategoryCountDtoList();
@@ -713,6 +740,16 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         // 空座位列表直接抛业务异常，避免生成 "id IN ()" 触发 ShardingSphere SQL 解析异常
         if (CollectionUtil.isEmpty(seatIdList)) {
             throw new TicketFlowFrameException(BaseCode.SEAT_NOT_EXIST);
+        }
+
+        Long orderNumber = reduceRemainNumberDto.getOrderNumber();
+        RedisKeyBuild lockRecordKey = (orderNumber != null)
+                ? RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_ORDER_LOCK_RECORD, reduceRemainNumberDto.getProgramId(), orderNumber)
+                : null;
+        // 幂等核验：若同一订单号由于网络超时触发重试，且本单已成功锁定过 DB，直接返回 true，防止抛 40011 错误误弃订单
+        if (lockRecordKey != null && Boolean.TRUE.equals(redisCache.hasKey(lockRecordKey))) {
+            log.info("检测到订单锁定重试请求，凭据匹配，直接幂等返回成功 orderNumber: {}", orderNumber);
+            return Boolean.TRUE;
         }
 
         // MyBatis Plus LambdaQueryWrapper：用面向对象方式拼 WHERE 条件，避免写死字符串字段名
@@ -760,6 +797,9 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         if (updateRemainNumberCount != ticketCategoryCountDtoList.size()) {
             throw new TicketFlowFrameException(BaseCode.UPDATE_TICKET_CATEGORY_COUNT_NOT_CORRECT);
         }
+        if (lockRecordKey != null) {
+            redisCache.set(lockRecordKey, "1", 10, TimeUnit.MINUTES);
+        }
         return true;
     }
 
@@ -768,7 +808,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      * V4：  先校验 LOCK 状态（悲观：只有锁定中的座位才能支付/取消），
      * 再按 pay/cancel 分别走 SOLD / NO_SOLD + 库存归还
      */
-    @RepeatExecuteLimit(name = PAY_OR_CANCEL_PROGRAM_ORDER, keys = {"#programOperateDataDto.programId", "#programOperateDataDto.seatIdList"}, durationTime = 60)
+    @RepeatExecuteLimit(name = PAY_OR_CANCEL_PROGRAM_ORDER, keys = {"#programOperateDataDto.programId", "#programOperateDataDto.orderNumber", "#programOperateDataDto.sellStatus", "#programOperateDataDto.seatIdList"}, durationTime = 10)
     @Transactional(rollbackFor = Exception.class)
     public Boolean operateProgramData(ProgramOperateDataDto programOperateDataDto) {
         List<Long> seatIdList = programOperateDataDto.getSeatIdList();
@@ -1019,7 +1059,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
                     ApiResponse<AccountOrderCountVo> apiResponse = orderClient.accountOrderCount(accountOrderCountDto);
                     if (Objects.equals(apiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
                         Optional.ofNullable(apiResponse.getData())
-                                .ifPresent(accountOrderCountVo -> redisCache.set(
+                                .ifPresent(accountOrderCountVo -> redisCache.setIfAbsent(
                                         RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, userId, programId),
                                         accountOrderCountVo.getCount(), tokenExpireManager.getTokenExpireTime() + 1,
                                         TimeUnit.MINUTES));
@@ -1109,35 +1149,50 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
      * @param programId 节目 id
      */
     public void evictProgramCache(Long programId) {
+        Program program = programMapper.selectById(programId);
         delRedisData(programId);
-        delLocalCache(programId);
-        redisStreamPushHandler.push(String.valueOf(programId));
+        Long programGroupId = Objects.nonNull(program) ? program.getProgramGroupId() : null;
+        delLocalCache(programId, programGroupId);
+        String payload = Objects.nonNull(programGroupId) ? (programId + ":" + programGroupId) : String.valueOf(programId);
+        redisStreamPushHandler.push(payload);
     }
 
     /**
      * 删除指定节目的所有 Redis 缓存数据。
      * 涉及节目详情、分组、场次、座位（三态 hash）、票档列表及余票、订单记录、丢弃订单。
-     * 使用 Lua 脚本批量删除以保证原子性。
+     * 采用精确 Key 批量删除，坚决杜绝 KEYS 模糊扫描，消除 Redis 阻塞与 Cluster 跨 Slot 隐患。
      *
      * @param programId 节目 id
      */
     public void delRedisData(Long programId) {
         Program program = Optional.ofNullable(programMapper.selectById(programId))
                 .orElseThrow(() -> new TicketFlowFrameException(BaseCode.PROGRAM_NOT_EXIST));
-        List<String> keys = new ArrayList<>();
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId).getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, program.getProgramGroupId()).getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SHOW_TIME, programId).getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH, programId, "*").getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH, programId, "*").getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_SOLD_RESOLUTION_HASH, programId, "*").getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_TICKET_CATEGORY_LIST, programId).getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programId, "*").getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_RECORD, programId).getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_RECORD_FINISH, programId).getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER, programId).getRelKey());
-        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT_ALL).getRelKey());
-        programDelCacheData.del(keys, new String[]{});
+        List<RedisKeyBuild> keys = new ArrayList<>(16);
+        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId));
+        if (Objects.nonNull(program.getProgramGroupId())) {
+            keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, program.getProgramGroupId()));
+        }
+        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SHOW_TIME, programId));
+        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_TICKET_CATEGORY_LIST, programId));
+        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_RECORD, programId));
+        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_RECORD_FINISH, programId));
+        keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.DISCARD_ORDER, programId));
+
+        // 精确查出该节目下的票档列表，精准构建座位与余票 key，完全杜绝 KEYS 模糊扫描
+        LambdaQueryWrapper<TicketCategory> tcWrapper = Wrappers.lambdaQuery(TicketCategory.class)
+                .eq(TicketCategory::getProgramId, programId)
+                .select(TicketCategory::getId);
+        List<TicketCategory> ticketCategories = ticketCategoryMapper.selectList(tcWrapper);
+        if (CollectionUtil.isNotEmpty(ticketCategories)) {
+            for (TicketCategory tc : ticketCategories) {
+                Long tcId = tc.getId();
+                keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_NO_SOLD_RESOLUTION_HASH, programId, tcId));
+                keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_LOCK_RESOLUTION_HASH, programId, tcId));
+                keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SEAT_SOLD_RESOLUTION_HASH, programId, tcId));
+                keys.add(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION, programId, tcId));
+            }
+        }
+        redisCache.del(keys);
     }
 
     /**
@@ -1162,25 +1217,34 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
 
     /**
      * 删除指定节目的所有本地缓存（节目、分组、场次、票档）。
-     * 通常在后台重置或节目下架时调用，保证下次读取命中 Redis 后重新回填。
      *
      * @param programId 节目 id
      */
     public void delLocalCache(Long programId) {
-        log.info("删除本地缓存 programId : {}", programId);
-        localCacheProgram.del(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId).getRelKey());
-        // 分组本地缓存的 key 是 programGroupId（见 getProgramGroupMultipleCache），
-        // 不是 programId；原来用 programId 删，导致分组缓存失效不掉、只能等 5 分钟上界。
-        try {
-            Program program = programMapper.selectById(programId);
-            if (Objects.nonNull(program) && Objects.nonNull(program.getProgramGroupId())) {
+        delLocalCache(programId, null);
+    }
+
+    /**
+     * 删除指定节目的所有本地缓存（节目、分组、场次、票档）。
+     * 纯内存操作，坚决不查 MySQL，避免全实例广播时击穿数据库。
+     *
+     * @param programId      节目 id
+     * @param programGroupId 节目分组 id（可为 null）
+     */
+    public void delLocalCache(Long programId, Long programGroupId) {
+        log.info("删除本地缓存 programId : {}, programGroupId : {}", programId, programGroupId);
+        String programRelKey = RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM, programId).getRelKey();
+        if (Objects.nonNull(programGroupId)) {
+            localCacheProgramGroup.del(
+                    RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, programGroupId).getRelKey());
+        } else {
+            ProgramVo cachedProgram = localCacheProgram.getCache(programRelKey);
+            if (Objects.nonNull(cachedProgram) && Objects.nonNull(cachedProgram.getProgramGroupId())) {
                 localCacheProgramGroup.del(
-                        RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, program.getProgramGroupId()).getRelKey());
+                        RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_GROUP, cachedProgram.getProgramGroupId()).getRelKey());
             }
-        } catch (Exception e) {
-            // 分组缓存删不掉不影响其余本地缓存失效，记日志即可
-            log.warn("删除节目组本地缓存失败 programId : {}", programId, e);
         }
+        localCacheProgram.del(programRelKey);
         localCacheProgramShowTime.del(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SHOW_TIME, programId).getRelKey());
         localCacheTicketCategory.del(programId);
     }
@@ -1211,7 +1275,7 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
         List<TicketCategoryVo> ticketCategoryVoList = programVo.getTicketCategoryVoList();
         for (TicketCategoryVo ticketCategoryVo : ticketCategoryVoList) {
             seatService.selectSeatResolution(programDataPreheatDto.getProgramId(),
-                    ticketCategoryVo.getId(), DateUtils.countBetweenSecond(DateUtils.now(), showDayTime), TimeUnit.SECONDS);
+                    ticketCategoryVo.getId(), CacheTtlUtil.calculateExpireSeconds(showDayTime), TimeUnit.SECONDS);
             ticketCategoryService.getRedisRemainNumberResolution(programDataPreheatDto.getProgramId(), ticketCategoryVo.getId());
         }
         return true;

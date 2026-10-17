@@ -195,11 +195,10 @@ public class PayService {
         return notifyVo;
     }
 
-    @Transactional(rollbackFor = Exception.class)
     @ServiceLock(name = TRADE_CHECK, keys = {"#tradeCheckDto.outTradeNo"})
     public TradeCheckVo tradeCheck(TradeCheckDto tradeCheckDto) {
         TradeCheckVo tradeCheckVo = new TradeCheckVo();
-        // 查询支付渠道（支付宝）的交易状态和金额
+        // 查询支付渠道（支付宝/微信）的交易状态和金额：公网 HTTP 调用放在事务外，避免占用 DB 连接
         PayStrategyHandler payStrategyHandler = payStrategyContext.get(tradeCheckDto.getChannel());
         TradeResult tradeResult = payStrategyHandler.queryTrade(tradeCheckDto.getOutTradeNo());
         BeanUtil.copyProperties(tradeResult, tradeCheckVo);
@@ -215,11 +214,13 @@ public class PayService {
         PayBill payBill = payBillMapper.selectOne(payBillLambdaQueryWrapper);
         if (Objects.isNull(payBill)) {
             log.error("账单为空 tradeCheckDto : {}", JSON.toJSONString(tradeCheckDto));
+            tradeCheckVo.setSuccess(false);
             return tradeCheckVo;
         }
         if (payBill.getPayAmount().compareTo(totalAmount) != 0) {
             log.error("支付渠道 和库中账单支付金额不一致 支付渠道支付金额 : {}, 库中账单支付金额 : {}, tradeCheckDto : {}",
                     totalAmount, payBill.getPayAmount(), JSON.toJSONString(tradeCheckDto));
+            tradeCheckVo.setSuccess(false);
             return tradeCheckVo;
         }
         // 状态不一致时以支付渠道为准，同步更新本地账单状态
@@ -231,16 +232,19 @@ public class PayService {
                     || Objects.equals(payBill.getPayBillStatus(), PayBillStatus.CANCEL.getCode())) {
                 log.warn("账单已处于终态({})，忽略渠道状态({})回写 tradeCheckDto : {}",
                         payBill.getPayBillStatus(), payBillStatus, JSON.toJSONString(tradeCheckDto));
+                tradeCheckVo.setPayBillStatus(payBill.getPayBillStatus());
                 return tradeCheckVo;
             }
             log.warn("支付渠道和库中账单交易状态不一致 支付渠道payBillStatus : {}, 库中payBillStatus : {}, tradeCheckDto : {}",
                     payBillStatus, payBill.getPayBillStatus(), JSON.toJSONString(tradeCheckDto));
-            PayBill updatePayBill = new PayBill();
-            updatePayBill.setId(payBill.getId());
-            updatePayBill.setPayBillStatus(payBillStatus);
-            LambdaUpdateWrapper<PayBill> payBillLambdaUpdateWrapper =
-                    Wrappers.lambdaUpdate(PayBill.class).eq(PayBill::getOutOrderNo, outTradeNo);
-            payBillMapper.update(updatePayBill, payBillLambdaUpdateWrapper);
+            transactionTemplate.executeWithoutResult(status -> {
+                PayBill updatePayBill = new PayBill();
+                updatePayBill.setId(payBill.getId());
+                updatePayBill.setPayBillStatus(payBillStatus);
+                LambdaUpdateWrapper<PayBill> payBillLambdaUpdateWrapper =
+                        Wrappers.lambdaUpdate(PayBill.class).eq(PayBill::getOutOrderNo, outTradeNo);
+                payBillMapper.update(updatePayBill, payBillLambdaUpdateWrapper);
+            });
             return tradeCheckVo;
         }
         return tradeCheckVo;
@@ -285,11 +289,16 @@ public class PayService {
                 || refundDto.getRefundRequestId().isBlank())
                 ? String.valueOf(uidGenerator.getUid())
                 : refundDto.getRefundRequestId();
-        // 同一幂等键已受理过：直接返回，避免重复调用渠道（覆盖"上次已调渠道但进程在落库前崩溃"的重试）
+        // 同一幂等键已受理过：区分退款单状态
         RefundBill existRefund = refundBillMapper.selectOne(
                 Wrappers.lambdaQuery(RefundBill.class).eq(RefundBill::getOutRefundNo, outRefundNo));
         if (Objects.nonNull(existRefund)) {
-            log.info("退款幂等命中，直接返回 outRefundNo : {}", outRefundNo);
+            // 若退款单此前已被置为失败终态（3），不能误判成功返回，必须抛出错误通知调用方
+            if (Objects.equals(existRefund.getRefundStatus(), 3)) {
+                log.error("退款幂等命中但该退款单此前已确认失败 outRefundNo : {}", outRefundNo);
+                throw new TicketFlowFrameException(BaseCode.REFUND_ERROR.getCode(), "该退款请求此前已执行失败");
+            }
+            log.info("退款幂等命中（处理中或成功），直接返回 outRefundNo : {}", outRefundNo);
             return outRefundNo;
         }
         // 调用支付渠道退款

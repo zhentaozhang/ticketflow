@@ -333,6 +333,7 @@ class ProgramServiceTest {
         private BaseDataClient baseDataClient;
         private CompositeContainer compositeContainer;
         private UidGenerator uidGenerator;
+        private com.ticketflow.handler.BloomFilterHandler bloomFilterHandler;
 
         @BeforeEach
         void setUp() {
@@ -343,6 +344,7 @@ class ProgramServiceTest {
             baseDataClient = mock(BaseDataClient.class);
             compositeContainer = mock(CompositeContainer.class);
             uidGenerator = mock(UidGenerator.class);
+            bloomFilterHandler = mock(com.ticketflow.handler.BloomFilterHandler.class);
             ReflectionTestUtils.setField(programService, "programMapper", programMapper);
             ReflectionTestUtils.setField(programService, "programShowTimeMapper", programShowTimeMapper);
             ReflectionTestUtils.setField(programService, "programCategoryMapper", programCategoryMapper);
@@ -350,6 +352,7 @@ class ProgramServiceTest {
             ReflectionTestUtils.setField(programService, "baseDataClient", baseDataClient);
             ReflectionTestUtils.setField(programService, "compositeContainer", compositeContainer);
             ReflectionTestUtils.setField(programService, "uidGenerator", uidGenerator);
+            ReflectionTestUtils.setField(programService, "bloomFilterHandler", bloomFilterHandler);
         }
 
         private ProgramPageListDto pageListDto(Integer timeType) {
@@ -441,6 +444,7 @@ class ProgramServiceTest {
             verify(programMapper).insert(captor.capture());
             assertEquals(888L, captor.getValue().getId());
             assertEquals("测试演出", captor.getValue().getTitle());
+            verify(bloomFilterHandler).add("888");
         }
 
         @Test

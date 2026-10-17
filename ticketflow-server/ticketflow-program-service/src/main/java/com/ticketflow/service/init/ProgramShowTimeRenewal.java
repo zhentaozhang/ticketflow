@@ -1,6 +1,5 @@
 package com.ticketflow.service.init;
 
-import com.ticketflow.core.SpringUtil;
 import com.ticketflow.initialize.base.AbstractApplicationPostConstructHandler;
 import com.ticketflow.service.ProgramService;
 import com.ticketflow.service.ProgramShowTimeService;
@@ -53,15 +52,9 @@ public class ProgramShowTimeRenewal extends AbstractApplicationPostConstructHand
         //判断节目演出时间是否过期，如果过期了，则更新时间，并返回已经更新演出时间的节目id
         Set<Long> programIdSet = programShowTimeService.renewal();
         if (!programIdSet.isEmpty()) {
-            //如果更新了，将elasticsearch的整个索引和数据都删除
-            boolean result = businessEsHandle.checkIndex(SpringUtil.getPrefixDistinctionName() + "-" +
-                    ProgramDocumentParamName.INDEX_NAME, ProgramDocumentParamName.INDEX_TYPE);
-            if (result) {
-                businessEsHandle.deleteIndex(SpringUtil.getPrefixDistinctionName() + "-" +
-                        ProgramDocumentParamName.INDEX_NAME);
-            }
             for (Long programId : programIdSet) {
-                //统一删除 Redis 缓存、本实例本地缓存并广播通知集群其它实例
+                // 仅淘汰已顺延节目的多级缓存（Redis、本地缓存并广播集群），
+                // 避免在多实例部署或单节点启动时物理删除整个集群共享的 ES 索引，导致正在提供搜索服务的实例雪崩
                 programService.evictProgramCache(programId);
             }
         }

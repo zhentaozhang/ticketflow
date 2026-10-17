@@ -1,5 +1,6 @@
 package com.ticketflow.core;
 
+import com.ticketflow.trace.TraceContextUtil;
 import org.redisson.api.RDelayedQueue;
 import org.redisson.api.RedissonClient;
 
@@ -23,6 +24,7 @@ public class DelayProduceQueue extends DelayBaseQueue{
     }
     
     public void offer(String content, long delayTime, TimeUnit timeUnit) {
-        delayedQueue.offer(content,delayTime,timeUnit);
+        String wrappedContent = TraceContextUtil.wrap(content);
+        delayedQueue.offer(wrappedContent, delayTime, timeUnit);
     }
 }

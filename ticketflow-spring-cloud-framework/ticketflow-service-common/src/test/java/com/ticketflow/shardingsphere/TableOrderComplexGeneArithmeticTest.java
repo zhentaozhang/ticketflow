@@ -45,6 +45,22 @@ class TableOrderComplexGeneArithmeticTest {
         assertEquals(List.of("d_order_" + (orderNumber & 3)), new ArrayList<>(result));
     }
 
+    @Test
+    void doSharding_mobile_routeToSingleTable() {
+        String mobile = "13800138000";
+        long hash = mobile.hashCode() & 0x7FFFFFFF;
+        Collection<String> result = doSharding(colsOfString("mobile", mobile));
+        assertEquals(List.of("d_order_" + (hash & 3)), new ArrayList<>(result));
+    }
+
+    @Test
+    void doSharding_email_routeToSingleTable() {
+        String email = "test@ticketflow.com";
+        long hash = email.hashCode() & 0x7FFFFFFF;
+        Collection<String> result = doSharding(colsOfString("email", email));
+        assertEquals(List.of("d_order_" + (hash & 3)), new ArrayList<>(result));
+    }
+
     private Map<String, Collection<Long>> colsOfString(String column, String value) {
         Map<String, Collection<Long>> map = new LinkedHashMap<>();
         map.put(column, (Collection<Long>) (Collection<?>) List.of(value));

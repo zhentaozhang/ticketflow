@@ -343,6 +343,7 @@ class PayServiceTest {
         TradeCheckVo result = payService.tradeCheck(tradeCheckDto());
 
         assertEquals(bill.getPayAmount(), result.getTotalAmount());
+        assertEquals(false, result.isSuccess());
         verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
     }
 
@@ -354,6 +355,7 @@ class PayServiceTest {
 
         TradeCheckVo result = payService.tradeCheck(tradeCheckDto());
 
+        assertEquals(false, result.isSuccess());
         verify(payBillMapper, never()).update(any(PayBill.class), any(LambdaUpdateWrapper.class));
     }
 
@@ -507,11 +509,27 @@ class PayServiceTest {
         dto.setRefundRequestId("closed-refund:20260804000000000001:50.00");
         RefundBill existed = new RefundBill();
         existed.setOutRefundNo(dto.getRefundRequestId());
+        existed.setRefundStatus(2);
         when(refundBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(existed);
 
         String outRefundNo = payService.refund(dto);
 
         assertEquals("closed-refund:20260804000000000001:50.00", outRefundNo);
+        verify(payStrategyHandler, never()).refund(anyString(), any(), any(), anyString(), anyString());
+        verify(refundBillMapper, never()).insert(any(RefundBill.class));
+    }
+
+    @Test
+    void refund_同幂等键重复_此前已失败_抛出异常() {
+        when(payBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(payBill(PayBillStatus.PAY.getCode()));
+        RefundDto dto = refundDto();
+        dto.setRefundRequestId("closed-refund:20260804000000000001:50.00");
+        RefundBill existed = new RefundBill();
+        existed.setOutRefundNo(dto.getRefundRequestId());
+        existed.setRefundStatus(3); // 终态失败
+        when(refundBillMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(existed);
+
+        assertThrows(TicketFlowFrameException.class, () -> payService.refund(dto));
         verify(payStrategyHandler, never()).refund(anyString(), any(), any(), anyString(), anyString());
         verify(refundBillMapper, never()).insert(any(RefundBill.class));
     }

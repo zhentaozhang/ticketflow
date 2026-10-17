@@ -23,12 +23,15 @@ import com.wechat.pay.java.service.refund.model.CreateRequest;
 import com.wechat.pay.java.service.refund.model.QueryByOutRefundNoRequest;
 import com.wechat.pay.java.service.refund.model.Refund;
 import com.wechat.pay.java.service.refund.model.Status;
-import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 import java.math.BigDecimal;
+import com.ticketflow.core.RedisKeyManage;
+import com.ticketflow.redis.RedisCache;
+import com.ticketflow.redis.RedisKeyBuild;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 import static com.ticketflow.constant.Constant.WX_NONCE_HEADER;
 import static com.ticketflow.constant.Constant.WX_RAW_BODY_KEY;
@@ -46,7 +49,6 @@ import static com.ticketflow.constant.Constant.WX_TIMESTAMP_HEADER;
  * 供 PayService.notify 后续步骤与 dataVerify 使用。
  */
 @Slf4j
-@AllArgsConstructor
 public class WxPayStrategyHandler implements PayStrategyHandler {
 
     private static final BigDecimal HUNDRED = new BigDecimal(100);
@@ -57,8 +59,7 @@ public class WxPayStrategyHandler implements PayStrategyHandler {
     private static final long WX_NOTIFY_MAX_TIME_DIFF_SECONDS = 5 * 60L;
 
     /**
-     * 已处理回调 nonce 缓存（nonce → 首次到达时间），时间戳窗口内同一 nonce 只处理一次。
-     * 内存实现：多实例部署时各实例独立去重，配合时间戳校验与幂等状态机已满足微信回调要求。
+     * 已处理回调 nonce 本地缓存（nonce → 首次到达时间），当 Redis 不可用时降级兜底。
      */
     private static final Map<String, Long> WX_NOTIFY_NONCE_CACHE = new ConcurrentHashMap<>();
 
@@ -71,6 +72,23 @@ public class WxPayStrategyHandler implements PayStrategyHandler {
     private final RefundService refundService;
 
     private final WxPayProperties wxPayProperties;
+
+    private final RedisCache redisCache;
+
+    public WxPayStrategyHandler(NativePayService nativePayService, NotificationParser notificationParser,
+                               RefundService refundService, WxPayProperties wxPayProperties,
+                               RedisCache redisCache) {
+        this.nativePayService = nativePayService;
+        this.notificationParser = notificationParser;
+        this.refundService = refundService;
+        this.wxPayProperties = wxPayProperties;
+        this.redisCache = redisCache;
+    }
+
+    public WxPayStrategyHandler(NativePayService nativePayService, NotificationParser notificationParser,
+                               RefundService refundService, WxPayProperties wxPayProperties) {
+        this(nativePayService, notificationParser, refundService, wxPayProperties, null);
+    }
 
     @Override
     public PayResult pay(String outTradeNo, BigDecimal price, String subject, String notifyUrl, String returnUrl) {
@@ -133,10 +151,22 @@ public class WxPayStrategyHandler implements PayStrategyHandler {
     }
 
     /**
-     * nonce 是否首次出现。首次到达返回 true 并记录，时间戳窗口内重复到达返回 false。
-     * 缓存满 1000 条时顺带清理过期条目，防止无限增长。
+     * nonce 是否首次出现。优先使用 Redis 分布式原子 setIfAbsent，保证多 Pod/多实例集群强一致防重；
+     * Redis 异常或未注入时降级为本地内存缓存去重。
      */
     private boolean isNonceFresh(String nonce) {
+        if (redisCache != null) {
+            try {
+                String key = RedisKeyBuild.createRedisKey(RedisKeyManage.WX_PAY_NOTIFY_NONCE, nonce).getRelKey();
+                Boolean success = redisCache.getInstance().opsForValue()
+                        .setIfAbsent(key, "1", WX_NOTIFY_MAX_TIME_DIFF_SECONDS + 60, TimeUnit.SECONDS);
+                if (success != null) {
+                    return success;
+                }
+            } catch (Exception e) {
+                log.warn("Redis nonce 分布式去重异常，降级到本地内存缓存 nonce : {}", nonce, e);
+            }
+        }
         long now = System.currentTimeMillis();
         if (WX_NOTIFY_NONCE_CACHE.putIfAbsent(nonce, now) != null) {
             return false;

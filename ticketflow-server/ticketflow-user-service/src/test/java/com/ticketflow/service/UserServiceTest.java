@@ -247,7 +247,7 @@ class UserServiceTest {
         UserLoginVo result = userService.login(dto);
 
         assertEquals(100L, result.getUserId());
-        verify(redisCache).set(any(), eq(user), eq(40L), eq(TimeUnit.MINUTES));
+        verify(redisCache).set(any(), org.mockito.Mockito.argThat(u -> u instanceof User cached && java.util.Objects.equals(cached.getId(), 100L) && cached.getPassword() == null), eq(40L), eq(TimeUnit.MINUTES));
         String userId = JSONObject.parseObject(TokenUtil.parseToken(result.getToken(), SECRET)).getString("userId");
         assertEquals("100", userId);
     }

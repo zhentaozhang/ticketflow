@@ -33,21 +33,21 @@ rules:
         actualDataNodes: ds_$->{0..1}.d_order_ticket_user_$->{0..7}
         databaseStrategy:
           complex:
-            shardingColumns: order_number
+            shardingColumns: order_number, user_id
             shardingAlgorithmName: database-order-complex
         tableStrategy:
           complex:
-            shardingColumns: order_number
+            shardingColumns: order_number, user_id
             shardingAlgorithmName: table-order-complex
       d_order_ticket_user_record:
         actualDataNodes: ds_$->{0..1}.d_order_ticket_user_record_$->{0..7}
         databaseStrategy:
           complex:
-            shardingColumns: order_number
+            shardingColumns: order_number, user_id
             shardingAlgorithmName: database-order-complex
         tableStrategy:
           complex:
-            shardingColumns: order_number
+            shardingColumns: order_number, user_id
             shardingAlgorithmName: table-order-complex
       d_order_program:
         actualDataNodes: ds_$->{0..1}.d_order_program_$->{0..1}

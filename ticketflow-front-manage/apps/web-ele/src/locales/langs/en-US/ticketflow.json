@@ -1,0 +1,11 @@
+{
+  "index": {
+    "programListTitle": "Programs",
+    "seatListTitle": "Seats",
+    "orderListTitle": "Orders",
+    "discardOrderListTitle": "Discarded orders",
+    "messageRecordListTitle": "MQ message records",
+    "operation": "Operation",
+    "namespace": "Namespace"
+  }
+}

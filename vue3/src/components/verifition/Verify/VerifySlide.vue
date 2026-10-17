@@ -49,7 +49,7 @@
     import {resetSize} from './../utils/util'
     import {reqGet,reqCheck}  from "./../api/index"
     import $bus from '@/utils/bus'
- import { computed, onMounted, reactive, ref,watch,nextTick,toRefs, watchEffect,getCurrentInstance} from 'vue';
+ import { computed, onMounted, onUnmounted, reactive, ref,watch,nextTick,toRefs, watchEffect,getCurrentInstance} from 'vue';
     //  "captchaType":"blockPuzzle",
     export default {
         name: 'VerifySlide',
@@ -153,36 +153,32 @@
                         proxy.$parent.$emit('ready', proxy)
                     })
 
-                    window.removeEventListener("touchmove", function (e) {
-                        move(e);
-                    });
-                    window.removeEventListener("mousemove", function (e) {
-                        move(e);
-                    });
-
-                    //鼠标松开
-                    window.removeEventListener("touchend", function () {
-                        end();
-                    });
-                    window.removeEventListener("mouseup", function () {
-                        end();
-                    });
-
-                    window.addEventListener("touchmove", function (e) {
-                        move(e);
-                    });
-                    window.addEventListener("mousemove", function (e) {
-                        move(e);
-                    });
-
-                    //鼠标松开
-                    window.addEventListener("touchend", function () {
-                        end();
-                    });
-                    window.addEventListener("mouseup", function () {
-                        end();
-                    });
+                    addListeners()
                 }
+
+                function handleMove(e) {
+                    move(e);
+                }
+
+                function handleEnd() {
+                    end();
+                }
+
+                function removeListeners() {
+                    window.removeEventListener("touchmove", handleMove);
+                    window.removeEventListener("mousemove", handleMove);
+                    window.removeEventListener("touchend", handleEnd);
+                    window.removeEventListener("mouseup", handleEnd);
+                }
+
+                function addListeners() {
+                    removeListeners();
+                    window.addEventListener("touchmove", handleMove);
+                    window.addEventListener("mousemove", handleMove);
+                    window.addEventListener("touchend", handleEnd);
+                    window.addEventListener("mouseup", handleEnd);
+                }
+
                 watch(type,()=>{
                     init()
                 })
@@ -192,6 +188,9 @@
                     proxy.$el.onselectstart = function () {
                         return false
                     }
+                })
+                onUnmounted(()=>{
+                    removeListeners()
                 })
                 //鼠标按下
                 function start(e) {

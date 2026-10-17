@@ -290,4 +290,39 @@ class WxPayStrategyHandlerTest {
         assertTrue(result.isSuccess());
         assertEquals(1, result.getRefundStatus());
     }
+
+    @Test
+    void signVerify_使用Redis分布式去重成功且拦截重复Nonce() {
+        com.ticketflow.redis.RedisCache redisCache = mock(com.ticketflow.redis.RedisCache.class);
+        org.springframework.data.redis.core.RedisTemplate redisTemplate = mock(org.springframework.data.redis.core.RedisTemplate.class);
+        org.springframework.data.redis.core.ValueOperations valOps = mock(org.springframework.data.redis.core.ValueOperations.class);
+        when(redisCache.getInstance()).thenReturn(redisTemplate);
+        when(redisTemplate.opsForValue()).thenReturn(valOps);
+        when(valOps.setIfAbsent(any(), any(), any(Long.class), any())).thenReturn(true).thenReturn(false);
+
+        WxPayStrategyHandler redisHandler = new WxPayStrategyHandler(null, notificationParser, null, properties, redisCache);
+
+        Transaction transaction = new Transaction();
+        transaction.setOutTradeNo("202608041234567890");
+        transaction.setTradeState(Transaction.TradeStateEnum.SUCCESS);
+        TransactionAmount amount = new TransactionAmount();
+        amount.setTotal(10000);
+        transaction.setAmount(amount);
+        transaction.setAppid("wxa9d9651ae0000001");
+        transaction.setMchid("1900000001");
+        when(notificationParser.parse(any(RequestParam.class), eq(Transaction.class))).thenReturn(transaction);
+
+        Map<String, String> params = new HashMap<>();
+        params.put(WX_TIMESTAMP_HEADER, String.valueOf(System.currentTimeMillis() / 1000));
+        params.put(WX_NONCE_HEADER, "redis-test-nonce-1");
+        params.put(WX_SERIAL_HEADER, "serial1");
+        params.put(WX_SIGNATURE_HEADER, "sig1");
+        params.put(WX_RAW_BODY_KEY, "{\"mock\":\"json\"}");
+
+        // 第一次调用：setIfAbsent 返回 true，验签通过
+        assertTrue(redisHandler.signVerify(params));
+
+        // 第二次调用：setIfAbsent 返回 false，重放被拦截
+        assertFalse(redisHandler.signVerify(params));
+    }
 }

@@ -235,6 +235,22 @@ class RequestValidationFilterTest {
         verify(apiRestrictService).apiRestrict(null, "/program/list", exchange.getRequest());
     }
 
+    @Test
+    void filterShouldDirectlyBypassActuatorEndpoints() {
+        ServerWebExchange exchange = mock(ServerWebExchange.class);
+        ServerHttpRequest request = mock(ServerHttpRequest.class);
+        when(exchange.getRequest()).thenReturn(request);
+        when(request.getPath()).thenReturn(RequestPath.parse(URI.create("/actuator/prometheus"), ""));
+
+        org.springframework.cloud.gateway.filter.GatewayFilterChain chain = mock(org.springframework.cloud.gateway.filter.GatewayFilterChain.class);
+        when(chain.filter(exchange)).thenReturn(reactor.core.publisher.Mono.empty());
+
+        reactor.core.publisher.Mono<Void> mono = filter.filter(exchange, chain);
+        mono.block();
+
+        verify(chain).filter(exchange);
+    }
+
     private void stubChannelData() {
         GetChannelDataVo channel = new GetChannelDataVo();
         channel.setCode("2");

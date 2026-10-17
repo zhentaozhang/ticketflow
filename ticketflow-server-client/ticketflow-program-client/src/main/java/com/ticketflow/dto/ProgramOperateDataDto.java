@@ -33,4 +33,7 @@ public class ProgramOperateDataDto {
     @Schema(name ="orderVersion", type ="Long", description ="创建订单时的版本",requiredMode= RequiredMode.REQUIRED)
     @NotNull
     private Integer orderVersion;
+
+    @Schema(name ="orderNumber", type ="Long", description ="订单编号")
+    private Long orderNumber;
 }

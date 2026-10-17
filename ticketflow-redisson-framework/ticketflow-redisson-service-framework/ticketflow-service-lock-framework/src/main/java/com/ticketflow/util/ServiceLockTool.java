@@ -25,12 +25,10 @@ import java.util.concurrent.TimeUnit;
 public class ServiceLockTool {
 
     /**
-     * 缓存重建锁的等待上限（秒）。
-     * <p>
-     * 和 {@code @ServiceLock} 注解的 {@code waitTime} 默认值保持一致（都是 10 秒）：
-     * 外层注解锁本来就是“等 10 秒抢不到就快速失败”，内层手写锁不应该反而无限等。
+     * 缓存重建锁的默认等待上限（毫秒）。
+     * 数据库单次查询通常 < 20ms，等待 500ms 具备充足冗余，同时保护 Web 容器工作线程不被占满。
      */
-    private static final long DEFAULT_LOCK_WAIT_SECONDS = 10L;
+    private static final long DEFAULT_LOCK_WAIT_MILLIS = 500L;
 
     private final LockInfoHandleFactory lockInfoHandleFactory;
 
@@ -174,11 +172,15 @@ public class ServiceLockTool {
      * @return true = 已持有锁（调用方必须在 finally 里释放）；false = 没拿到，不要释放
      */
     public boolean tryLock(RLock lock, String lockDesc) {
+        return tryLock(lock, lockDesc, DEFAULT_LOCK_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+    }
+
+    public boolean tryLock(RLock lock, String lockDesc, long waitTime, TimeUnit timeUnit) {
         try {
-            if (lock.tryLock(DEFAULT_LOCK_WAIT_SECONDS, TimeUnit.SECONDS)) {
+            if (lock.tryLock(waitTime, timeUnit)) {
                 return true;
             }
-            log.warn("等待锁超时，调用方将再查一次缓存 lock : {}", lockDesc);
+            log.warn("等待锁超时(快速失败)，调用方将再查一次缓存 lock : {}", lockDesc);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.warn("等待锁被中断 lock : {}", lockDesc, e);

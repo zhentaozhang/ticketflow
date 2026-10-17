@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -65,7 +66,7 @@ class AreaServiceTest {
     void selectCityDataShouldReturnCachedDataWhenPresent() {
         AreaVo cached = new AreaVo();
         cached.setName("北京");
-        when(redisCache.rangeForList(any(), eq(0L), eq(-1L), eq(AreaVo.class)))
+        when(redisCache.getValueIsList(any(), eq(AreaVo.class), any(), anyLong(), any()))
                 .thenReturn(List.of(cached));
 
         List<AreaVo> result = areaService.selectCityData();
@@ -77,27 +78,34 @@ class AreaServiceTest {
 
     @Test
     void selectCityDataShouldQueryDbAndBackfillCacheWhenMiss() {
-        when(redisCache.rangeForList(any(), eq(0L), eq(-1L), eq(AreaVo.class))).thenReturn(null);
         Area area = new Area();
         area.setName("北京");
         when(areaMapper.selectList(any())).thenReturn(List.of(area));
+        when(redisCache.getValueIsList(any(), eq(AreaVo.class), any(), anyLong(), any()))
+                .thenAnswer(invocation -> {
+                    java.util.function.Supplier<List<AreaVo>> supplier = invocation.getArgument(2);
+                    return supplier.get();
+                });
 
         List<AreaVo> result = areaService.selectCityData();
 
         assertEquals(1, result.size());
         assertEquals("北京", result.get(0).getName());
-        verify(redisCache).leftPushAllForList(any(), any());
+        verify(areaMapper).selectList(any());
     }
 
     @Test
     void selectCityDataShouldNotBackfillWhenDbEmpty() {
-        when(redisCache.rangeForList(any(), eq(0L), eq(-1L), eq(AreaVo.class))).thenReturn(null);
         when(areaMapper.selectList(any())).thenReturn(List.of());
+        when(redisCache.getValueIsList(any(), eq(AreaVo.class), any(), anyLong(), any()))
+                .thenAnswer(invocation -> {
+                    java.util.function.Supplier<List<AreaVo>> supplier = invocation.getArgument(2);
+                    return supplier.get();
+                });
 
         List<AreaVo> result = areaService.selectCityData();
 
         assertEquals(0, result.size());
-        verify(redisCache, never()).leftPushAllForList(any(), any());
     }
 
     @Test

@@ -24,12 +24,19 @@ public class SpringUtil implements ApplicationContextInitializer<ConfigurableApp
 
 
     public static String getPrefixDistinctionName() {
+        if (configurableApplicationContext == null || configurableApplicationContext.getEnvironment() == null) {
+            return DEFAULT_PREFIX_DISTINCTION_NAME;
+        }
         return configurableApplicationContext.getEnvironment().getProperty(PREFIX_DISTINCTION_NAME,
                 DEFAULT_PREFIX_DISTINCTION_NAME);
     }
 
     @Override
     public void initialize(final ConfigurableApplicationContext applicationContext) {
+        configurableApplicationContext = applicationContext;
+    }
+
+    public static void setConfigurableApplicationContext(final ConfigurableApplicationContext applicationContext) {
         configurableApplicationContext = applicationContext;
     }
 

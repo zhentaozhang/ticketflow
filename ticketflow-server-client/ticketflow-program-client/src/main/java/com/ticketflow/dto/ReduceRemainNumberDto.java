@@ -29,4 +29,7 @@ public class ReduceRemainNumberDto {
     @Schema(name = "sellStatus", type = "Long", description = "座位状态", requiredMode = RequiredMode.REQUIRED)
     @NotNull
     private Integer sellStatus;
+
+    @Schema(name = "orderNumber", type = "Long", description = "订单号（用于幂等重试溯源）")
+    private Long orderNumber;
 }

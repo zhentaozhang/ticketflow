@@ -79,6 +79,46 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
                 existMessageConsumerRecordVo.getMessageConsumerStatus().equals(MessageConsumerStatus.CONSUMER_SUCCESS.getCode())) {
             return;
         }
+
+        // 核心改造：优先执行核心关单逻辑，确保库存/座位释放不被下游存证 RPC 阻塞
+        Integer consumerStatus = null;
+        String consumerException = null;
+        try {
+            OrderCancelDto orderCancelDto = new OrderCancelDto();
+            orderCancelDto.setOrderNumber(orderNumber);
+            boolean cancel = orderService.cancel(orderCancelDto);
+            if (cancel) {
+                log.info("延迟订单取消成功 orderCancelDto : {}", content);
+                consumerStatus = MessageConsumerStatus.CONSUMER_SUCCESS.getCode();
+            } else {
+                log.error("延迟订单取消失败 orderCancelDto : {}", content);
+                consumerStatus = MessageConsumerStatus.CONSUMER_FAIL.getCode();
+                consumerException = "订单取消失败";
+            }
+        } catch (TicketFlowFrameException e) {
+            // 只有"订单已处于终态 / 已被并发流程改掉"才视为消费成功；
+            // 其余业务失败（如订单暂不可见 ORDER_NOT_EXIST、状态不允许取消）应标记失败保留重试，
+            // 否则一次瞬时失败就被永久吞掉、订单再也不会被取消。
+            if (isTerminalOrderState(e.getCode())) {
+                consumerStatus = MessageConsumerStatus.CONSUMER_SUCCESS.getCode();
+            } else {
+                log.warn("延迟订单取消业务失败，保留重试 orderNumber : {} code : {}", orderNumber, e.getCode());
+                consumerStatus = MessageConsumerStatus.CONSUMER_FAIL.getCode();
+                consumerException = e.getMessage();
+            }
+        } catch (Exception e) {
+            log.error("延迟订单取消系统异常 orderNumber : {}", orderNumber, e);
+            consumerStatus = MessageConsumerStatus.CONSUMER_FAIL.getCode();
+            consumerException = e.getMessage();
+        }
+
+        // 存证记录尽力而为更新，不阻断核心主流程
+        recordConsumerResult(existMessageConsumerRecordVo, messageId, messageTraceId, programId, content, consumerStatus, consumerException);
+    }
+
+    private void recordConsumerResult(MessageConsumerRecordVo existMessageConsumerRecordVo,
+                                      Long messageId, Long messageTraceId, Long programId,
+                                      String content, Integer consumerStatus, String consumerException) {
         Long messageConsumerRecordId = null;
         Integer messageConsumerCount = null;
         // 首次消费 → 创建消费记录；重试 → 复用已有记录，消费次数+1
@@ -92,12 +132,14 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
             insertMessageConsumerRecordDto.setMessageContent(content);
             try {
                 ApiResponse<MessageConsumerRecordVo> insertApiResponse = apiDataClient.insertMessageConsumerRecord(insertMessageConsumerRecordDto);
-                if (!insertApiResponse.getCode().equals(BaseCode.SUCCESS.getCode())) {
+                if (insertApiResponse == null || !insertApiResponse.getCode().equals(BaseCode.SUCCESS.getCode())) {
                     log.error("添加消息消费记录失败 insertMessageConsumerRecordDto : {}", JSON.toJSONString(insertMessageConsumerRecordDto));
                 } else {
                     MessageConsumerRecordVo saveMessageConsumerRecordVo = insertApiResponse.getData();
-                    messageConsumerRecordId = saveMessageConsumerRecordVo.getId();
-                    messageConsumerCount = saveMessageConsumerRecordVo.getMessageConsumerCount();
+                    if (saveMessageConsumerRecordVo != null) {
+                        messageConsumerRecordId = saveMessageConsumerRecordVo.getId();
+                        messageConsumerCount = saveMessageConsumerRecordVo.getMessageConsumerCount();
+                    }
                 }
             } catch (Exception e) {
                 // api-data 故障时不阻断取消：消费记录缺失时由消息对账层重投，cancel 幂等保证安全
@@ -107,52 +149,14 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
             messageConsumerRecordId = existMessageConsumerRecordVo.getId();
             messageConsumerCount = existMessageConsumerRecordVo.getMessageConsumerCount() + 1;
         }
-        UpdateMessageConsumerRecordDto updateMessageConsumerRecordDto = null;
+
         if (Objects.nonNull(messageConsumerRecordId)) {
-            updateMessageConsumerRecordDto = new UpdateMessageConsumerRecordDto();
+            UpdateMessageConsumerRecordDto updateMessageConsumerRecordDto = new UpdateMessageConsumerRecordDto();
             updateMessageConsumerRecordDto.setId(messageConsumerRecordId);
             updateMessageConsumerRecordDto.setMessageConsumerCount(messageConsumerCount);
             updateMessageConsumerRecordDto.setConsumerTime(DateUtils.now());
-        }
-
-        try {
-            OrderCancelDto orderCancelDto = new OrderCancelDto();
-            orderCancelDto.setOrderNumber(orderNumber);
-            boolean cancel = orderService.cancel(orderCancelDto);
-            if (cancel) {
-                log.info("延迟订单取消成功 orderCancelDto : {}", content);
-                if (Objects.nonNull(updateMessageConsumerRecordDto)) {
-                    updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
-                }
-            } else {
-                log.error("延迟订单取消失败 orderCancelDto : {}", content);
-                if (Objects.nonNull(updateMessageConsumerRecordDto)) {
-                    updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_FAIL.getCode());
-                    updateMessageConsumerRecordDto.setMessageConsumerException("订单取消失败");
-                }
-            }
-        } catch (TicketFlowFrameException e) {
-            // 只有"订单已处于终态 / 已被并发流程改掉"才视为消费成功；
-            // 其余业务失败（如订单暂不可见 ORDER_NOT_EXIST、状态不允许取消）应标记失败保留重试，
-            // 否则一次瞬时失败就被永久吞掉、订单再也不会被取消。
-            if (isTerminalOrderState(e.getCode())) {
-                if (Objects.nonNull(updateMessageConsumerRecordDto)) {
-                    updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_SUCCESS.getCode());
-                }
-            } else {
-                log.warn("延迟订单取消业务失败，保留重试 orderNumber : {} code : {}", orderNumber, e.getCode());
-                if (Objects.nonNull(updateMessageConsumerRecordDto)) {
-                    updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_FAIL.getCode());
-                    updateMessageConsumerRecordDto.setMessageConsumerException(e.getMessage());
-                }
-            }
-        } catch (Exception e) {
-            if (Objects.nonNull(updateMessageConsumerRecordDto)) {
-                updateMessageConsumerRecordDto.setMessageConsumerStatus(MessageConsumerStatus.CONSUMER_FAIL.getCode());
-                updateMessageConsumerRecordDto.setMessageConsumerException(e.getMessage());
-            }
-        }
-        if (Objects.nonNull(updateMessageConsumerRecordDto)) {
+            updateMessageConsumerRecordDto.setMessageConsumerStatus(consumerStatus);
+            updateMessageConsumerRecordDto.setMessageConsumerException(consumerException);
             try {
                 apiDataClient.updateMessageConsumerRecord(updateMessageConsumerRecordDto);
             } catch (Exception e) {

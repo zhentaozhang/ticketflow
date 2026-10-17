@@ -47,9 +47,8 @@ public class DelayOrderCancelSend {
     @Autowired
     private ApiDataClient apiDataClient;
 
-    // 控制是否开启订单延迟取消。
-    // V4 异步场景可关闭，由上游流程自行处理取消。
-    @Value("${delay.order.cancel:false}")
+    // 控制是否开启订单延迟取消。默认开启，保障超时未支付订单及库存可自动释放
+    @Value("${delay.order.cancel:true}")
     private Boolean delayOrderCancel;
 
     /**
@@ -65,10 +64,24 @@ public class DelayOrderCancelSend {
             // 异步发送，避免延迟队列操作占用主请求线程。
             BusinessThreadPool.execute(() -> doSendMessage(delayOrderCancelDto));
         } catch (RejectedExecutionException e) {
-            // 线程池满时降级同步发送，避免取消消息直接丢失。
-            log.error("延迟订单取消消息线程池饱和，降级同步发送 orderNumber : {}",
+            // 线程池满时记录警告，直接快速投递延迟队列（跳过日志同步RPC），或交由 UnpaidOrderCancelTask 兜底，避免主线程雪崩
+            log.warn("延迟订单取消消息线程池饱和，跳过同步消息日志 RPC，尝试直接投递延迟队列 orderNumber : {}",
                     delayOrderCancelDto.getOrderNumber(), e);
-            doSendMessage(delayOrderCancelDto);
+            try {
+                DelayOrderCancelMessageModule delayOrderCancelMessageModule = new DelayOrderCancelMessageModule();
+                delayOrderCancelMessageModule.setMessageTraceId(uidGenerator.getUid());
+                delayOrderCancelMessageModule.setMessageId(uidGenerator.getUid());
+                delayOrderCancelMessageModule.setProgramId(delayOrderCancelDto.getProgramId());
+                delayOrderCancelMessageModule.setOrderNumber(delayOrderCancelDto.getOrderNumber());
+                delayQueueContext.sendMessage(
+                        SpringUtil.getPrefixDistinctionName() + "-" + DELAY_ORDER_CANCEL_TOPIC,
+                        JSON.toJSONString(delayOrderCancelMessageModule),
+                        DELAY_ORDER_CANCEL_TIME,
+                        DELAY_ORDER_CANCEL_TIME_UNIT);
+            } catch (Exception ex) {
+                log.error("延迟订单取消队列直接投递失败，将由 UnpaidOrderCancelTask 定时任务兜底关单 orderNumber : {}",
+                        delayOrderCancelDto.getOrderNumber(), ex);
+            }
         }
     }
 

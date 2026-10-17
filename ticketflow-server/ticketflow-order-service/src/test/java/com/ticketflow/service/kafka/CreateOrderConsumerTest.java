@@ -109,9 +109,10 @@ class CreateOrderConsumerTest {
     }
 
     private ConsumerRecord<String, String> buildConsumerRecord(OrderCreateMq orderCreateMq) {
-        // 消费延迟现在按 Kafka 记录时间戳计算，这里把记录时间戳置为“当前处理时刻”，
-        // 以复现 buildOrderCreateMq 里设定的消息年龄（record.ts - createOrderTime）
-        return new ConsumerRecord<>(TOPIC, 0, 0L, System.currentTimeMillis(),
+        long timestamp = (orderCreateMq != null && orderCreateMq.getCreateOrderTime() != null)
+                ? orderCreateMq.getCreateOrderTime().getTime()
+                : System.currentTimeMillis();
+        return new ConsumerRecord<>(TOPIC, 0, 0L, timestamp,
                 org.apache.kafka.common.record.TimestampType.CREATE_TIME, 0L, 0, 0,
                 String.valueOf(ORDER_NUMBER), JSON.toJSONString(orderCreateMq));
     }

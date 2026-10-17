@@ -300,12 +300,9 @@ class ProgramOrderServiceTest {
                     .thenReturn(remainMap);
             when(uidGenerator.getUid()).thenReturn(888L);
 
-            // 应用层匹配：no_sold hash 中提供相邻座位
-            Map<String, SeatVo> noSoldSeatMap = new HashMap<>();
-            noSoldSeatMap.put("50", createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID));
-            noSoldSeatMap.put("51", createSeatVo(51L, 1, 2, TICKET_CATEGORY_ID));
-            noSoldSeatMap.put("52", createSeatVo(52L, 1, 5, TICKET_CATEGORY_ID));
-            when(redisCache.getAllMapForHash(any(), eq(SeatVo.class))).thenReturn(noSoldSeatMap);
+            // 应用层匹配：轻量排级索引中提供相邻座位
+            when(seatService.getRowSeatIndex(PROGRAM_ID, TICKET_CATEGORY_ID))
+                    .thenReturn(adjacentRowSeatMap(50L, 51L, 52L));
 
             ProgramCacheCreateOrderData luaResult = new ProgramCacheCreateOrderData();
             luaResult.setCode(BaseCode.SUCCESS.getCode());
@@ -354,10 +351,12 @@ class ProgramOrderServiceTest {
             when(uidGenerator.getUid()).thenReturn(888L);
 
             // 座位不连续（列号 1 和 3），匹配不到相邻的 2 个座位
-            Map<String, SeatVo> noSoldSeatMap = new HashMap<>();
-            noSoldSeatMap.put("50", createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID));
-            noSoldSeatMap.put("52", createSeatVo(52L, 1, 3, TICKET_CATEGORY_ID));
-            when(redisCache.getAllMapForHash(any(), eq(SeatVo.class))).thenReturn(noSoldSeatMap);
+            Map<String, List<SeatVo>> rowSeatMap = new HashMap<>();
+            List<SeatVo> seats = new ArrayList<>();
+            seats.add(createSeatVo(50L, 1, 1, TICKET_CATEGORY_ID));
+            seats.add(createSeatVo(52L, 1, 3, TICKET_CATEGORY_ID));
+            rowSeatMap.put("1", seats);
+            when(seatService.getRowSeatIndex(PROGRAM_ID, TICKET_CATEGORY_ID)).thenReturn(rowSeatMap);
 
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programOrderService.createOrderOperateProgramCacheResolution(dto));
@@ -387,9 +386,8 @@ class ProgramOrderServiceTest {
             when(uidGenerator.getUid()).thenReturn(888L);
 
             // 第一次 Lua 返回 40002（候选 50,51 被并发抢占），本地剔除后从剩余座位（52,53）重新匹配成功。
-            // no_sold 只读一次：重试用本地剩余座位，不再重读整档 hash（原实现每轮 HGETALL + 重排）。
-            when(redisCache.getAllMapForHash(any(), eq(SeatVo.class)))
-                    .thenReturn(adjacentSeatMap(50L, 51L, 52L, 53L));
+            when(seatService.getRowSeatIndex(PROGRAM_ID, TICKET_CATEGORY_ID))
+                    .thenReturn(adjacentRowSeatMap(50L, 51L, 52L, 53L));
             ProgramCacheCreateOrderData lockedResult = new ProgramCacheCreateOrderData();
             lockedResult.setCode(BaseCode.SEAT_LOCK.getCode());
             ProgramCacheCreateOrderData successResult = new ProgramCacheCreateOrderData();
@@ -409,7 +407,7 @@ class ProgramOrderServiceTest {
             assertEquals(List.of(52L, 53L),
                     result.getPurchaseSeatList().stream().map(PurchaseSeat::getId).toList());
             verify(programCacheCreateOrderResolutionOperate, times(2)).programCacheOperate(anyList(), any());
-            verify(redisCache, times(1)).getAllMapForHash(any(), eq(SeatVo.class));
+            verify(seatService, times(1)).getRowSeatIndex(PROGRAM_ID, TICKET_CATEGORY_ID);
         }
 
         @Test
@@ -433,26 +431,27 @@ class ProgramOrderServiceTest {
                     .thenReturn(remainMap);
             when(uidGenerator.getUid()).thenReturn(888L);
 
-            when(redisCache.getAllMapForHash(any(), eq(SeatVo.class))).thenReturn(adjacentSeatMap(50L, 51L));
+            when(seatService.getRowSeatIndex(PROGRAM_ID, TICKET_CATEGORY_ID)).thenReturn(adjacentRowSeatMap(50L, 51L));
             ProgramCacheCreateOrderData lockedResult = new ProgramCacheCreateOrderData();
             lockedResult.setCode(BaseCode.SEAT_LOCK.getCode());
             when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
                     .thenReturn(lockedResult);
 
             // 唯一一组候选被抢占并本地剔除后，剩余座位不足以再凑出相邻票数 → SEAT_OCCUPY
-            // （旧实现每轮重读整档 hash，这里会一直拿到同一组候选并最终抛 SEAT_LOCK）
             TicketFlowFrameException ex = assertThrows(TicketFlowFrameException.class,
                     () -> programOrderService.createOrderOperateProgramCacheResolution(dto));
             assertEquals(BaseCode.SEAT_OCCUPY.getCode(), ex.getCode());
         }
 
-        private Map<String, SeatVo> adjacentSeatMap(Long... seatIds) {
-            Map<String, SeatVo> noSoldSeatMap = new HashMap<>();
+        private Map<String, List<SeatVo>> adjacentRowSeatMap(Long... seatIds) {
+            Map<String, List<SeatVo>> rowSeatMap = new HashMap<>();
+            List<SeatVo> seats = new ArrayList<>();
             int col = 1;
             for (Long seatId : seatIds) {
-                noSoldSeatMap.put(String.valueOf(seatId), createSeatVo(seatId, 1, col++, TICKET_CATEGORY_ID));
+                seats.add(createSeatVo(seatId, 1, col++, TICKET_CATEGORY_ID));
             }
-            return noSoldSeatMap;
+            rowSeatMap.put("1", seats);
+            return rowSeatMap;
         }
 
         @Test
@@ -621,7 +620,7 @@ class ProgramOrderServiceTest {
             when(programService.simpleGetProgramAndShowMultipleCache(PROGRAM_ID))
                     .thenReturn(createProgramVo());
 
-            RecordMetadata mockMetadata = mock(RecordMetadata.class);
+            RecordMetadata mockMetadata = new RecordMetadata(new org.apache.kafka.common.TopicPartition("topic", 0), 0L, 0, 0L, 0, 0);
             SendResult mockSendResult = mock(SendResult.class);
             when(mockSendResult.getRecordMetadata()).thenReturn(mockMetadata);
             doAnswer(invocation -> {

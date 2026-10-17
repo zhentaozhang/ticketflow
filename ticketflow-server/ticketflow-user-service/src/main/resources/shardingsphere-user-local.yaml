@@ -43,21 +43,21 @@ rules:
         actualDataNodes: ds_$->{0..1}.d_user_email_$->{0..1}
         databaseStrategy:
           complex:
-            shardingColumns: user_id
+            shardingColumns: email
             shardingAlgorithmName: database-user-complex
         tableStrategy:
           complex:
-            shardingColumns: user_id
+            shardingColumns: email
             shardingAlgorithmName: table-user-complex
       d_user_mobile:
         actualDataNodes: ds_$->{0..1}.d_user_mobile_$->{0..1}
         databaseStrategy:
           complex:
-            shardingColumns: user_id
+            shardingColumns: mobile
             shardingAlgorithmName: database-user-complex
         tableStrategy:
           complex:
-            shardingColumns: user_id
+            shardingColumns: mobile
             shardingAlgorithmName: table-user-complex
     shardingAlgorithms:
       database-user-complex:

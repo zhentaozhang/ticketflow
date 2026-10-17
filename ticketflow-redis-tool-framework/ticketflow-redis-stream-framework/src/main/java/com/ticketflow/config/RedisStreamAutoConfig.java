@@ -80,8 +80,8 @@ public class RedisStreamAutoConfig {
                     StreamOffset.create(redisStreamConfigProperties.getStreamName(), ReadOffset.lastConsumed()),
                     redisStreamListener);
         } else {
-            // 广播模式（本项目用这个！）：每个消费者从 stream 开头消费全部消息
-            container.receive(StreamOffset.fromStart(redisStreamConfigProperties.getStreamName()), redisStreamListener);
+            // 广播模式（本项目用这个！）：每个节点仅需监听自启动时刻之后的增量失效事件
+            container.receive(StreamOffset.latest(redisStreamConfigProperties.getStreamName()), redisStreamListener);
         }
         container.start();
         return container;

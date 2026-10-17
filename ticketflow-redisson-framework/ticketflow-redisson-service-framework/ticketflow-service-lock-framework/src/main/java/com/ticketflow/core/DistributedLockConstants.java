@@ -28,6 +28,11 @@ public class DistributedLockConstants {
     public final static String GET_PROGRAM_LOCK = "d_get_program_lock";
     
     /**
+     * 查看节目分组
+     * */
+    public final static String GET_PROGRAM_GROUP_LOCK = "d_get_program_group_lock";
+    
+    /**
      * 节目演出时间
      * */
     public final static String PROGRAM_SHOW_TIME_LOCK = "d_program_show_time_lock";
@@ -116,4 +121,14 @@ public class DistributedLockConstants {
      * 支付服务的通用支付
      * */
     public final static String COMMON_PAY = "d_common_pay_lock";
+
+    /**
+     * 退款状态确认任务（多实例互斥）
+     * */
+    public final static String REFUND_CHECK_TASK_LOCK = "d_refund_check_task_lock";
+
+    /**
+     * 未支付超时订单取消对账任务（多实例互斥）
+     * */
+    public final static String UNPAID_ORDER_CANCEL_TASK_LOCK = "d_unpaid_order_cancel_task_lock";
 }

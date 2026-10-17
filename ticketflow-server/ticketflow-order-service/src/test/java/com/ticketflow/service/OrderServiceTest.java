@@ -49,6 +49,8 @@ import org.redisson.api.RLock;
 import org.springframework.beans.BeanUtils;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionCallback;
@@ -99,6 +101,7 @@ class OrderServiceTest {
     private OrderTicketUserRecordService orderTicketUserRecordService;
     private OrderProgramCacheResolutionOperate orderProgramCacheResolutionOperate;
     private RedisCache redisCache;
+    private RedisTemplate redisTemplate;
     private PayClient payClient;
     private UserClient userClient;
     private OrderProperties orderProperties;
@@ -140,6 +143,8 @@ class OrderServiceTest {
         orderTicketUserRecordService = mock(OrderTicketUserRecordService.class);
         orderProgramCacheResolutionOperate = mock(OrderProgramCacheResolutionOperate.class);
         redisCache = mock(RedisCache.class);
+        redisTemplate = mock(RedisTemplate.class);
+        when(redisCache.getInstance()).thenReturn(redisTemplate);
         payClient = mock(PayClient.class);
         userClient = mock(UserClient.class);
         orderProperties = new OrderProperties();
@@ -240,38 +245,28 @@ class OrderServiceTest {
         verify(orderProgramMapper).insert(orderProgramCaptor.capture());
         assertEquals(ORDER_NUMBER, orderProgramCaptor.getValue().getOrderNumber());
 
-        verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(1L));
+        // 限购计数已统一由 program 侧 Lua 脚本原子维护，doCreate 不再进行二次累加
+        verify(redisCache, never()).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), anyLong());
     }
 
     @Test
-    void doCreate_同步器激活时计数延迟到事务提交后() {
+    void doCreate_不重复递增限购计数() {
         when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
         when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.clearSynchronization();
-        }
-        TransactionSynchronizationManager.initSynchronization();
-        try {
-            String orderNumber = orderService.doCreate(buildCreateDomain());
-            assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
-            // 同步器激活：incrBy 不应立即执行，而是注册到 afterCommit 回调（事务提交后）
-            verify(redisCache, never()).incrBy(any(), anyLong());
-        } finally {
-            TransactionSynchronizationManager.clearSynchronization();
-        }
+        String orderNumber = orderService.doCreate(buildCreateDomain());
+        assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
+        verify(redisCache, never()).incrBy(any(), anyLong());
     }
 
     @Test
-    void create_无事务上下文_计数立即累加() {
+    void create_成功落库不重复递增限购() {
         when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(null);
         when(uidGenerator.getUid()).thenReturn(1L, 2L, 3L);
-        when(redisCache.incrBy(any(), anyLong())).thenReturn(1L);
         OrderCreateDto dto = new OrderCreateDto();
         BeanUtils.copyProperties(buildCreateDomain(), dto);
         String orderNumber = orderService.create(dto);
         assertEquals(String.valueOf(ORDER_NUMBER), orderNumber);
-        // 无事务上下文（纯 Mockito 无 Spring 代理）：走回退分支立即累加，等价原行为
-        verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(1L));
+        verify(redisCache, never()).incrBy(any(), anyLong());
     }
 
     // ==================== 支付 pay ====================
@@ -399,6 +394,10 @@ class OrderServiceTest {
     @Test
     void payCheck取消订单且退款成功时更新订单为退款状态() {
         when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
         OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
         assertEquals(OrderStatus.REFUND.getCode(), vo.getOrderStatus());
@@ -413,6 +412,10 @@ class OrderServiceTest {
     @Test
     void payCheck取消订单且退款失败时视图保持取消状态且未更新数据库() {
         when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.error(500, "退款失败"));
         OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
         assertEquals(OrderStatus.CANCEL.getCode(), vo.getOrderStatus());
@@ -567,7 +570,8 @@ class OrderServiceTest {
         assertEquals(IDENTIFIER_ID, record.getIdentifierId());
         assertEquals(TICKET_USER_ID, record.getTicketUserId());
 
-        verify(redisCache).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), eq(-1L));
+        String expectedAccountKey = RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID).getRelKey();
+        verify(redisTemplate).execute(any(RedisScript.class), eq(List.of(expectedAccountKey)), eq("1"));
         verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
         verify(programClient, never()).operateProgramData(any());
     }
@@ -587,7 +591,7 @@ class OrderServiceTest {
         verify(orderTicketUserRecordService).saveBatch(recordCaptor.capture());
         assertEquals(RecordType.CHANGE_STATUS.getCode(), recordCaptor.getValue().get(0).getRecordTypeCode());
 
-        verify(redisCache, never()).incrBy(eq(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, USER_ID, PROGRAM_ID)), anyLong());
+        verify(redisTemplate, never()).execute(any(RedisScript.class), anyList(), any());
         ArgumentCaptor<ProgramOperateDataDto> operateCaptor = ArgumentCaptor.forClass(ProgramOperateDataDto.class);
         verify(programClient).operateProgramData(operateCaptor.capture());
         assertEquals(PROGRAM_ID, operateCaptor.getValue().getProgramId());
@@ -632,7 +636,7 @@ class OrderServiceTest {
         try {
             orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.CANCEL);
             // 同步器激活：incrBy/Lua 不应立即执行，而是注册到 afterCommit 回调（事务提交后）
-            verify(redisCache, never()).incrBy(any(), anyLong());
+            verify(redisTemplate, never()).execute(any(RedisScript.class), anyList(), any());
             verify(orderProgramCacheResolutionOperate, never()).programCacheReverseOperate(anyList(), any(Object[].class));
         } finally {
             TransactionSynchronizationManager.clearSynchronization();

@@ -56,6 +56,8 @@ import com.ticketflow.mapper.OrderTicketUserMapper;
 import com.ticketflow.mapper.OrderTicketUserRecordMapper;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import com.ticketflow.repeatexecutelimit.annotion.RepeatExecuteLimit;
 import com.ticketflow.request.CustomizeRequestWrapper;
 import com.ticketflow.service.delaysend.DelayOperateProgramDataSend;
@@ -125,6 +127,24 @@ import static com.ticketflow.core.RepeatExecuteLimitConstants.CREATE_PROGRAM_ORD
 @Slf4j
 @Service
 public class OrderService extends ServiceImpl<OrderMapper, Order> {
+
+    private static final RedisScript<Long> SAFE_DECR_ACCOUNT_ORDER_COUNT_SCRIPT = new DefaultRedisScript<>(
+            "local key = KEYS[1]\n" +
+            "local decrement = tonumber(ARGV[1])\n" +
+            "local current = redis.call('get', key)\n" +
+            "if current then\n" +
+            "    local newVal = math.max(0, tonumber(current) - decrement)\n" +
+            "    local ttl = redis.call('ttl', key)\n" +
+            "    if ttl > 0 then\n" +
+            "        redis.call('setex', key, ttl, newVal)\n" +
+            "    else\n" +
+            "        redis.call('setex', key, 1800, newVal)\n" +
+            "    end\n" +
+            "    return newVal\n" +
+            "end\n" +
+            "return -1",
+            Long.class
+    );
 
     @Autowired
     private UidGenerator uidGenerator;
@@ -237,30 +257,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         orderProgram.setOrderNumber(order.getOrderNumber());
         orderProgram.setIdentifierId(order.getIdentifierId());
         orderProgramMapper.insert(orderProgram);
-        //用户下此节目的订单数量加1操作
-        // 事务提交后再累加：回滚事务不再产生 Redis 计数漂移；Redis 调用也不占用事务内 DB 连接
-        Long increment = (long) orderCreateDomain.getOrderTicketUserCreateDtoList().size();
-        Long userId = orderCreateDomain.getUserId();
-        Long programId = orderCreateDomain.getProgramId();
-        Runnable doIncr = () -> {
-            try {
-                redisCache.incrBy(RedisKeyBuild.createRedisKey(RedisKeyManage.ACCOUNT_ORDER_COUNT, userId, programId), increment);
-            } catch (Exception e) {
-                log.error("ACCOUNT_ORDER_COUNT 累加失败 userId:{} programId:{}", userId, programId, e);
-            }
-        };
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            // 事务提交后执行（afterCommit）：回滚事务不累加，Redis 调用移出事务
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    doIncr.run();
-                }
-            });
-        } else {
-            // 无事务上下文（自调用/直测）回退为立即执行，等价原行为
-            doIncr.run();
-        }
+        // 注意：单账号限购计数（ACCOUNT_ORDER_COUNT）已在 program-service 的 Lua 脚本中原子递增并设置 TTL，
+        // 此处不再进行二次累加，彻底消除用户买票被双倍扣减限购额度的 Bug。
         return String.valueOf(order.getOrderNumber());
     }
 
@@ -352,25 +350,42 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         }
         BeanUtil.copyProperties(order, orderPayCheckVo);
         if (Objects.equals(order.getOrderStatus(), OrderStatus.CANCEL.getCode())) {
-            RefundDto refundDto = new RefundDto();
-            refundDto.setOrderNumber(String.valueOf(order.getOrderNumber()));
-            refundDto.setAmount(order.getOrderPrice());
-            refundDto.setChannel(Optional.ofNullable(PayChannel.getRc(orderPayCheckDto.getPayChannelType()))
-                    .map(PayChannel::getValue).orElseThrow(() -> new TicketFlowFrameException(BaseCode.PAY_CHANNEL_NOT_EXIST)));
-            refundDto.setReason("延迟订单关闭");
-            // 稳定幂等键：同一订单的关闭退款重试复用同一 outRefundNo，避免二次退款
-            refundDto.setRefundRequestId("closed-refund:" + order.getOrderNumber() + ":" + order.getOrderPrice().toPlainString());
-            ApiResponse<String> response = payClient.refund(refundDto);
-            if (response.getCode().equals(BaseCode.SUCCESS.getCode())) {
-                Order updateOrder = new Order();
-                updateOrder.setEditTime(DateUtils.now());
-                updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
-                orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class).eq(Order::getOrderNumber, order.getOrderNumber()));
-                // 退款成功视图才置退款状态，失败保持数据库的取消状态，下次轮询重试退款
-                orderPayCheckVo.setOrderStatus(OrderStatus.REFUND.getCode());
-                orderPayCheckVo.setCancelOrderTime(DateUtils.now());
-            } else {
-                log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
+            String channel = Optional.ofNullable(PayChannel.getRc(orderPayCheckDto.getPayChannelType()))
+                    .map(PayChannel::getValue).orElseThrow(() -> new TicketFlowFrameException(BaseCode.PAY_CHANNEL_NOT_EXIST));
+
+            // 先核对渠道与账单状态：只有第三方已实付或账单处于 PAY 状态时才执行退款，未支付取消则直接返回
+            TradeCheckDto tradeCheckDto = new TradeCheckDto();
+            tradeCheckDto.setOutTradeNo(String.valueOf(orderPayCheckDto.getOrderNumber()));
+            tradeCheckDto.setChannel(channel);
+            ApiResponse<TradeCheckVo> tradeCheckVoApiResponse = payClient.tradeCheck(tradeCheckDto);
+            boolean needRefund = false;
+            if (Objects.equals(tradeCheckVoApiResponse.getCode(), BaseCode.SUCCESS.getCode())
+                    && Objects.nonNull(tradeCheckVoApiResponse.getData())
+                    && tradeCheckVoApiResponse.getData().isSuccess()
+                    && Objects.equals(tradeCheckVoApiResponse.getData().getPayBillStatus(), PayBillStatus.PAY.getCode())) {
+                needRefund = true;
+            }
+
+            if (needRefund) {
+                RefundDto refundDto = new RefundDto();
+                refundDto.setOrderNumber(String.valueOf(order.getOrderNumber()));
+                refundDto.setAmount(order.getOrderPrice());
+                refundDto.setChannel(channel);
+                refundDto.setReason("延迟订单关闭");
+                // 稳定幂等键：同一订单的关闭退款重试复用同一 outRefundNo，避免二次退款
+                refundDto.setRefundRequestId("closed-refund:" + order.getOrderNumber() + ":" + order.getOrderPrice().toPlainString());
+                ApiResponse<String> response = payClient.refund(refundDto);
+                if (response.getCode().equals(BaseCode.SUCCESS.getCode())) {
+                    Order updateOrder = new Order();
+                    updateOrder.setEditTime(DateUtils.now());
+                    updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
+                    orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class).eq(Order::getOrderNumber, order.getOrderNumber()));
+                    // 退款成功视图才置退款状态，失败保持数据库的取消状态，下次轮询重试退款
+                    orderPayCheckVo.setOrderStatus(OrderStatus.REFUND.getCode());
+                    orderPayCheckVo.setCancelOrderTime(DateUtils.now());
+                } else {
+                    log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
+                }
             }
             return orderPayCheckVo;
         }
@@ -493,7 +508,9 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             }
             return notifyResponse.getData().getPayResult();
         } finally {
-            lock.unlock();
+            if (lock != null && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
 
     }
@@ -567,7 +584,9 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             }
             return WX_NOTIFY_SUCCESS_RESULT;
         } finally {
-            lock.unlock();
+            if (lock != null && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 
@@ -902,14 +921,9 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         Runnable afterCommitWork = () -> {
             try {
 
-                // 取消订单时回减用户维度的订单数量统计。
+                // 取消订单时安全回减用户维度的限购数量统计（防负数，保留剩余TTL）。
                 if (Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
-                    redisCache.incrBy(
-                            RedisKeyBuild.createRedisKey(
-                                    RedisKeyManage.ACCOUNT_ORDER_COUNT,
-                                    order.getUserId(),
-                                    order.getProgramId()),
-                            -updateTicketUserOrderResult);
+                    safeRollbackAccountOrderCount(order.getUserId(), order.getProgramId(), updateTicketUserOrderResult);
                 }
 
                 // 根据版本执行对应的座位、库存及节目数据更新。
@@ -944,6 +958,22 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             afterCommitWork.run();
         }
     }
+
+    private void safeRollbackAccountOrderCount(Long userId, Long programId, int count) {
+        try {
+            RedisKeyBuild redisKeyBuild = RedisKeyBuild.createRedisKey(
+                    RedisKeyManage.ACCOUNT_ORDER_COUNT, userId, programId);
+            if (redisCache.getInstance() != null) {
+                redisCache.getInstance().execute(
+                        SAFE_DECR_ACCOUNT_ORDER_COUNT_SCRIPT,
+                        List.of(redisKeyBuild.getRelKey()),
+                        String.valueOf(count));
+            }
+        } catch (Exception e) {
+            log.error("安全回退用户限购计数异常 userId: {}, programId: {}", userId, programId, e);
+        }
+    }
+
     public void checkOrderStatus(Order order) {
         if (Objects.isNull(order)) {
             throw new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST);
@@ -1045,6 +1075,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
 
         ProgramOperateDataDto programOperateDataDto = new ProgramOperateDataDto();
         programOperateDataDto.setProgramId(programId);
+        programOperateDataDto.setOrderNumber(identifierId);
         programOperateDataDto.setSeatIdList(unLockSeatIdList);
         programOperateDataDto.setTicketCategoryCountDtoList(ticketCategoryCountDtoList);
         programOperateDataDto.setOrderVersion(orderVersion);
@@ -1218,6 +1249,7 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                     .toList();
             //修改节目服务中的座位状态和扣减库存（事务外：网络 IO 不占本地 DB 连接）
             ReduceRemainNumberDto reduceRemainNumberDto = new ReduceRemainNumberDto();
+            reduceRemainNumberDto.setOrderNumber(orderCreateMq.getOrderNumber());
             reduceRemainNumberDto.setProgramId(orderCreateMq.getProgramId());
             reduceRemainNumberDto.setSellStatus(SellStatus.LOCK.getCode());
             reduceRemainNumberDto.setSeatIdList(orderTicketUserCreateDtoList.stream().map(OrderTicketUserCreateDto::getSeatId).collect(Collectors.toList()));
@@ -1283,10 +1315,17 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             programOperateDataDto.setTicketCategoryCountDtoList(reduceRemainNumberDto.getTicketCategoryCountDtoList());
             programOperateDataDto.setSellStatus(SellStatus.NO_SOLD.getCode());
             programOperateDataDto.setOrderVersion(orderCreateMq.getOrderVersion());
+            programOperateDataDto.setOrderNumber(orderCreateMq.getOrderNumber());
             ApiResponse<Boolean> programApiResponse = programClient.operateProgramData(programOperateDataDto);
             if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
                 log.error("建单失败反向恢复DB失败 订单号 : {} 响应 : {}", orderCreateMq.getOrderNumber(), JSON.toJSONString(programApiResponse));
             }
+            // 清理 DB 锁定凭据
+            RedisKeyBuild lockRecordKey = RedisKeyBuild.createRedisKey(
+                    RedisKeyManage.PROGRAM_ORDER_LOCK_RECORD,
+                    orderCreateMq.getProgramId(),
+                    orderCreateMq.getOrderNumber());
+            redisCache.del(lockRecordKey);
         } catch (Exception e) {
             log.error("建单失败反向恢复DB异常 订单号 : {}", orderCreateMq.getOrderNumber(), e);
         }
@@ -1313,6 +1352,36 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             return;
         }
         List<OrderTicketUserCreateDto> orderTicketUserCreateDtoList = orderCreateMq.getOrderTicketUserCreateDtoList();
+        // 若 DB 已经被锁定过（例如网络抖动重试后被丢弃），必须反向恢复 DB 座位与库存
+        RedisKeyBuild lockRecordKey = RedisKeyBuild.createRedisKey(
+                RedisKeyManage.PROGRAM_ORDER_LOCK_RECORD,
+                orderCreateMq.getProgramId(),
+                orderCreateMq.getOrderNumber());
+        if (Boolean.TRUE.equals(redisCache.hasKey(lockRecordKey))) {
+            try {
+                ProgramOperateDataDto operateDto = new ProgramOperateDataDto();
+                operateDto.setProgramId(orderCreateMq.getProgramId());
+                operateDto.setOrderNumber(orderCreateMq.getOrderNumber());
+                operateDto.setOrderVersion(orderCreateMq.getOrderVersion());
+                operateDto.setSellStatus(SellStatus.NO_SOLD.getCode());
+                operateDto.setSeatIdList(orderTicketUserCreateDtoList.stream()
+                        .map(OrderTicketUserCreateDto::getSeatId).collect(Collectors.toList()));
+                Map<Long, Long> countMap = orderTicketUserCreateDtoList.stream()
+                        .collect(Collectors.groupingBy(OrderTicketUserCreateDto::getTicketCategoryId, Collectors.counting()));
+                List<TicketCategoryCountDto> ticketCategoryCountDtoList = countMap.entrySet().stream()
+                        .map(entry -> new TicketCategoryCountDto(entry.getKey(), entry.getValue()))
+                        .toList();
+                operateDto.setTicketCategoryCountDtoList(ticketCategoryCountDtoList);
+                ApiResponse<Boolean> programApiResponse = programClient.operateProgramData(operateDto);
+                if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
+                    log.error("丢弃订单回滚DB座位失败 订单号 : {} 响应 : {}", orderCreateMq.getOrderNumber(), JSON.toJSONString(programApiResponse));
+                }
+            } catch (Exception e) {
+                log.error("丢弃订单回滚DB座位异常 订单号 : {}", orderCreateMq.getOrderNumber(), e);
+            } finally {
+                redisCache.del(lockRecordKey);
+            }
+        }
         Map<Long, List<Long>> seatMap = orderTicketUserCreateDtoList.stream().collect(Collectors.groupingBy(
                 OrderTicketUserCreateDto::getTicketCategoryId,
                 Collectors.mapping(OrderTicketUserCreateDto::getSeatId, Collectors.toList())));

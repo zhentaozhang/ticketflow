@@ -35,7 +35,7 @@ package_and_stage() {
   mvn -B -q -DskipTests -Dmaven.test.skip=true \
       -pl "${SVC_MODULES}" -am package -T 4
 
-  echo ">> [2/3] 暂存并适配 fat-jar（127.0.0.1:3306 -> mysql:3306，供容器内连接 MySQL）..."
+  echo ">> [2/3] 暂存 fat-jar..."
   for svc in "${SVC_LIST[@]}"; do
     dir="ticketflow-server/ticketflow-${svc}-service/target"
     if [ -f "${dir}/ticketflow-${svc}-service-0.0.1-SNAPSHOT-exec.jar" ]; then
@@ -48,12 +48,7 @@ package_and_stage() {
     fi
     staged="docker/app/jars/${svc}/app.jar"
     mkdir -p "$(dirname "${staged}")"
-    if command -v python3 >/dev/null 2>&1; then
-      python3 docker/app/patch-jar.py "${jar}" "${staged}"
-    else
-      echo "  !! 未找到 python3，直接复制未适配 jar" >&2
-      cp "${jar}" "${staged}"
-    fi
+    cp "${jar}" "${staged}"
     echo "  [ok] ${svc} ($(du -h "${staged}" | cut -f1))"
   done
 }

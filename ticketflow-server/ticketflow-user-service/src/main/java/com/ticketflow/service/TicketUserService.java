@@ -2,7 +2,6 @@ package com.ticketflow.service;
 
 
 import cn.hutool.core.bean.BeanUtil;
-import cn.hutool.core.collection.CollectionUtil;
 import com.baidu.fsg.uid.UidGenerator;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
@@ -20,6 +19,7 @@ import com.ticketflow.mapper.UserMapper;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
 import com.ticketflow.vo.TicketUserVo;
+import com.ticketflow.threadlocal.BaseParameterHolder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -49,16 +49,18 @@ public class TicketUserService extends ServiceImpl<TicketUserMapper, TicketUser>
     private RedisCache redisCache;
     
     public List<TicketUserVo> list(TicketUserListDto ticketUserListDto) {
-        //先从缓存中查询
-        List<TicketUserVo> ticketUserVoList = redisCache.getValueIsList(RedisKeyBuild.createRedisKey(
-                RedisKeyManage.TICKET_USER_LIST, ticketUserListDto.getUserId()), TicketUserVo.class);
-        if (CollectionUtil.isNotEmpty(ticketUserVoList)) {
-            return ticketUserVoList;
-        }
-        LambdaQueryWrapper<TicketUser> ticketUserLambdaQueryWrapper = Wrappers.lambdaQuery(TicketUser.class)
-                .eq(TicketUser::getUserId, ticketUserListDto.getUserId());
-        List<TicketUser> ticketUsers = ticketUserMapper.selectList(ticketUserLambdaQueryWrapper);
-        return BeanUtil.copyToList(ticketUsers,TicketUserVo.class);
+        return redisCache.getValueIsList(
+                RedisKeyBuild.createRedisKey(RedisKeyManage.TICKET_USER_LIST, ticketUserListDto.getUserId()),
+                TicketUserVo.class,
+                () -> {
+                    LambdaQueryWrapper<TicketUser> ticketUserLambdaQueryWrapper = Wrappers.lambdaQuery(TicketUser.class)
+                            .eq(TicketUser::getUserId, ticketUserListDto.getUserId());
+                    List<TicketUser> ticketUsers = ticketUserMapper.selectList(ticketUserLambdaQueryWrapper);
+                    return BeanUtil.copyToList(ticketUsers, TicketUserVo.class);
+                },
+                7,
+                java.util.concurrent.TimeUnit.DAYS
+        );
     }
     
     @Transactional(rollbackFor = Exception.class)
@@ -87,7 +89,15 @@ public class TicketUserService extends ServiceImpl<TicketUserMapper, TicketUser>
         if (Objects.isNull(ticketUser)) {
             throw new TicketFlowFrameException(BaseCode.TICKET_USER_EMPTY);
         }
-        ticketUserMapper.deleteById(ticketUserIdDto.getId());
+        String currentUserId = BaseParameterHolder.getParameter(com.ticketflow.constant.Constant.USER_ID);
+        if (com.ticketflow.util.StringUtil.isNotEmpty(currentUserId)
+                && !String.valueOf(ticketUser.getUserId()).equals(currentUserId)) {
+            throw new TicketFlowFrameException(BaseCode.TICKET_USER_NO_AUTH);
+        }
+        LambdaQueryWrapper<TicketUser> deleteWrapper = Wrappers.lambdaQuery(TicketUser.class)
+                .eq(TicketUser::getId, ticketUserIdDto.getId())
+                .eq(TicketUser::getUserId, ticketUser.getUserId());
+        ticketUserMapper.delete(deleteWrapper);
         delTicketUserVoListCache(String.valueOf(ticketUser.getUserId()));
     }
     

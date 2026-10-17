@@ -17,8 +17,8 @@
 
   <p>
     <img src="https://img.shields.io/badge/Java-17-ED8B00?logo=openjdk&style=flat-square" alt="Java 17">
-    <img src="https://img.shields.io/badge/Spring_Boot-3.3-6DB33F?logo=springboot&style=flat-square" alt="Spring Boot 3.3">
-    <img src="https://img.shields.io/badge/Spring_Cloud_Alibaba-2023-FF6A00?logo=alibabacloud&style=flat-square" alt="Spring Cloud Alibaba 2023">
+    <img src="https://img.shields.io/badge/Spring_Boot-3.5-6DB33F?logo=springboot&style=flat-square" alt="Spring Boot 3.5">
+    <img src="https://img.shields.io/badge/Spring_Cloud_Alibaba-2025-FF6A00?logo=alibabacloud&style=flat-square" alt="Spring Cloud Alibaba 2025">
     <img src="https://img.shields.io/badge/Vue-3.5-4FC08D?logo=vue.js&style=flat-square" alt="Vue 3.5">
     <img src="https://img.shields.io/badge/MySQL-8.0-4479A1?logo=mysql&style=flat-square" alt="MySQL 8.0">
     <img src="https://img.shields.io/badge/Redis-7-FF4438?logo=redis&style=flat-square" alt="Redis 7">
@@ -45,9 +45,9 @@
 
 基于 ShardingSphere 自定义分片算法，将 `userId` 的 Hash 值嵌入 `orderId` 基因位，实现 **user_id** 与 **order_number** 双维度精准路由。
 
-- 订单号预留 6 位基因位，支撑 8 库 8 表共 64 种分片组合
+- 订单号预留 6 位基因位，当前部署为 **2 库 × 8 表（16 张物理表）**，位运算组合上限为 8 库 × 8 表
 - 同一用户的所有订单落在同一分片，避免跨库查询与读扩散
-- 支持 1024 个虚拟槽位，物理表可在不停机状态下从 16 张扩至 4096 张
+- 分片索引由分片键位运算直接得出（`ShardingGeneUtils`），分片数**以 `shardingsphere-order-*.yaml` 为唯一事实来源**；扩容需停机迁移，虚拟分片在线扩缩容尚未实现
 
 ### 统一分布式锁框架
 
@@ -145,7 +145,7 @@ sequenceDiagram
 
 - V4 异步下单链路单机拐点约 **120–160 QPS**，120 QPS 内成功率接近 100%
 - 各版本并发模型：V1 整节目串行 → V2/V3 按票档拆锁 → V4 锁外异步解耦，性能逐级提升
-- 压测脚本与完整数据见 `benchmark/` 目录
+- 压测脚本、场景与造数脚本见 `benchmark/` 目录；结果原始数据不入库（`.gitignore` 忽略 `benchmark/results/`），需本地复跑生成
 
 > 性能结果随部署环境与硬件配置变化，仅供参考。
 
@@ -266,18 +266,19 @@ flowchart TB
 | 分类 | 技术 | 版本 |
 |------|------|------|
 | **语言** | Java | 17 |
-| **主框架** | Spring Boot | 3.3.0 |
-| **微服务** | Spring Cloud Alibaba | 2023.0.1.0 |
-| **注册/配置中心** | Nacos | 2.4.0 |
-| **API 网关** | Spring Cloud Gateway | 2023.0.2 |
-| **限流熔断** | Sentinel | 1.8.8 |
+| **主框架** | Spring Boot | 3.5.16 |
+| **微服务框架** | Spring Cloud | 2025.0.3 |
+| **微服务套件** | Spring Cloud Alibaba | 2025.0.0.0 |
+| **注册/配置中心** | Nacos（服务端镜像） | 2.4.0 |
+| **API 网关** | Spring Cloud Gateway | 随 Spring Cloud BOM |
+| **限流熔断** | Sentinel | 1.8.10 |
 | **ORM** | MyBatis-Plus | 3.5.7 |
 | **分库分表** | Apache ShardingSphere JDBC | 5.3.2 |
-| **缓存** | Redis 7 + Redisson | 3.32.0 |
+| **缓存** | Redis 7 + Redisson | 3.52.0 |
 | **消息队列** | Kafka (KRaft 模式) | 3.6 |
 | **搜索引擎** | Elasticsearch | 8.11.0 |
 | **认证授权** | Sa-Token + JWT | 1.43.0 |
-| **支付** | 支付宝 SDK | 4.38.197.ALL |
+| **支付** | 支付宝 SDK / 微信支付 APIv3 | 4.38.197.ALL / 0.2.17 |
 | **监控** | Spring Boot Admin / Prometheus / Grafana / OpenTelemetry + Jaeger（Trace） | — |
 | **API 文档** | Knife4j + SpringDoc OpenAPI 3 | 4.3.0 |
 
@@ -365,7 +366,7 @@ flowchart LR
 
 > **基因法分片**：订单号嵌入 userId 后 6 位作为基因，同时支持 `user_id` 和 `order_number` 维度精准路由到同一分片，避免跨库查询。
 
-> **虚拟分片**：设计 1024 个虚拟槽位，物理表可从 8 张在线扩展到 4096 张，支持不停机扩缩容。
+> **扩容现状**：当前为 2 库 × 8 表共 16 张物理表。分片索引由分片键位运算直接得出，**不经过虚拟槽位映射层**，因此扩容需停机迁移数据（`sql/订单表进行分库分表扩容/` 下脚本已标记 deprecated）。虚拟分片在线扩缩容属待实现能力，详见文末「当前范围与已知局限」。
 
 ---
 
@@ -401,26 +402,24 @@ flowchart LR
 
 ## 前端功能矩阵
 
-### 用户端 — 消费者购票 SPA
+### 用户端 — 消费者购票 SPA（vue3，22 个业务视图）
 
 ```
 首页 → 节目推荐 · 分类导航
 节目详情 → 简介 · 票档选择 · 可视化选座
-购物车 → 确认订单
+下单 → 选择购票人 → 选择支付方式（无购物车环节，详情页直接下单）
 支付 → 扫码支付 · 支付成功
-订单管理 → 待支付 · 已支付 · 已取消
-个人中心 → 个人信息 · 购票人管理 · 账户设置
+订单管理 → 订单列表 · 订单详情
+个人中心 → 个人信息 · 购票人管理 · 账户设置 · 帮助
 ```
 
-### 管理端 (Admin) — 运营管理后台
+### 管理端 (Admin) — 运营管理后台（Vben Admin monorepo，5 个业务列表页）
 
 ```
-仪表盘 → 运营数据概览
-节目管理 → 节目/场次/票档增删改查
-订单管理 → 订单查询 · 退款处理 · 废单管理
-座位管理 → 座位图编辑 · 区域配置
-基础数据 → 渠道配置 · 地区管理 · 分类字典
-消息记录 → API 审计 · 消息可靠性查询
+节目管理 → 节目列表
+座位管理 → 座位列表
+订单管理 → 订单列表 · 废弃订单列表
+消息记录 → MQ 消息记录查询
 ```
 
 ---
@@ -697,7 +696,7 @@ ticketflow/
 ├── sql/                                       # 数据库 DDL
 ├── docker/                                    # Compose 编排 + 统一 Dockerfile + OTel 接入
 ├── Makefile                                   # 常用命令（构建 / 测试 / 容器）
-├── .github/workflows/                         # GitHub Actions CI
+├── .github/workflows/                         # GitHub Actions CI/CD
 ├── vue3/                                      # 用户端前端
 ├── ticketflow-front-manage/                   # 管理端前端
 └── benchmark/                                 # 压测
@@ -712,9 +711,41 @@ ticketflow/
 | 分库分表 | ShardingSphere JDBC | 与应用深度集成，无额外部署，支持基因法自定义分片算法 |
 | 异步下单 | Kafka | 削峰填谷，解耦节目服务与订单服务 |
 | 分布式锁 | Redisson | 看门狗自动续期避免死锁，多锁模型满足不同场景 |
-| 超时取消 | 延迟队列 | 基于 Redisson 实现，避免轮询数据库 |
+| 超时取消 | 延迟队列 + 定时兜底（双轨） | 主轨为 Redisson 延迟队列实时关单；第二轨 `UnpaidOrderCancelTask` 兜底，扫描窗口由 `ProgramOrderConstant` 派生（失效时长 + 1 分钟容差），避免延迟队列消息丢失导致库存僵尸占用 |
 | 分布式事务 | 最终一致性 + 补偿 | 避免 Seata 带来的性能开销，延迟队列兜底 |
 | ID 生成 | 雪花算法 + 基因法 | 全局唯一 + 单调递增 + 天然支持分片路由 |
-| 可观测性 | Prometheus + Grafana + Spring Boot Admin + OpenTelemetry（OTLP→Jaeger） | 指标采集、可视化监控、服务健康检查、全链路 Trace |
+| 可观测性 | Prometheus + Grafana + OpenTelemetry（OTLP→Jaeger） | 指标采集、可视化监控、全链路 Trace；Spring Boot Admin 客户端尚未接入注册地址，详见文末「当前范围与已知局限」 |
+
+---
+
+## 当前范围与已知局限
+
+本节记录**当前代码的真实边界**，用于避免文档与实现脱节。
+
+### 已实现但此前文档漏写
+
+- **支付双通道**：支付宝（`AlipayStrategyHandler`）与微信支付 APIv3 Native（`WxPayStrategyHandler`）均已实现。微信侧含回调时间戳新鲜度校验、nonce 防重放（Redis 分布式去重 + 本地内存降级）、AES-GCM 解密验签、金额 / AppId / MchId 三方核对；退款结果由 `RefundCheckTask` 轮询兜底（未订阅退款通知）。
+- **订单超时双轨保障**：主轨为 Redisson 延迟队列，第二轨为 `UnpaidOrderCancelTask` 定时兜底；扫描窗口由 `ProgramOrderConstant` 派生，保证两轨口径一致。
+
+### 未实现 / 覆盖不足
+
+| 能力 | 现状 | 说明 |
+|------|------|------|
+| 购物车 | 未实现 | 下单流程为「详情页 → 选座 → 购票人 → 支付方式」，无购物车环节 |
+| 管理端仪表盘 | 未实现 | 仅 4 个路由模块、5 个列表页，无运营数据概览 |
+| 管理端基础数据页 | 接口层就绪、视图缺失 | `api/base-data`、`api/customize` 已定义但无视图引用 |
+| 座位图可视化编辑 | 未实现 | 管理端仅提供座位列表查询 |
+| 订单退款处理页 | 未实现 | 退款由后端取消链路与定时对账驱动，管理端无操作入口 |
+| 虚拟分片在线扩缩容 | 未实现 | 分片索引为纯位运算，扩容需停机迁移 |
+| K8s 清单覆盖面 | 3 / 9 服务 | 仅 gateway、order、program（含 HPA）；其余 6 个服务无清单 |
+| 集成测试覆盖面 | 2 / 9 服务 | Testcontainers IT 仅 order、program；`ticketflow-server-client` 148 个文件仅 1 个契约测试 |
+| Spring Boot Admin 客户端接入 | 未生效 | 7 个服务引入了 `spring-boot-admin-starter-client`，但未配置 `spring.boot.admin.client.url`，实例不会注册到 Admin 服务端；且客户端版本 2.3.1 与服务端 3.3.0 跨大版本不匹配 |
+
+### 工程质量基线（本地实测）
+
+- `mvn -o -B test`：44 个模块 BUILD SUCCESS，**542 个单元测试 0 失败 0 错误**。
+- `mvn -o -B checkstyle:check`：45 个模块 **0 违规**（强制门禁，命中即失败）。
+- `mvn -o -B -DskipTests compile spotbugs:check`：**0 BugInstance**（High 阈值强制门禁）。
+- 压测结果原始数据不入库，需本地复跑 `benchmark/scripts/run-single.sh` 生成。
 
 

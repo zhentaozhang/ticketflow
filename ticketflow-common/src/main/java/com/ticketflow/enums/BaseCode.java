@@ -248,6 +248,8 @@ public enum BaseCode {
 
     PAY_STRATEGY_NOT_EXIST(60010, "此支付策略不存在"),
 
+    TICKET_USER_NO_AUTH(60025, "无权操作该购票人"),
+
     PAY_BILL_IS_NOT_NO_PAY(60011, "此账单不是未支付状态"),
 
     ALIPAY_TRADE_STATUS_NOT_EXIST(60012, "支付宝支付状态未知"),

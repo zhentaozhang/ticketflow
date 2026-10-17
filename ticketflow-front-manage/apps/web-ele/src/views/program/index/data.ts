@@ -61,7 +61,7 @@ export function useColumns<T = ProgramApi.ProgramListResult>(
       cellRender: {
         attrs: {
           nameField: 'namespace',
-          nameTitle: $t('dockDataCenter.index.namespace'),
+          nameTitle: $t('ticketflow.index.namespace'),
           onClick: onActionClick, // 绑定按钮点击事件处理函数
         },
         options: [

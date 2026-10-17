@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { loginApi, logoutApi } from '@/api/login'
 import { CHANNEL_CODE } from '@/utils/constants'
-import { setToken, setUserIdKey, setName } from '@/utils/auth'
+import { setToken, setUserIdKey, setName, removeToken, removeName, removeUserIdKey } from '@/utils/auth'
 
 export const useAuthStore = defineStore('auth', {
     state: () => ({
@@ -39,6 +39,9 @@ export const useAuthStore = defineStore('auth', {
                 this.userId = ''
                 this.roles = []
                 this.permissions = []
+                removeToken()
+                removeName()
+                removeUserIdKey()
             }
         }
     }

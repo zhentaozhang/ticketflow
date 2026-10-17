@@ -11,10 +11,10 @@
             <router-link :to="{ name: 'detail', params: { id: item.id } }" class="title-link" v-if="titleIsShow">
               {{ item.title }}
             </router-link>
-            <router-link :to="{ name: 'detail', params: { id: item.id } }" class="title-link" v-else v-html="item.title" />
+            <router-link :to="{ name: 'detail', params: { id: item.id } }" class="title-link" v-else v-html="sanitizeHighlightHtml(item.title)" />
           </div>
           <div class="meta-line" v-if="titleIsShow">艺人：{{ item.actor }}</div>
-          <div class="meta-line" v-else><span>艺人：</span><span v-html="item.actor"></span></div>
+          <div class="meta-line" v-else><span>艺人：</span><span v-html="sanitizeHighlightHtml(item.actor)"></span></div>
           <div class="meta-line">📍 {{ item.areaName }} | {{ item.place }}</div>
           <div class="meta-line">📅 {{ formatDateWithWeekday(item.showTime, item.showWeekTime) }}</div>
 
@@ -57,6 +57,19 @@ const emit = defineEmits(['pagination'])
 
 function handlePagination() {
   emit('pagination')
+}
+
+function sanitizeHighlightHtml(content: string | undefined): string {
+  if (!content) return ''
+  const escaped = content
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+  return escaped
+    .replace(/&lt;em&gt;/g, '<em>')
+    .replace(/&lt;\/em&gt;/g, '</em>')
 }
 </script>
 

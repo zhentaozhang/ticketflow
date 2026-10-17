@@ -25,11 +25,24 @@ public final class LocalCacheTtl {
      */
     public static final long CACHE_TTL_CAP_SECONDS = 300L;
 
+    /**
+     * 本地缓存浮动下界（秒），与上界共同构成随机扰动区间 [240, 300]，防止批量加载共振雪崩。
+     */
+    public static final long MIN_TTL_CAP_SECONDS = 240L;
+
+    /**
+     * 本地缓存浮动上界（秒）。
+     */
+    public static final long MAX_TTL_CAP_SECONDS = 300L;
+
     private LocalCacheTtl() {
     }
 
     /**
-     * 取"业务到期时间"和"本地缓存上界"里较小的那个。
+     * 取"业务到期时间"和"本地缓存动态上界"里较小的那个。
+     * <p>
+     * 在 [MIN_TTL_CAP_SECONDS, MAX_TTL_CAP_SECONDS] 之间引入随机抖动，
+     * 将批量预热或并发回填的本地缓存自然分散失效，彻底消除同一时刻集体击穿的雪崩风险。
      *
      * @param businessExpireSeconds 业务意义上的剩余存活秒数（例如离演出开始还有多少秒）
      * @return 实际应该用的存活秒数，且保证非负
@@ -40,7 +53,9 @@ public final class LocalCacheTtl {
             // 让本地缓存不要留一份寿命未知的副本
             return 0L;
         }
-        return Math.min(businessExpireSeconds, CACHE_TTL_CAP_SECONDS);
+        long randomCap = java.util.concurrent.ThreadLocalRandom.current()
+                .nextLong(MIN_TTL_CAP_SECONDS, MAX_TTL_CAP_SECONDS + 1);
+        return Math.min(businessExpireSeconds, randomCap);
     }
 
     /**

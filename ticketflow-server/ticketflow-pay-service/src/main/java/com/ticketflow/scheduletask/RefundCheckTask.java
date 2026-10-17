@@ -10,8 +10,11 @@ import com.ticketflow.mapper.RefundBillMapper;
 import com.ticketflow.pay.PayStrategyContext;
 import com.ticketflow.pay.PayStrategyHandler;
 import com.ticketflow.pay.RefundResult;
+import com.ticketflow.servicelock.LockType;
 import com.ticketflow.util.DateUtils;
+import com.ticketflow.util.ServiceLockTool;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -19,6 +22,9 @@ import org.springframework.stereotype.Component;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
+
+import static com.ticketflow.core.DistributedLockConstants.REFUND_CHECK_TASK_LOCK;
 
 /**
  * 退款状态确认定时任务（默认每5分钟）。
@@ -54,9 +60,36 @@ public class RefundCheckTask {
     @Autowired
     private PayStrategyContext payStrategyContext;
 
+    @Autowired
+    private ServiceLockTool serviceLockTool;
+
     @Scheduled(cron = "0 0/5 * * * ?")
     public void refundCheckTask() {
-        BusinessThreadPool.execute(this::processPendingRefunds);
+        BusinessThreadPool.execute(() -> {
+            RLock lock = serviceLockTool.getLock(LockType.Reentrant, REFUND_CHECK_TASK_LOCK, new String[]{"all"});
+            boolean locked = false;
+            try {
+                locked = lock.tryLock(0, TimeUnit.SECONDS);
+                if (!locked) {
+                    log.info("其他实例正在执行退款状态确认任务，本轮跳过");
+                    return;
+                }
+                processPendingRefunds();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("退款状态确认任务获取互斥锁被中断", e);
+            } catch (Exception e) {
+                log.error("退款状态确认任务执行异常", e);
+            } finally {
+                if (locked) {
+                    try {
+                        lock.unlock();
+                    } catch (Exception e) {
+                        log.warn("释放退款状态确认任务互斥锁失败", e);
+                    }
+                }
+            }
+        });
     }
 
     /**

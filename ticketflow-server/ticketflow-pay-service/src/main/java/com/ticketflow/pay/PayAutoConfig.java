@@ -15,6 +15,7 @@ import com.wechat.pay.java.core.notification.NotificationConfig;
 import com.wechat.pay.java.core.notification.NotificationParser;
 import com.wechat.pay.java.service.payments.nativepay.NativePayService;
 import com.wechat.pay.java.service.refund.RefundService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -92,7 +93,8 @@ public class PayAutoConfig {
     @Bean
     @ConditionalOnProperty(prefix = "wxpay", name = "enabled", havingValue = "true")
     public WxPayStrategyHandler wxCall(NativePayService nativePayService, NotificationParser notificationParser,
-                                       RefundService refundService, WxPayProperties wxPayProperties) {
-        return new WxPayStrategyHandler(nativePayService, notificationParser, refundService, wxPayProperties);
+                                       RefundService refundService, WxPayProperties wxPayProperties,
+                                       @Autowired(required = false) com.ticketflow.redis.RedisCache redisCache) {
+        return new WxPayStrategyHandler(nativePayService, notificationParser, refundService, wxPayProperties, redisCache);
     }
 }

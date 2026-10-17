@@ -74,6 +74,8 @@ public enum RedisKeyManage {
 
     PROGRAM_SEAT_SOLD_RESOLUTION_HASH("d_mai_program_{%s}_seat_sold_resolution_hash_%s", "节目座位已售卖集合_节目id_节目类型id", "节目座位已售卖集合", "k"),
 
+    PROGRAM_SEAT_ROW_INDEX("d_mai_program_{%s}_seat_row_index_%s", "节目排级未售座位索引_节目id_票档id", "节目排级未售座位索引", "k"),
+
     PROGRAM_TICKET_CATEGORY_LIST("d_mai_program_ticket_category_list_%s", "节目票档集合id", "节目票档集合", "k"),
 
     PROGRAM_TICKET_REMAIN_NUMBER_HASH_RESOLUTION("d_mai_program_{%s}_ticket_remain_number_hash_resolution_%s", "节目余票数量_节目id_节目票档id", "节目余票数量", "k"),
@@ -108,7 +110,10 @@ public enum RedisKeyManage {
 
     LOGIN_USER_EMAIL_ERROR("d_mai_login_user_email_error_%s", "登录错误的用户邮箱key", "登录错误的用户邮箱次数", "k"),
 
-    AREA_PROVINCE_LIST("d_mai_area_province_list", "省地区集合", "省地区集合数据", "k");
+    AREA_PROVINCE_LIST("d_mai_area_province_list", "省地区集合", "省地区集合数据", "k"),
+
+    WX_PAY_NOTIFY_NONCE("d_mai_wx_pay_notify_nonce_%s", "微信支付回调防重放nonce", "微信支付回调防重放nonce标记", "k"),
+    PROGRAM_ORDER_LOCK_RECORD("d_mai_program_order_lock_record_%s_%s", "节目订单锁定DB记录_节目id_订单号", "标记该订单已完成DB锁座", "k");
 
     /**
      * key值

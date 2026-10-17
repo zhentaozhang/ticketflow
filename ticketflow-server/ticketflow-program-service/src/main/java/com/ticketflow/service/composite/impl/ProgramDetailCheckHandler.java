@@ -8,6 +8,8 @@ import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.service.ProgramService;
 import com.ticketflow.service.composite.AbstractProgramCheckHandler;
 import com.ticketflow.vo.ProgramVo;
+import com.alibaba.fastjson.JSON;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -23,11 +25,19 @@ import java.util.Optional;
  *
  * 依赖 ProgramService.detailV2() 获取节目配置数据
  */
+@Slf4j
 @Component
 public class ProgramDetailCheckHandler extends AbstractProgramCheckHandler {
     
     @Autowired
     private ProgramService programService;
+
+    @Autowired
+    private com.ticketflow.redis.RedisCache redisCache;
+
+    @org.springframework.context.annotation.Lazy
+    @Autowired
+    private com.ticketflow.client.OrderClient orderClient;
     
     /**
      * 校验节目详情：非选座节目不允许传 seatDtoList，购买数量不超过单笔限购。
@@ -41,17 +51,55 @@ public class ProgramDetailCheckHandler extends AbstractProgramCheckHandler {
         // 避免每次下单走完整 getDetailV2 多级缓存链 + RBloomFilter，降低每单 Redis 命令数。
         ProgramVo programVo = programService.simpleGetByIdMultipleCache(programOrderCreateDto.getProgramId());
         if (Objects.isNull(programVo)) {
+            programVo = programService.getByIdMultipleCache(programOrderCreateDto.getProgramId(), null);
+        }
+        if (Objects.isNull(programVo)) {
             throw new TicketFlowFrameException(BaseCode.PROGRAM_NOT_EXIST);
         }
-        if (programVo.getPermitChooseSeat().equals(BusinessStatus.NO.getCode())) {
+        if (Objects.equals(programVo.getPermitChooseSeat(), BusinessStatus.NO.getCode())) {
             if (Objects.nonNull(programOrderCreateDto.getSeatDtoList())) {
                 throw new TicketFlowFrameException(BaseCode.PROGRAM_NOT_ALLOW_CHOOSE_SEAT);
             }
         }
         Integer seatCount = Optional.ofNullable(programOrderCreateDto.getSeatDtoList()).map(List::size).orElse(0);
         Integer ticketCount = Optional.ofNullable(programOrderCreateDto.getTicketCount()).orElse(0);
-        if (seatCount > programVo.getPerOrderLimitPurchaseCount() || ticketCount > programVo.getPerOrderLimitPurchaseCount()) {
+        int currentPurchaseCount = Math.max(seatCount, ticketCount);
+        if (currentPurchaseCount > programVo.getPerOrderLimitPurchaseCount()) {
             throw new TicketFlowFrameException(BaseCode.PER_ORDER_PURCHASE_COUNT_OVER_LIMIT);
+        }
+        if (Objects.nonNull(programVo.getPerAccountLimitPurchaseCount()) && programVo.getPerAccountLimitPurchaseCount() > 0) {
+            com.ticketflow.redis.RedisKeyBuild accountOrderCountKey = com.ticketflow.redis.RedisKeyBuild.createRedisKey(
+                    com.ticketflow.core.RedisKeyManage.ACCOUNT_ORDER_COUNT,
+                    programOrderCreateDto.getUserId(),
+                    programOrderCreateDto.getProgramId());
+            Object historyCountObj = redisCache.get(accountOrderCountKey, Object.class);
+            int historyCount;
+            if (Objects.nonNull(historyCountObj)) {
+                historyCount = Integer.parseInt(String.valueOf(historyCountObj));
+            } else if (orderClient != null) {
+                com.ticketflow.dto.AccountOrderCountDto accountOrderCountDto = new com.ticketflow.dto.AccountOrderCountDto();
+                accountOrderCountDto.setUserId(programOrderCreateDto.getUserId());
+                accountOrderCountDto.setProgramId(programOrderCreateDto.getProgramId());
+                com.ticketflow.common.ApiResponse<com.ticketflow.vo.AccountOrderCountVo> apiResponse = orderClient.accountOrderCount(accountOrderCountDto);
+                if (Objects.equals(apiResponse.getCode(), BaseCode.SUCCESS.getCode()) && Objects.nonNull(apiResponse.getData())) {
+                    historyCount = Optional.ofNullable(apiResponse.getData().getCount()).orElse(0);
+                    Boolean setOk = redisCache.setIfAbsent(accountOrderCountKey, historyCount, 30, java.util.concurrent.TimeUnit.MINUTES);
+                    if (Boolean.FALSE.equals(setOk)) {
+                        Object latestObj = redisCache.get(accountOrderCountKey, Object.class);
+                        if (Objects.nonNull(latestObj)) {
+                            historyCount = Integer.parseInt(String.valueOf(latestObj));
+                        }
+                    }
+                } else {
+                    log.warn("查询账户订单数量失败 apiResponse : {}", JSON.toJSONString(apiResponse));
+                    historyCount = 0;
+                }
+            } else {
+                historyCount = 0;
+            }
+            if (historyCount + currentPurchaseCount > programVo.getPerAccountLimitPurchaseCount()) {
+                throw new TicketFlowFrameException(BaseCode.PER_ACCOUNT_PURCHASE_COUNT_OVER_LIMIT);
+            }
         }
     }
     

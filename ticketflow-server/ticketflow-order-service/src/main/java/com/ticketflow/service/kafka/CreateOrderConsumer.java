@@ -68,7 +68,8 @@ public class CreateOrderConsumer {
      * 每分区一个 consumer，提升订单创建消费吞吐，缓解高到达率下消费积压/超时丢弃。
      * 注意：分区数变更需同步执行 kafka-topics.sh --alter --partitions 48（见部署文档）。
      */
-    @KafkaListener(topics = {SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "${spring.kafka.topic:create_order}"}, concurrency = "48")
+    @KafkaListener(topics = {SPRING_INJECT_PREFIX_DISTINCTION_NAME + "-" + "${spring.kafka.topic:create_order}"},
+            concurrency = "${spring.kafka.consumer.concurrency:48}")
     public void consumerOrderMessage(ConsumerRecord<String, String> consumerRecord) {
         String value = consumerRecord.value();
         if (StringUtil.isEmpty(value)) {
@@ -76,10 +77,13 @@ public class CreateOrderConsumer {
         }
         OrderCreateMq orderCreateMq = JSON.parseObject(value, OrderCreateMq.class);
 
-        // 延迟用 Kafka 记录时间戳与消息自带创建时间计算：二者同源（生产/落盘侧），
-        // 避免使用消费端主机 System.currentTimeMillis() 与生产者主机时钟相互比较导致的跨主机时钟漂移失真。
-        long createOrderTimeTimestamp = orderCreateMq.getCreateOrderTime().getTime();
-        long delayTime = consumerRecord.timestamp() - createOrderTimeTimestamp;
+        // 计算真实消费延迟：以消费端当前处理时刻为准，与消息入队/创建时刻计算差值。
+        // 下限保护为 0，防止极端情况下消费者与 Broker 之间微小的毫秒级时钟偏斜产生负数。
+        long now = System.currentTimeMillis();
+        long recordTimestamp = (consumerRecord.timestamp() > 0)
+                ? consumerRecord.timestamp()
+                : (orderCreateMq.getCreateOrderTime() != null ? orderCreateMq.getCreateOrderTime().getTime() : now);
+        long delayTime = Math.max(0L, now - recordTimestamp);
 
         // 热路径只打关键字段：完整消息体是高并发下的日志放大源，需要时开 debug
         log.info("消费到kafka的创建订单消息 订单号 : {} 延迟时间 : {} 毫秒", orderCreateMq.getOrderNumber(), delayTime);

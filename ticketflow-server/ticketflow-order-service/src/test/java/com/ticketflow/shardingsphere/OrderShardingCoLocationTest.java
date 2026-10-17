@@ -34,6 +34,7 @@ class OrderShardingCoLocationTest {
      */
     private static final List<String> CONFIG_FILES = List.of(
             "shardingsphere-order-local.yaml",
+            "shardingsphere-order-docker.yaml",
             "shardingsphere-order-it.yaml");
 
     /** 建单事务里一起写的四张表 */

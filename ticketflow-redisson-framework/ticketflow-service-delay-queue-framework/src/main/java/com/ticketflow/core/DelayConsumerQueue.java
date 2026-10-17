@@ -1,6 +1,8 @@
 package com.ticketflow.core;
 
 import com.ticketflow.context.DelayQueuePart;
+import com.ticketflow.trace.TraceContextHandle;
+import com.ticketflow.trace.TraceContextUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RAtomicLong;
 import org.redisson.api.RDelayedQueue;
@@ -113,12 +115,15 @@ public class DelayConsumerQueue extends DelayBaseQueue{
                         assert blockingQueue != null;
                         String content = blockingQueue.take();
                         executeTaskThreadPool.execute(() -> {
-                            try {
-                                consumerTask.execute(content);
-                                // 执行成功：清理该消息的重试计数
-                                clearRetryCount(content);
-                            } catch (Exception e) {
-                                handleConsumeFailure(content, e);
+                            TraceContextUtil.UnwrapResult unwrapResult = TraceContextUtil.unwrap(content);
+                            try (TraceContextHandle handle = TraceContextUtil.openScope(unwrapResult.getHeaders())) {
+                                try {
+                                    consumerTask.execute(unwrapResult.getPayload());
+                                    // 执行成功：清理该消息的重试计数
+                                    clearRetryCount(content);
+                                } catch (Exception e) {
+                                    handleConsumeFailure(content, e);
+                                }
                             }
                         });
                     } catch (InterruptedException e) {
@@ -157,15 +162,20 @@ public class DelayConsumerQueue extends DelayBaseQueue{
     private void moveToDeadLetter(String content, Exception e) {
         try {
             deadLetterQueue.add(content);
+            log.error("[DEAD_LETTER_EVENT] 消息已转入死信队列 topic : {} deadLetterQueueSize : {} content : {}",
+                    relTopic, deadLetterQueue.size(), content, e);
         } catch (Exception deadLetterException) {
-            log.error("写入死信队列失败，消息丢失需人工处理 topic : {} content : {}", relTopic, content, deadLetterException);
+            log.error("[DEAD_LETTER_ALERT] 写入死信队列失败，消息丢失需紧急人工处理 topic : {} content : {}",
+                    relTopic, content, deadLetterException);
         } finally {
             clearRetryCount(content);
         }
     }
 
     private RAtomicLong retryCounter(String content) {
-        return redissonClient.getAtomicLong(relTopic + ":retry:" + Math.abs(Objects.hashCode(content)));
+        // 使用 long 强转防 Integer.MIN_VALUE 取绝对值溢出为负数
+        long safeHash = Math.abs((long) Objects.hashCode(content));
+        return redissonClient.getAtomicLong(relTopic + ":retry:" + safeHash);
     }
 
     private long incrementRetryCount(String content) {
@@ -182,6 +192,13 @@ public class DelayConsumerQueue extends DelayBaseQueue{
         } catch (Exception e) {
             log.warn("清理延迟队列重试计数失败 topic : {}", relTopic, e);
         }
+    }
+
+    /**
+     * 获取死信队列当前积压消息数（供监控指标采集与运维巡检）。
+     */
+    public int getDeadLetterQueueSize() {
+        return deadLetterQueue != null ? deadLetterQueue.size() : 0;
     }
     
     public void destroy(ExecutorService executorService) {

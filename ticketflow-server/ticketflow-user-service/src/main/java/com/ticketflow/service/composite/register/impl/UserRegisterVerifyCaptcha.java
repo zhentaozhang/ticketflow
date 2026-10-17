@@ -55,6 +55,8 @@ public class UserRegisterVerifyCaptcha extends AbstractUserRegisterCheckHandler 
                 throw new TicketFlowFrameException(responseModel.getRepCode(), responseModel.getRepMsg());
             }
         }
+        // ③ 验证成功后物理销毁凭据（一次性消费），杜绝重放注册
+        redisCache.del(RedisKeyBuild.createRedisKey(RedisKeyManage.VERIFY_CAPTCHA_ID, param.getCaptchaId()));
     }
 
     @Override

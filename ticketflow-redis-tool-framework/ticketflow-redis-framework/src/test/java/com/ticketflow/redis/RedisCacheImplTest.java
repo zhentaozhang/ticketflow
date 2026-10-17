@@ -1,11 +1,8 @@
 package com.ticketflow.redis;
 
 import com.ticketflow.core.RedisKeyManage;
-import com.ticketflow.core.SpringUtil;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.MockedStatic;
 import org.springframework.data.redis.core.ListOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
@@ -16,7 +13,9 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -39,9 +38,7 @@ class RedisCacheImplTest {
     private ValueOperations<String, String> valueOperations;
     private ListOperations<String, String> listOperations;
     private RedisCacheImpl redisCache;
-    private MockedStatic<SpringUtil> springUtilMockedStatic;
-
-    private static final String TEST_KEY = "tf-all_rule_hash";
+    private static final String TEST_KEY = "ticketflow-all_rule_hash";
 
     @BeforeEach
     void setUp() {
@@ -51,13 +48,6 @@ class RedisCacheImplTest {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         when(redisTemplate.opsForList()).thenReturn(listOperations);
         redisCache = new RedisCacheImpl(redisTemplate);
-        springUtilMockedStatic = mockStatic(SpringUtil.class);
-        springUtilMockedStatic.when(SpringUtil::getPrefixDistinctionName).thenReturn("tf");
-    }
-
-    @AfterEach
-    void tearDown() {
-        springUtilMockedStatic.close();
     }
 
     @Test
@@ -93,7 +83,7 @@ class RedisCacheImplTest {
     }
 
     @Test
-    void getValueIsList_supplierReturnsEmpty_returnsNullWithoutBackfill() {
+    void getValueIsList_supplierReturnsEmpty_returnsEmptyListAndCachesAntiPenetration() {
         when(valueOperations.get(TEST_KEY)).thenReturn(null);
 
         List<TestCacheDto> result = redisCache.getValueIsList(
@@ -102,8 +92,9 @@ class RedisCacheImplTest {
                 ArrayList::new,
                 10L, TimeUnit.SECONDS);
 
-        assertNull(result);
-        verify(valueOperations, never()).set(any(String.class), any(String.class), anyLong(), any(TimeUnit.class));
+        assertNotNull(result);
+        assertTrue(result.isEmpty());
+        verify(valueOperations).set(TEST_KEY, "[]", 10L, TimeUnit.SECONDS);
     }
 
     @Test

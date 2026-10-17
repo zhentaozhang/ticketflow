@@ -94,6 +94,7 @@
 		<lombok.version>1.18.38</lombok.version>
 		<maven-checkstyle.version>3.3.1</maven-checkstyle.version>
 		<maven-spotbugs.version>4.8.6.3</maven-spotbugs.version>
+		<opentelemetry.version>1.37.0</opentelemetry.version>
 		<jacoco.version>0.8.12</jacoco.version>
 	</properties>
 	<dependencies>
@@ -198,6 +199,11 @@
 				<version>${spring-cloud-alibaba.version}</version>
 				<type>pom</type>
 				<scope>import</scope>
+			</dependency>
+			<dependency>
+				<groupId>io.opentelemetry</groupId>
+				<artifactId>opentelemetry-api</artifactId>
+				<version>${opentelemetry.version}</version>
 			</dependency>
 		</dependencies>
 	</dependencyManagement>

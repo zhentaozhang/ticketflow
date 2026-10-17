@@ -21,9 +21,9 @@ import com.ticketflow.mapper.ProgramMapper;
 import com.ticketflow.mapper.ProgramShowTimeMapper;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
+import com.ticketflow.service.cache.CacheTtlUtil;
 import com.ticketflow.service.cache.local.LocalCacheProgramShowTime;
 import com.ticketflow.servicelock.LockType;
-import com.ticketflow.servicelock.annotion.ServiceLock;
 import com.ticketflow.util.DateUtils;
 import com.ticketflow.util.ServiceLockTool;
 import org.redisson.api.RLock;
@@ -43,7 +43,6 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static com.ticketflow.core.DistributedLockConstants.GET_PROGRAM_SHOW_TIME_LOCK;
-import static com.ticketflow.core.DistributedLockConstants.PROGRAM_SHOW_TIME_LOCK;
 
 /**
  * 节目演出时间服务。
@@ -127,7 +126,6 @@ public class ProgramShowTimeService extends ServiceImpl<ProgramShowTimeMapper, P
      * @param programId 节目 ID
      * @return 演出时间实体
      */
-    @ServiceLock(lockType = LockType.Read, name = PROGRAM_SHOW_TIME_LOCK, keys = {"#programId"})
     public ProgramShowTime selectProgramShowTimeByProgramId(Long programId) {
         ProgramShowTime programShowTime = redisCache.get(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SHOW_TIME,
                 programId), ProgramShowTime.class);
@@ -154,11 +152,13 @@ public class ProgramShowTimeService extends ServiceImpl<ProgramShowTimeMapper, P
                 programShowTime = Optional.ofNullable(programShowTimeMapper.selectOne(programShowTimeLambdaQueryWrapper))
                         .orElseThrow(() -> new TicketFlowFrameException(BaseCode.PROGRAM_SHOW_TIME_NOT_EXIST));
                 redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.PROGRAM_SHOW_TIME, programId), programShowTime
-                        , DateUtils.countBetweenSecond(DateUtils.now(), programShowTime.getShowTime()), TimeUnit.SECONDS);
+                        , CacheTtlUtil.calculateExpireSeconds(programShowTime.getShowTime()), TimeUnit.SECONDS);
             }
             return programShowTime;
         } finally {
-            lock.unlock();
+            if (lock != null && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 

@@ -6,7 +6,6 @@ import com.alibaba.fastjson.JSONObject;
 import com.baidu.fsg.uid.UidGenerator;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.ticketflow.client.BaseDataClient;
@@ -223,7 +222,11 @@ public class UserService extends ServiceImpl<UserMapper, User> {
             throw new TicketFlowFrameException(BaseCode.NAME_PASSWORD_ERROR);
         }
         // 登录成功：写入 Redis session（含 TTL 过期自动登出），生成 JWT token
-        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.USER_LOGIN, code, user.getId()), user,
+        // 脱敏副本写入 Redis，清空密码哈希，避免缓存层敏感凭据暴露
+        User sessionUser = new User();
+        BeanUtil.copyProperties(user, sessionUser);
+        sessionUser.setPassword(null);
+        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.USER_LOGIN, code, user.getId()), sessionUser,
                 tokenExpireTime, TimeUnit.MINUTES);
         userLoginVo.setUserId(userId);
         //生成token
@@ -323,22 +326,15 @@ public class UserService extends ServiceImpl<UserMapper, User> {
         userMapper.updateById(updateUser);
 
         String oldEmail = user.getEmail();
-        LambdaQueryWrapper<UserEmail> userEmailLambdaQueryWrapper = Wrappers.lambdaQuery(UserEmail.class)
-                .eq(UserEmail::getEmail, userUpdateEmailDto.getEmail());
-        UserEmail userEmail = userEmailMapper.selectOne(userEmailLambdaQueryWrapper);
-        if (Objects.isNull(userEmail)) {
-            userEmail = new UserEmail();
-            userEmail.setId(uidGenerator.getUid());
-            userEmail.setUserId(user.getId());
-            userEmail.setEmail(userUpdateEmailDto.getEmail());
-            userEmailMapper.insert(userEmail);
-        } else {
-            LambdaUpdateWrapper<UserEmail> userEmailLambdaUpdateWrapper = Wrappers.lambdaUpdate(UserEmail.class)
-                    .eq(UserEmail::getEmail, oldEmail);
-            UserEmail updateUserEmail = new UserEmail();
-            updateUserEmail.setEmail(userUpdateEmailDto.getEmail());
-            userEmailMapper.update(updateUserEmail, userEmailLambdaUpdateWrapper);
+        // 分片键（email）不可直接执行 UPDATE。先删除旧邮箱映射，再插入新邮箱映射
+        if (StringUtil.isNotEmpty(oldEmail)) {
+            userEmailMapper.delete(Wrappers.lambdaQuery(UserEmail.class).eq(UserEmail::getEmail, oldEmail));
         }
+        UserEmail userEmail = new UserEmail();
+        userEmail.setId(uidGenerator.getUid());
+        userEmail.setUserId(user.getId());
+        userEmail.setEmail(userUpdateEmailDto.getEmail());
+        userEmailMapper.insert(userEmail);
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -351,22 +347,17 @@ public class UserService extends ServiceImpl<UserMapper, User> {
         User updateUser = new User();
         BeanUtil.copyProperties(userUpdateMobileDto, updateUser);
         userMapper.updateById(updateUser);
-        LambdaQueryWrapper<UserMobile> userMobileLambdaQueryWrapper = Wrappers.lambdaQuery(UserMobile.class)
-                .eq(UserMobile::getMobile, userUpdateMobileDto.getMobile());
-        UserMobile userMobile = userMobileMapper.selectOne(userMobileLambdaQueryWrapper);
-        if (Objects.isNull(userMobile)) {
-            userMobile = new UserMobile();
-            userMobile.setId(uidGenerator.getUid());
-            userMobile.setUserId(user.getId());
-            userMobile.setMobile(userUpdateMobileDto.getMobile());
-            userMobileMapper.insert(userMobile);
-        } else {
-            LambdaUpdateWrapper<UserMobile> userMobileLambdaUpdateWrapper = Wrappers.lambdaUpdate(UserMobile.class)
-                    .eq(UserMobile::getMobile, oldMobile);
-            UserMobile updateUserMobile = new UserMobile();
-            updateUserMobile.setMobile(userUpdateMobileDto.getMobile());
-            userMobileMapper.update(updateUserMobile, userMobileLambdaUpdateWrapper);
+
+        // 分片键（mobile）不可直接执行 UPDATE。先删除旧手机号映射，再插入新手机号映射
+        if (StringUtil.isNotEmpty(oldMobile)) {
+            userMobileMapper.delete(Wrappers.lambdaQuery(UserMobile.class).eq(UserMobile::getMobile, oldMobile));
         }
+        UserMobile userMobile = new UserMobile();
+        userMobile.setId(uidGenerator.getUid());
+        userMobile.setUserId(user.getId());
+        userMobile.setMobile(userUpdateMobileDto.getMobile());
+        userMobileMapper.insert(userMobile);
+
         // 新手机号加入布隆过滤器：register 时才会 add，改绑路径漏了，
         // 否则后续 doExist 因布隆不含新号而跳过 DB 判重，可导致两个用户绑定同一手机号。
         bloomFilterHandler.add(userUpdateMobileDto.getMobile());

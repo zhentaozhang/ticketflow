@@ -127,6 +127,12 @@
             <classifier>osx-aarch_64</classifier>
         </dependency>
 
+        <!-- OpenTelemetry API（标准 TraceContext / TextMapPropagator 接口，运行时由 Java Agent 提供实现） -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

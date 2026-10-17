@@ -46,7 +46,7 @@ spring:
         WRITE_NUMBERS_AS_STRINGS: true
   datasource:
     driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
-    url: jdbc:shardingsphere:classpath:shardingsphere-program-${spring.profiles.active}.yaml
+    url: jdbc:shardingsphere:classpath:shardingsphere-program-${SHARDING_PROFILE:${spring.profiles.active}}.yaml
     # 连接池在 shardingsphere-program-*.yaml 的 dataSources 下配置；
     # 此处 hikari.* 对 ShardingSphereDriver 不生效，已移除以避免误配。
   data:  
@@ -117,6 +117,9 @@ feign:
       enabled: true
   client:
     config:
+      default:
+        connect-timeout: 3000
+        read-timeout: 5000
       # UserClient 超时（contextId 固定，与前缀解耦）。
       # user-service 购票人查询为本地 DB 简单查询，3s/5s 兜底慢与挂，避免默认 60s read-timeout 拖垮下单线程
       userClient:

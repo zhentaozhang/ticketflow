@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   unit-tests:
     name: Backend unit tests
@@ -57,7 +60,7 @@ jobs:
           java-version: '17'
           cache: maven
 
-      # 只构建镜像、不启动容器；顺带验证 Dockerfile / build.sh / patch-jar 链路可跑通
+      # 只构建镜像、不启动容器；顺带验证 Dockerfile / build.sh / fat-jar 容器化链路可跑通
       - name: Build image only (no up)
         run: bash ./docker/build.sh images
 

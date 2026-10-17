@@ -18,12 +18,12 @@ scrape_configs:
       - targets: ['localhost:9090']
 
   # 应用服务运行在 compose 网络内，直接使用服务名抓取。
-  # 注：gateway 的 /actuator/prometheus 被应用内部拦截（返回 not found），
-  #     admin 服务未引入 prometheus 指标端点（404），故两者暂不纳入采集。
+  # 注：admin 服务未引入 prometheus 指标端点（404），暂不纳入采集。
   - job_name: 'spring-boot'
     metrics_path: '/actuator/prometheus'
     static_configs:
       - targets:
+        - 'gateway:6085'
         - 'base-data:6083'
         - 'customize:6084'
         - 'order:8081'

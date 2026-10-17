@@ -44,4 +44,7 @@ public class SeatVo implements Serializable {
     
     @Schema(name ="sellStatus", type ="Integer", description ="1未售卖 2锁定 3已售卖")
     private Integer sellStatus;
+
+    @Schema(name = "ticketUserId", type = "Long", description = "购票人id")
+    private Long ticketUserId;
 }

@@ -75,6 +75,10 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
         Collection<Long> programIdValues = columnNameAndShardingValuesMap.get("program_id");
         //payment表的分片列 out_order_no 值即订单号字符串，与 order_number 等价
         Collection<Long> outOrderNoValues = columnNameAndShardingValuesMap.get("out_order_no");
+        //mobile条件的值（用户手机映射表分片键）
+        Collection<?> mobileValues = (Collection<?>) (Object) columnNameAndShardingValuesMap.get("mobile");
+        //email条件的值（用户邮箱映射表分片键）
+        Collection<?> emailValues = (Collection<?>) (Object) columnNameAndShardingValuesMap.get("email");
 
         Long value = null;
         //如果是order_number查询
@@ -94,6 +98,14 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
             //如果是out_order_no查询（订单号字符串，与 order_number 同基因）
         } else if (CollectionUtil.isNotEmpty(outOrderNoValues)) {
             value = Long.parseLong(String.valueOf(outOrderNoValues.stream().findFirst().orElse(null)));
+            //如果是mobile查询（手机号哈希取模，解决登录全库广播）
+        } else if (CollectionUtil.isNotEmpty(mobileValues)) {
+            String mobileStr = String.valueOf(mobileValues.iterator().next());
+            value = (long) (mobileStr.hashCode() & 0x7FFFFFFF);
+            //如果是email查询（邮箱哈希取模）
+        } else if (CollectionUtil.isNotEmpty(emailValues)) {
+            String emailStr = String.valueOf(emailValues.iterator().next());
+            value = (long) (emailStr.hashCode() & 0x7FFFFFFF);
         }
         //订单号与用户ID同时出现时（如订单列表双条件查询），两个分片键必须路由到同一分片，
         //否则说明基因位定义已不一致，fail-fast 防止静默错误路由
