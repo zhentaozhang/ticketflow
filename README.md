@@ -4,15 +4,10 @@
   <p><b>高并发在线票务交易平台</b></p>
 
   <p>
-    <a href="#项目简介">项目简介</a> •
-    <a href="#核心技术">核心技术</a> •
+    <a href="#核心亮点">核心亮点</a> •
     <a href="#性能基准">性能基准</a> •
     <a href="#系统架构">系统架构</a> •
-    <a href="#技术栈">技术栈</a> •
-    <a href="#数据库架构">数据库架构</a> •
-    <a href="#快速开始">快速开始</a> •
-    <a href="#api-文档">API 文档</a> •
-    <a href="#项目结构">项目结构</a>
+    <a href="#快速开始">快速开始</a>
   </p>
 
   <p>
@@ -21,12 +16,7 @@
     <img src="https://img.shields.io/badge/Spring_Cloud_Alibaba-2025-FF6A00?logo=alibabacloud&style=flat-square" alt="Spring Cloud Alibaba 2025">
     <img src="https://img.shields.io/badge/Vue-3.5-4FC08D?logo=vue.js&style=flat-square" alt="Vue 3.5">
     <img src="https://img.shields.io/badge/MySQL-8.0-4479A1?logo=mysql&style=flat-square" alt="MySQL 8.0">
-    <img src="https://img.shields.io/badge/Redis-7-FF4438?logo=redis&style=flat-square" alt="Redis 7">
-    <img src="https://img.shields.io/badge/Kafka-3.6-231F20?logo=apachekafka&style=flat-square" alt="Kafka 3.6">
-    <img src="https://img.shields.io/badge/ShardingSphere-5.3-4479A1?logo=apache&style=flat-square" alt="ShardingSphere 5.3">
-    <img src="https://img.shields.io/badge/Elasticsearch-8.11-005571?logo=elasticsearch&style=flat-square" alt="Elasticsearch 8.11">
     <img src="https://github.com/zhentaozhang/ticketflow/actions/workflows/ci.yml/badge.svg" alt="CI">
-    <img src="https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&style=flat-square" alt="Docker Compose">
   </p>
 </div>
 
@@ -34,107 +24,63 @@
 
 ## 项目简介
 
-**TicketFlow** 是一款面向演唱会、体育赛事等高并发抢票场景的在线票务交易平台。系统基于 **Spring Cloud Alibaba** 微服务架构构建，围绕**库存一致性、流量削峰、系统可用性**三大核心挑战，深度整合 Redis、Kafka、ShardingSphere 等组件，形成了一套完整的高并发解决方案。
-
+TicketFlow 是一个面向演唱会、体育赛事等场景的在线票务交易平台，采用 Spring Cloud Alibaba 微服务架构。项目围绕高并发抢票的三个核心问题——**库存一致性、流量削峰、系统可用性**——展开，以 Redis、Kafka、ShardingSphere 为主线实现下单链路。
 
 ---
 
-## 核心技术
+## 核心亮点
 
 ### 基因法分片路由
 
-基于 ShardingSphere 自定义分片算法，将 `userId` 的 Hash 值嵌入 `orderId` 基因位，实现 **user_id** 与 **order_number** 双维度精准路由。
-
-- 订单号预留 6 位基因位，当前部署为 **2 库 × 8 表（16 张物理表）**，位运算组合上限为 8 库 × 8 表
-- 同一用户的所有订单落在同一分片，避免跨库查询与读扩散
-- 分片索引由分片键位运算直接得出（`ShardingGeneUtils`），分片数**以 `shardingsphere-order-*.yaml` 为唯一事实来源**；扩容需停机迁移，虚拟分片在线扩缩容尚未实现
-
-### 统一分布式锁框架
-
-封装 Redisson 实现统一分布式锁框架，提供多锁模型支持：
-
-| 锁模型 | 适用场景 |
-|--------|----------|
-| 可重入锁 | 常规并发控制 |
-| 公平锁 | 先到先得场景 |
-| 读写锁 | 读多写少场景 |
-| 信号量 | 限流控制 |
-| 联锁 | 多资源锁定 |
-
-通过注解声明式使用，并精确调整 AOP 与事务拦截器执行顺序 — **加锁先于事务开启，释放晚于事务提交**，从框架层杜绝锁与事务的时序竞态问题。
-
-### 多级缓存架构
-
-构建 **Caffeine → Redis → MySQL** 三级缓存架构：
-
-```
-请求 → Caffeine (本地缓存) → Redis (分布式缓存) → MySQL (数据库)
-        命中即返回            缓存失效回源        兜底持久化
-```
-
-- 通过 **Redis Stream** 广播缓存失效事件，驱动集群节点本地缓存同步失效
-- 利用 Caffeine 同 Key 请求合并机制，避免缓存击穿导致数据库压力放大
-- 布隆过滤器拦截无效节目 ID 查询，进一步保护数据库
+订单号预留 6 位基因位嵌入 `userId` 的 Hash 值，基于 ShardingSphere 自定义分片算法，使 `user_id` 与 `order_number` 两个维度都能路由到同一分片，避免跨库查询与读扩散。当前部署为 **2 库 × 8 表（16 张物理表）**，分片数唯一事实来源为 `shardingsphere-order-*.yaml`；扩容需停机迁移。
 
 ### 异步下单链路
-
-基于 Lua + Redis + Kafka 构建高性能异步下单链路：
 
 ```mermaid
 sequenceDiagram
     autonumber
+    participant C as 用户端
+    participant G as 网关
+    participant P as 节目服务
+    participant R as Redis
+    participant K as Kafka
+    participant O as 订单服务
+    participant D as 延迟队列
 
-    participant Client as 用户端
-    participant Gateway as API 网关
-    participant Program as 节目服务
-    participant Redis as Redis
-    participant Kafka as Kafka
-    participant Order as 订单服务
-    participant Pay as 支付
-    participant Delay as 延迟队列
+    Note over C,P: ① 同步受理
+    C->>G: POST /order/create
+    G->>P: 路由转发
+    P->>R: EVAL Lua 原子扣库存
+    R-->>P: OK
+    P-->>C: 订单创建中...
 
-    rect rgb(232, 240, 254)
-        Note over Client,Program: ① 同步受理
-        Client->>Gateway: POST /order/create
-        Gateway->>+Program: 路由转发
-        Program->>+Redis: EVAL Lua 原子扣库存
-        Redis-->>-Program: OK
-        Program-->>-Gateway: 受理成功
-        Gateway-->>Client: 订单创建中...
-    end
+    Note over P,D: ② 异步下单（Kafka 削峰）
+    P->>K: 发布 create_order
+    K->>O: 消费消息
+    O->>D: 注册超时取消任务
 
-    rect rgb(255, 238, 238)
-        Note over Program,Delay: ② 异步下单 (Kafka 削峰)
-        Program->>+Kafka: 发布 create_order
-        Kafka->>+Order: 消费消息
-        deactivate Kafka
-        Order->>+Pay: Feign 获取支付链接
-        Pay-->>-Order: 支付链接
-        Order->>+Delay: 注册超时取消任务
-        deactivate Order
-        deactivate Delay
-    end
-
-    rect rgb(245, 245, 245)
-        Note over Order,Delay: ③ 超时自动取消 (2 分钟未支付)
-        activate Delay
-        Delay->>+Order: 触发取消
-        Order->>+Redis: 回补库存
-        deactivate Order
-        deactivate Redis
-        deactivate Delay
-    end
+    Note over O,D: ③ 2 分钟未支付自动取消
+    D->>O: 触发取消
+    O->>R: 回补库存
 ```
 
-- **Lua 脚本**保证库存扣减原子性
-- **Kafka** 实现流量削峰与订单异步解耦
-- **延迟任务**机制实现超时订单自动取消与库存回补
+- Lua 脚本保证库存扣减原子性
+- Kafka 削峰，解耦节目服务与订单服务
+- 延迟队列实现超时订单自动取消与库存回补
+
+### 多级缓存
+
+`Caffeine → Redis → MySQL` 三级缓存：Redis Stream 广播失效事件驱动集群节点本地缓存同步失效；Caffeine 同 Key 请求合并避免缓存击穿放大数据库压力；布隆过滤器拦截无效节目 ID 查询。
+
+### 分布式锁框架
+
+封装 Redisson 提供**可重入 / 公平 / 读写 / 信号量 / 联锁**五种锁模型，注解声明式使用。通过调整 AOP 与事务拦截器顺序，保证**加锁先于事务开启、释放晚于事务提交**，从框架层规避锁与事务的时序竞态。
 
 ---
 
 ## 性能基准
 
-下单链路提供 **V1 ~ V4** 四个演进版本，在**本地单机部署**（微服务与 MySQL / Redis / Kafka 同节点）下，使用 **Gatling 开环到达率模型**（恒定 QPS 灌入，60s 稳态窗口）压测下单接口，各版本成功率对比如下：
+下单链路提供 V1 ~ V4 四个演进版本，在本地单机部署下用 **Gatling 开环到达率模型**（恒定 QPS，60s 稳态窗口）压测，各版本成功率对比：
 
 | 版本 | 架构 | 80 QPS | 120 QPS | 160 QPS | 200 QPS |
 |------|------|--------|---------|---------|---------|
@@ -143,11 +89,11 @@ sequenceDiagram
 | **V3** | 本地锁模板 + 同步 RPC 建单 | 98.8% | 36.1% | 37.1% | 38.2% |
 | **V4** | 本地锁 + Lua 原子扣减 + Kafka 异步建单 | 100% | 100% | 81.0% | 66.5% |
 
-- V4 异步下单链路单机拐点约 **120–160 QPS**，120 QPS 内成功率接近 100%
-- 各版本并发模型：V1 整节目串行 → V2/V3 按票档拆锁 → V4 锁外异步解耦，性能逐级提升
-- 压测脚本、场景与造数脚本见 `benchmark/` 目录；结果原始数据不入库（`.gitignore` 忽略 `benchmark/results/`），需本地复跑生成
+- V4 单机拐点约 **120–160 QPS**，120 QPS 内成功率接近 100%
+- 并发模型演进：整节目串行 → 按票档拆锁 → 锁外异步解耦
+- 压测脚本见 `benchmark/`；原始结果不入库（`.gitignore` 忽略 `benchmark/results/`），需本地复跑生成
 
-> 性能结果随部署环境与硬件配置变化，仅供参考。
+> 结果随部署环境与硬件变化，仅供参考。
 
 ---
 
@@ -155,271 +101,53 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-    %% ===================== 样式定义 =====================
-    classDef client fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
-    classDef gateway fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#bf360c
-    classDef core fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
-    classDef support fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#4a148c
-    classDef async fill:#fce4ec,stroke:#c62828,stroke-width:2px,color:#b71c1c
-    classDef cache fill:#e0f2f1,stroke:#00695c,stroke-width:2px,color:#004d40
-    classDef storage fill:#efebe9,stroke:#4e342e,stroke-width:2px,color:#3e2723
-    classDef monitor fill:#fafafa,stroke:#9e9e9e,stroke-width:1px,color:#616161,stroke-dasharray:4 4
+    classDef client fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef gateway fill:#fff3e0,stroke:#e65100,color:#bf360c
+    classDef core fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef support fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef async fill:#fce4ec,stroke:#c62828,color:#b71c1c
+    classDef cache fill:#e0f2f1,stroke:#00695c,color:#004d40
+    classDef storage fill:#efebe9,stroke:#4e342e,color:#3e2723
+    classDef monitor fill:#fafafa,stroke:#9e9e9e,color:#616161,stroke-dasharray:4 4
 
-    %% ==================== 用户端 ====================
     subgraph Clients[用户端]
-        U1[用户前端<br/>Vue 3 + Vite]:::client
-        U2[Admin 管理后台<br/>Vben Admin]:::client
+        U1[用户端 · Vue 3]:::client
+        U2[管理后台 · Vben Admin]:::client
     end
 
-    %% ==================== 网关层 ====================
-    subgraph Gateways[网关层 · Port 6085]
-        GW[Spring Cloud Gateway]:::gateway
-        G1[Sentinel 限流熔断]:::gateway
-        G2[Sa-Token JWT 认证]:::gateway
-        G3[灰度发布路由]:::gateway
-        G4[API 审计采集 → Kafka]:::gateway
+    subgraph Gateways[网关 · 6085]
+        GW[Gateway · Sentinel 限流 · Sa-Token 认证 · 灰度路由 · API 审计]:::gateway
     end
 
-    %% ==================== 微服务层 ====================
-    subgraph Services[微服务集群]
-        direction TB
-        
-        subgraph Core[核心业务链路]
-            direction LR
-            PS[🎫 节目服务<br/>Program · 6086]:::core
-            OS[📦 订单服务<br/>Order · 8081]:::core
-            PAS[💳 支付服务<br/>Pay · 6087]:::core
-        end
-        
-        subgraph Base[基础支撑]
-            direction LR
-            US[👤 用户服务<br/>User · 6082]:::support
-            BS[📋 基础数据<br/>Base-Data · 6083]:::support
-            CS[🔧 定制服务<br/>Customize · 6084]:::support
-        end
+    subgraph Services[微服务]
+        PS[节目 6086]:::core
+        OS[订单 8081]:::core
+        PAS[支付 6087]:::core
+        US[用户 6082]:::support
+        BS[基础数据 6083]:::support
+        CS[定制 6084]:::support
+        MG[迁移 6088]:::support
     end
 
-    %% ==================== 中间件 ====================
-    subgraph Middleware[中间件层]
-        MQ[Kafka 消息队列]:::async
+    subgraph Middleware[中间件]
+        MQ[Kafka]:::async
         RDS[Redis 7 + Redisson]:::cache
         ES[Elasticsearch 8.11]:::cache
     end
 
-    %% ==================== 数据存储 ====================
-    subgraph Storage[数据存储]
-        DB[(MySQL 8.0 · 10 数据库<br/>ShardingSphere · 基因法分片)]:::storage
-    end
+    DB[(MySQL 8.0 · 10 库<br/>ShardingSphere 基因法分片)]:::storage
+    OBS[Prometheus · Grafana · Jaeger · Spring Boot Admin]:::monitor
 
-    %% ==================== 可观测性 ====================
-    subgraph Observability[可观测性]
-        PG[Prometheus + Grafana]:::monitor
-        JG[Jaeger<br/>OTel Trace]:::monitor
-        BA[Spring Boot Admin]:::monitor
-    end
-
-    %% ==================== 连接定义 ====================
-    U1 & U2 --> |HTTP| GW
-    
-    GW --> |路由请求| PS
-    GW --> |路由请求| OS
-    GW --> |路由请求| US
-    GW --> |路由请求| BS
-    
-    PS ==> |❶ 异步发布 create_order| MQ
-    MQ ==> |❷ 异步消费| OS
-    GW -.-> |发布 save_api_data| MQ
-    
-    PS ---> |缓存·分布式锁| RDS
-    OS ---> |缓存·分布式锁| RDS
-    US ---> |缓存| RDS
-    PS ---> |全文检索| ES
-    
-    OS -.-> |Feign 锁座·查库存| PS
-    OS -.-> |Feign 支付·退款| PAS
-    OS -.-> |Feign 查用户·购票人| US
-    OS -.-> |Feign 记录消息| CS
-    
-    PS & OS & PAS & US & BS & CS --> |持久化| DB
-    
-    GW & PS & OS & PAS & US & BS & CS -.- PG
-    PS & OS -.- BA
-```
-
-### 服务间通信矩阵
-
-| 方式 | 协议/工具 | 场景 |
-|------|-----------|------|
-| 同步调用 | OpenFeign + OkHttp | 服务间实时查询与操作 |
-| 异步消息 | Kafka | 订单创建解耦、API 审计日志 |
-| 缓存失效 | Redis Stream | 节目变更广播、本地缓存同步 |
-| 分布式锁 | Redisson | 并发下单、库存扣减原子性 |
-| 延迟调度 | Redisson Delayed Queue | 订单超时自动取消 |
-| 防缓存穿透 | 布隆过滤器 | 注册判重、节目详情保护 |
-
----
-
-## 技术栈
-
-### 后端
-
-| 分类 | 技术 | 版本 |
-|------|------|------|
-| **语言** | Java | 17 |
-| **主框架** | Spring Boot | 3.5.16 |
-| **微服务框架** | Spring Cloud | 2025.0.3 |
-| **微服务套件** | Spring Cloud Alibaba | 2025.0.0.0 |
-| **注册/配置中心** | Nacos（服务端镜像） | 2.4.0 |
-| **API 网关** | Spring Cloud Gateway | 随 Spring Cloud BOM |
-| **限流熔断** | Sentinel | 1.8.10 |
-| **ORM** | MyBatis-Plus | 3.5.7 |
-| **分库分表** | Apache ShardingSphere JDBC | 5.3.2 |
-| **缓存** | Redis 7 + Redisson | 3.52.0 |
-| **消息队列** | Kafka (KRaft 模式) | 3.6 |
-| **搜索引擎** | Elasticsearch | 8.11.0 |
-| **认证授权** | Sa-Token + JWT | 1.43.0 |
-| **支付** | 支付宝 SDK / 微信支付 APIv3 | 4.38.197.ALL / 0.2.17 |
-| **监控** | Spring Boot Admin / Prometheus / Grafana / OpenTelemetry + Jaeger（Trace） | — |
-| **API 文档** | Knife4j + SpringDoc OpenAPI 3 | 4.3.0 |
-
-### 前端
-
-| 应用 | 技术栈 |
-|------|--------|
-| **用户端** | Vue 3 + TypeScript + Vite 6 + Element Plus + Pinia + Axios |
-| **管理端 (Admin)** | Vue 3 + TypeScript + Vite 6 + Element Plus + Pinia + Tailwind CSS |
-
----
-
-## 数据库架构
-
-基于 **Apache ShardingSphere JDBC** 分库分表，共 10 个数据库实例：
-
-```mermaid
-flowchart LR
-    %% ===================== 样式定义 =====================
-    classDef noshard fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
-    classDef shard fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px,color:#1b5e20
-    classDef table fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#424242
-    classDef gene fill:#fce4ec,stroke:#c62828,stroke-width:2px,color:#b71c1c
-
-    subgraph Cluster[数据库集群 · 10 实例]
-        direction TB
-        
-        subgraph NoShard[非分片库]
-            BD[(ticketflow_base_data)]:::noshard
-            CZ[(ticketflow_customize)]:::noshard
-        end
-
-        subgraph UserShard[用户分片 · 2 库]
-            direction LR
-            U0[(ticketflow_user_0)]:::shard
-            U1[(ticketflow_user_1)]:::shard
-        end
-
-        subgraph ProgramShard[节目分片 · 2 库]
-            direction LR
-            P0[(ticketflow_program_0)]:::shard
-            P1[(ticketflow_program_1)]:::shard
-        end
-
-        subgraph OrderShard[订单分片 · 2 库 8 表]
-            direction LR
-            O0[(ticketflow_order_0<br/>d_order_0~7)]:::shard
-            O1[(ticketflow_order_1<br/>d_order_0~7)]:::shard
-        end
-
-        subgraph PayShard[支付分片 · 2 库]
-            direction LR
-            A0[(ticketflow_pay_0)]:::shard
-            A1[(ticketflow_pay_1)]:::shard
-        end
-    end
-
-    subgraph Tables[核心分片表]
-        TU[d_user · d_ticket_user<br/>d_user_email · d_user_mobile]:::table
-        TP[d_program · d_ticket_category<br/>d_seat]:::table
-        TO[d_order · d_order_ticket_user<br/>d_order_ticket_user_record]:::table
-        TA[d_pay_bill · d_refund_bill]:::table
-    end
-
-    UserShard --- TU
-    ProgramShard --- TP
-    OrderShard --- TO
-    PayShard --- TA
-
-    subgraph Algorithm[分片算法]
-        GENE[基因法路由<br/>userId 后 6 位 → orderId<br/>双维度精准定位]:::gene
-    end
-
-    TO -.-> GENE
-```
-
-| 数据库 | 分片数 | 核心表 |
-|--------|--------|--------|
-| `ticketflow_base_data` | 1 | `d_area`, `d_channel_data`, `d_program_category` |
-| `ticketflow_customize` | 1 | `d_api_data`, `d_rule`, `d_message_record` |
-| `ticketflow_user_0 / _1` | 2 | `d_user`, `d_ticket_user`, `d_user_email`, `d_user_mobile` |
-| `ticketflow_program_0 / _1` | 2 | `d_program`, `d_ticket_category`, `d_seat` |
-| `ticketflow_order_0 / _1` | 16 (8×2) | `d_order` (16 物理表), `d_order_ticket_user`, `d_order_ticket_user_record` |
-| `ticketflow_pay_0 / _1` | 2 | `d_pay_bill`, `d_refund_bill` |
-
-> **基因法分片**：订单号嵌入 userId 后 6 位作为基因，同时支持 `user_id` 和 `order_number` 维度精准路由到同一分片，避免跨库查询。
-
-> **扩容现状**：当前为 2 库 × 8 表共 16 张物理表。分片索引由分片键位运算直接得出，**不经过虚拟槽位映射层**，因此扩容需停机迁移数据（`sql/订单表进行分库分表扩容/` 下脚本已标记 deprecated）。虚拟分片在线扩缩容属待实现能力，详见文末「当前范围与已知局限」。
-
----
-
-## 自研基础组件
-
-| 组件 | 定位 | 核心能力 |
-|------|------|----------|
-| **分布式 ID 生成器** | 框架 | 融合百度 UID + 雪花算法，支持基因法订单号、RingBuffer 预缓存、Redis 自动分配 WorkerId |
-| **验证码框架** | 框架 | 滑块拼图、文字点选两种验证，Spring Bean 委托分发，Local/Redis 双缓存 |
-| **线程池框架** | 框架 | 自动透传 MDC traceId 与请求上下文，解决异步链路追踪断裂 |
-| **灰度发布框架** | 框架 | 网关层 + WebMvc 拦截器双层灰度路由 |
-| **Redis 工具框架** | 框架 | Redis Stream 广播消费、缓存工具 |
-| **Redisson 框架** | 框架 | 分布式锁注解（可重入/公平/读写）、布隆过滤器、延迟队列 |
-| **ES 框架** | 框架 | Elasticsearch 文档 CRUD 封装与查询 DTO 映射 |
-
----
-
-## 微服务清单
-
-| 服务 | 端口 | 核心职责 |
-|------|------|----------|
-| **Gateway 网关** | 6085 | 统一入口、Sentinel 限流、Sa-Token 认证、灰度路由、API 审计 |
-| **User 用户服务** | 6082 | 注册登录、购票人管理、布隆过滤器防重 |
-| **Base-Data 基础数据** | 6083 | 渠道密钥配置、地区管理、分类字典 |
-| **Program 节目服务** | 6086 | 节目 CRUD、库存管理、选座锁定、ES 搜索、Kafka 触发下单 |
-| **Order 订单服务** | 8081 | 订单全生命周期、分布式锁并发、延迟队列超时取消 |
-| **Pay 支付服务** | 6087 | 支付宝统一下单、异步回调、退款 |
-| **Customize 定制服务** | 6084 | 操作审计存储、消息可靠性保障 |
-| **Migrate 迁移服务** | 6088 | 数据迁移、CSV 导入、路由映射刷新 |
-| **Admin 监控** | 10082 | Spring Boot Admin 健康检查、JVM 监控 |
-
----
-
-## 前端功能矩阵
-
-### 用户端 — 消费者购票 SPA（vue3，22 个业务视图）
-
-```
-首页 → 节目推荐 · 分类导航
-节目详情 → 简介 · 票档选择 · 可视化选座
-下单 → 选择购票人 → 选择支付方式（无购物车环节，详情页直接下单）
-支付 → 扫码支付 · 支付成功
-订单管理 → 订单列表 · 订单详情
-个人中心 → 个人信息 · 购票人管理 · 账户设置 · 帮助
-```
-
-### 管理端 (Admin) — 运营管理后台（Vben Admin monorepo，5 个业务列表页）
-
-```
-节目管理 → 节目列表
-座位管理 → 座位列表
-订单管理 → 订单列表 · 废弃订单列表
-消息记录 → MQ 消息记录查询
+    U1 & U2 --> GW
+    GW --> PS & OS & US & BS
+    PS ==> |create_order| MQ ==> OS
+    PS & OS --> RDS
+    PS --> ES
+    OS -.-> |Feign 锁座/查库存| PS
+    OS -.-> |Feign 支付/退款| PAS
+    OS -.-> |Feign 查用户| US
+    PS & OS & PAS & US & BS & CS & MG --> DB
+    GW & PS & OS & PAS & US & BS & CS -.- OBS
 ```
 
 ---
@@ -428,244 +156,60 @@ flowchart LR
 
 ### 环境要求
 
-| 工具 | 版本要求 |
-|------|----------|
-| Java | 17+（推荐 Corretto） |
-| Maven | 3.8+ |
-| Node.js | 20+ |
-| pnpm | 9+ |
-| Docker & Docker Compose | 最新稳定版 |
-| GNU Make（可选） | 用于 `make` 快捷命令 |
-
-### 一键容器化启动（推荐）
-
-> 全部微服务与基础设施容器化运行。`make up`（等价 `./docker/build.sh`）一条命令完成
-> **宿主机 Maven 打包 → 暂存 fat-jar（按容器网络改写 ShardingSphere 地址）→ 构建镜像 → compose 启动**。
-
-```bash
-make up                  # 构建并启动整套系统
-make ps                  # 容器状态
-make logs SVC=program    # 查看某服务日志
-make down                # 停止（数据卷保留）
-```
-
-不使用 `make` 时，可直接调用脚本：
-
-```bash
-./docker/build.sh           # 打包 + 构建镜像 + 启动
-./docker/build.sh images    # 只打包 + 构建镜像，不启动
-./docker/build.sh down      # 停止
-./docker/build.sh logs order
-```
-
-- 应用镜像统一由 `docker/app/Dockerfile` 构建（`build args: SVC / PORT`），基础镜像
-  `eclipse-temurin:17-jre-jammy`，以非 root 运行。
-- 容器化的业务服务（9 个）：`gateway`、`user`、`base-data`、`customize`、`program`、`order`、`pay`、`admin`、`migrate`。
-- 支付密钥不入库：首次由 `docker/app/pay.env.example` 生成 `docker/app/pay.env`（已 gitignore），真实密钥请替换该文件。
-- Trace 可选：`./docker/otel/download-agent.sh` 下载 agent 后，compose 会挂载到容器 `/otel`。
-
-### 启动基础设施（裸机开发模式）
-
-> `docker compose` 已升级为“基础设施 + 全部业务服务”的统一编排；若只在本机 IDE 跑应用、仅把中间件放容器：
-
-```bash
-docker compose -f docker/docker-compose.yml up -d mysql redis kafka nacos elasticsearch sentinel
-```
-
-基础设施镜像与端口：
-
-| 服务 | 镜像 | 端口 | 账号/密码 |
-|------|------|------|----------|
-| **MySQL** | mysql:8.0 | 3306 | `root` / `root` |
-| **Redis 7** | redis:7 | 6379 | 无密码 |
-| **Kafka** (KRaft) | bitnami/kafka:3.6 | 9092（宿主 19092） | 无认证 |
-| **Nacos** | nacos/nacos-server:v2.4.0 | 8848 (9848) | 无认证（单机模式） |
-| **Elasticsearch** | docker.elastic.co/elasticsearch/elasticsearch:8.11.0 | 9200 (9300) | 无认证 |
-| **Sentinel** | bladex/sentinel-dashboard:1.8.8 | 8082 | `sentinel` / `sentinel` |
-| **Prometheus** | prom/prometheus:v2.53.0 | 9090 | 无认证 |
-| **Grafana** | grafana/grafana:11.0.0 | 3000 | `admin` / `admin` |
-| **Jaeger** | jaegertracing/all-in-one:1.76.0 | 16686 / 4318 | 无认证 |
-
-> 数据卷：`docker_mysql-data`、`docker_redis-data`、`docker_kafka-data`、`docker_nacos-data`、`docker_es-data`、`docker_prometheus-data`、`docker_grafana-data`。
-
-### 构建后端
-
-```bash
-make build                          # 等价 mvn -DskipTests -T 4 package
-# 全量构建（-T 4 启用 4 线程并行编译）
-mvn clean install -DskipTests -T 4
-
-# 按需构建单个服务
-mvn clean install -pl ticketflow-server/ticketflow-gateway-service -am -DskipTests
-```
-
-### 启动后端服务
-
-> 启动前需确保 `docker/mysql/client.cnf` 和 `docker/prometheus/prometheus.yml` 是**文件**而非目录（若已执行 `docker compose up` 则已就绪）。
-
-```bash
-# 在一键启动脚本中设置必要的环境变量
-export JASYPT_ENCRYPTOR_PASSWORD=ticketflow
-export KNIFE4J_PRODUCTION=false
-```
-
-按以下顺序启动（每启动一个等待几秒使其注册到 Nacos）：
-
-```bash
-SERVICES=("gateway" "base-data" "user" "program" "order" "pay" "customize" "migrate" "admin")
-
-for s in "${SERVICES[@]}"; do
-  JAR="ticketflow-server/ticketflow-$s-service/target/ticketflow-$s-service-0.0.1-SNAPSHOT.jar"
-  java -Xms256m -Xmx512m -jar "$JAR" &
-  sleep 4
-done
-```
-
-各服务注册到 Nacos 后，可在 `http://localhost:8848/nacos` 查看状态。所有服务实例就绪后，Gateway 健康检查应返回 200：
-
-```bash
-curl -s http://localhost:6085/actuator/health
-# → {"status":"UP"}
-```
-
-### 启动前端
-
-```bash
-# 用户端 (Vue 3)
-cd vue3
-pnpm install
-pnpm run dev
-# → http://localhost:5173
-
-# 管理端 (Vben Admin)
-cd ticketflow-front-manage
-pnpm install
-pnpm dev:ele
-# → http://localhost:5555
-```
-
-### 常用命令（Makefile）
-
-| 命令 | 说明 |
+| 工具 | 版本 |
 |------|------|
-| `make up` / `make images` / `make down` | 启动整套 / 只构建镜像 / 停止 |
-| `make ps` / `make logs SVC=program` / `make restart SVC=order` | 状态 / 日志 / 重启 |
-| `make build` / `make test` / `make itest` | 后端打包 / 单元测试 / 集成测试 |
-| `make front-build` | 前端构建 |
-| `make lint` / `make ci` / `make clean` | 静态门禁（编译 + Checkstyle，命中即失败）/ 本地等价 CI / 清理 |
+| Java | 17+ |
+| Maven | 3.8+ |
+| Node.js / pnpm | 20+ / 9+ |
+| Docker & Docker Compose | 最新稳定版 |
+| GNU Make（可选） | 用于快捷命令 |
 
-> `make help` 可查看全部目标。
+### 一键容器化启动
 
-### 访问入口一览
+`make up`（等价 `./docker/build.sh`）一条命令完成：宿主机 Maven 打包 → 暂存 fat-jar → 构建镜像 → compose 启动。
+
+```bash
+make up                    # 构建并启动整套系统
+make ps                    # 容器状态
+make logs SVC=program      # 查看某服务日志
+make down                  # 停止（数据卷保留）
+```
+
+- 应用镜像由 `docker/app/Dockerfile` 构建，基础镜像 `eclipse-temurin:17-jre-jammy`，非 root 运行
+- 支付密钥不入库：首次由 `docker/app/pay.env.example` 生成 `docker/app/pay.env`（已 gitignore）
+- Trace 可选：`./docker/otel/download-agent.sh` 下载 agent 后自动挂载
+- 仅本机 IDE 跑应用、中间件放容器：`docker compose -f docker/docker-compose.yml up -d mysql redis kafka nacos elasticsearch sentinel`
+- 构建后端：`make build`（等价 `mvn -DskipTests -T 4 package`）
+
+### 访问入口
 
 | 入口 | 地址 | 说明 |
 |------|------|------|
 | 用户端 | `http://localhost:5173` | Vue 3 购票前端 |
 | 管理端 | `http://localhost:5555` | Vben Admin 运营后台 |
 | API 网关 | `http://localhost:6085` | 所有后端 API 统一入口 |
-| Knife4j API 文档 | `http://localhost:6085/doc.html` | 在线调试 |
-| Nacos 控制台 | `http://localhost:8848/nacos` | 服务注册与发现 |
-| Sentinel | `http://localhost:8082` | 限流熔断控制台 |
-| Prometheus | `http://localhost:9090` | 指标采集 |
-| Grafana | `http://localhost:3000` | 监控看板 |
-| Jaeger | `http://localhost:16686` | 链路追踪（Trace） |
-| Spring Boot Admin | `http://localhost:10082` | 服务健康监控（admin/admin） |
+| Knife4j 文档 | `http://localhost:6085/doc.html` | 在线调试 |
+| Nacos | `http://localhost:8848/nacos` | 服务注册与发现 |
+| Sentinel | `http://localhost:8082` | 限流熔断（sentinel/sentinel） |
+| Grafana | `http://localhost:3000` | 监控看板（admin/admin） |
+| Jaeger | `http://localhost:16686` | 链路追踪 |
+| Spring Boot Admin | `http://localhost:10082` | 健康监控（admin/admin） |
 
 ---
 
-## API 文档
+## 技术栈
 
-系统采用 **Knife4j** 聚合各微服务的 OpenAPI 3.0 文档。
+| 分类 | 技术 |
+|------|------|
+| 语言 / 主框架 | Java 17 · Spring Boot 3.5 · Spring Cloud 2025 · Spring Cloud Alibaba 2025 |
+| 注册/配置/网关 | Nacos 2.4 · Spring Cloud Gateway · Sentinel 1.8 |
+| 数据访问 | MyBatis-Plus 3.5 · Apache ShardingSphere JDBC 5.3 |
+| 中间件 | Redis 7 + Redisson 3.52 · Kafka 3.6（KRaft）· Elasticsearch 8.11 |
+| 认证 / 支付 | Sa-Token + JWT 1.43 · 支付宝 SDK · 微信支付 APIv3 |
+| 监控 / 文档 | Prometheus + Grafana · OpenTelemetry + Jaeger · Spring Boot Admin · Knife4j |
+| 前端 | Vue 3 + TypeScript + Vite 6 + Element Plus + Pinia（用户端 / Vben Admin 管理端） |
 
-### 在线调试
-
-浏览器打开 **http://localhost:6085/doc.html** 即可查看和调试所有服务的 API。
-
-### 导入 Apifox
-
-Apifox 支持通过 URL 直接导入 OpenAPI 格式的接口文档。各服务的导入地址如下：
-
-| 服务 | 导入 URL |
-|------|---------|
-| 节目服务 | `http://127.0.0.1:6085/ticketflow/program/v3/api-docs/default` |
-| 用户服务 | `http://127.0.0.1:6085/ticketflow/user/v3/api-docs/default` |
-| 订单服务 | `http://127.0.0.1:6085/ticketflow/order/v3/api-docs/default` |
-| 基础数据 | `http://127.0.0.1:6085/ticketflow/basedata/v3/api-docs/default` |
-| 支付服务 | `http://127.0.0.1:6085/ticketflow/pay/v3/api-docs/default` |
-| 定制服务 | `http://127.0.0.1:6085/ticketflow/customize/v3/api-docs/default` |
-| 管理端 | `http://127.0.0.1:6085/ticketflow/admin/v3/api-docs/default` |
-| 迁移服务 | `http://127.0.0.1:6085/ticketflow/migrate/v3/api-docs/default` |
-
-操作步骤：
-
-1. 在 Apifox 中创建/打开项目
-2. 点击 **导入** → **OpenAPI/Swagger 格式**
-3. 选择 **URL 导入**，粘贴上述任一地址
-4. 按需调整导入选项（目标分支、接口冲突策略等），确认导入
-
-> 每个服务的 OpenAPI 地址返回标准 JSON 格式，可直接用于 Apifox、Postman、Insomnia 等工具。
-
----
-
-## 工程化与交付
-
-### 持续集成（GitHub Actions）
-
-`.github/workflows/ci.yml`，push 到 `master` 或发起 PR 时触发：
-
-| Job | 内容 |
-|-----|------|
-| **Backend unit tests** | `mvn -B test`（全部后端模块单元测试） |
-| **Integration tests (Testcontainers)** | `mvn -B verify -pl order,program -am` |
-| **Build application images** | `bash ./docker/build.sh images`（验证 Dockerfile / build.sh / patch-jar 链路） |
-| **Frontend build** | vue3 与 admin（pnpm + `--frozen-lockfile`） |
-| **Static analysis** | Checkstyle + SpotBugs（强制门禁，命中即失败；豁免见 `config/spotbugs/exclude.xml`） |
-
-本地等价校验：`make ci`、`make lint`。
-
-### 持续交付（GitHub Actions + 本地 kind）
-
-`.github/workflows/cd.yml`：测试 → 构建镜像 → Trivy 扫描 → 推送 GHCR（tag=commit SHA）→ 部署 → 发布验证（失败自动回滚）。部署以 `workflow_dispatch + K8S_DEPLOY_ENABLED` 双重开关保护。本地等价路径（已在 kind 上端到端验证）：
-
-```bash
-make scan       # 镜像漏洞扫描（Trivy, HIGH/CRITICAL）；SBOM 由 CI 产出
-make cd         # 构建 → 载入 kind → 滚动更新 → 发布验证（失败自动回滚）
-make verify     # 发布验证：rollout + 镜像 tag + gateway health/服务发现
-make rollback   # 回滚到上一版本（kubectl rollout undo）
-```
-
-> **镜像归属**：`k8s/` 清单里的 `image:` 只是 bootstrap / 本地默认值；运行时镜像由 CD 用 `kubectl set image`（tag=commit SHA）**独占管理**，回滚用 `kubectl rollout undo`。回滚是命令式操作，不会更新 `last-applied-configuration` 注解，因此**不要再对已部署对象执行 `kubectl apply -k` 覆盖**（如需声明式管理镜像，改用 `kustomize edit set image` + apply，或接入 GitOps）。
-
-同时提供等价的 `Jenkinsfile`（Checkout → Test → Static analysis → Build → Scan → Push → Deploy → Verify）。
-
-### 云原生部署（K8s）
-
-`k8s/` 提供 gateway / order / program 三服务的 Kustomize 清单（Deployment / Service / Ingress / HPA，三分 Probe、资源限额、ConfigMap / Secret 模板）：
-
-```bash
-kind create cluster --name ticketflow
-bash ./docker/build.sh images
-kind load docker-image ticketflow/program:0.0.1-SNAPSHOT --name ticketflow
-kubectl apply -k k8s/overlays/dev
-```
-
-### 效能工具 tfctl
-
-`tools/tfctl/tfctl.py`（零依赖 Python）聚合 Prometheus / Kafka / Maven / benchmark 数据源：
-
-```bash
-make tfctl ARGS=diag    # 下单链路体检（存活/建单/扣减/端到端落库率/库存守恒）
-make tfctl ARGS=lag     # Kafka 消费积压
-make tfctl ARGS=deps    # 依赖冲突/重复
-```
-
-### 可观测性
-
-- **指标**：Micrometer → Prometheus → Grafana（provisioning as code）
-- **链路**：OpenTelemetry Java Agent → Jaeger（声明式配置丢弃 `/actuator/*` 噪音 span）
-- **日志**：Loki + Promtail（采集宿主机挂载的应用日志，traceId 可跳转 Jaeger）
-- **告警**：Prometheus 规则（SLO 分级 P0/P1/P2）→ Alertmanager → webhook
-- 本地验证：`make sink` 另开终端 + `make alert-test` 可跑通告警闭环
+**自研框架**（`ticketflow-*-framework/`）：分布式 ID 生成器（雪花 + 基因法）、验证码、线程池上下文透传、灰度发布、Redis 工具、Redisson 封装、Elasticsearch 集成。
 
 ---
 
@@ -673,79 +217,16 @@ make tfctl ARGS=deps    # 依赖冲突/重复
 
 ```
 ticketflow/
-├── ticketflow-common/                         # 共享基础库
-├── ticketflow-server/                         # 后端微服务
-│   ├── ticketflow-gateway-service/            # API 网关
-│   ├── ticketflow-user-service/               # 用户服务
-│   ├── ticketflow-base-data-service/          # 基础数据
-│   ├── ticketflow-program-service/            # 节目服务
-│   ├── ticketflow-order-service/              # 订单服务
-│   ├── ticketflow-pay-service/                # 支付服务
-│   ├── ticketflow-customize-service/          # 定制服务
-│   ├── ticketflow-admin-service/              # 监控服务
-│   ├── ticketflow-migrate-service/            # 迁移服务
-│   └── ticketflow-mybatis-plus-service/       # MyBatis-Plus 代码生成工具
-├── ticketflow-server-client/                  # Feign API 接口
-├── ticketflow-spring-cloud-framework/         # Spring Cloud 公共框架
-├── ticketflow-redis-tool-framework/           # Redis 工具
-├── ticketflow-redisson-framework/             # Redisson 封装
-├── ticketflow-id-generator-framework/         # 分布式 ID 生成器
-├── ticketflow-elasticsearch-framework/        # ES 集成
-├── ticketflow-thread-pool-framework/          # 线程池透传
-├── ticketflow-captcha-manage-framework/       # 验证码框架
-├── sql/                                       # 数据库 DDL
-├── docker/                                    # Compose 编排 + 统一 Dockerfile + OTel 接入
-├── Makefile                                   # 常用命令（构建 / 测试 / 容器）
-├── .github/workflows/                         # GitHub Actions CI/CD
-├── vue3/                                      # 用户端前端
-├── ticketflow-front-manage/                   # 管理端前端
-└── benchmark/                                 # 压测
+├── ticketflow-common/                    # 共享基础库
+├── ticketflow-server/                    # 后端微服务（gateway/user/base-data/program/order/pay/customize/admin/migrate）
+├── ticketflow-server-client/             # Feign API 接口
+├── ticketflow-*-framework/               # 自研框架（Spring Cloud / Redis / Redisson / ID / ES / 线程池 / 验证码）
+├── sql/                                  # 数据库 DDL
+├── docker/                               # Compose 编排 + 统一 Dockerfile + OTel 接入
+├── k8s/                                  # Kustomize 清单
+├── Makefile                              # 常用命令
+├── .github/workflows/                    # GitHub Actions CI/CD
+├── vue3/                                 # 用户端前端
+├── ticketflow-front-manage/              # 管理端前端
+└── benchmark/                            # 压测
 ```
-
----
-
-## 架构决策
-
-| 决策项 | 方案 | 考虑 |
-|--------|------|------|
-| 分库分表 | ShardingSphere JDBC | 与应用深度集成，无额外部署，支持基因法自定义分片算法 |
-| 异步下单 | Kafka | 削峰填谷，解耦节目服务与订单服务 |
-| 分布式锁 | Redisson | 看门狗自动续期避免死锁，多锁模型满足不同场景 |
-| 超时取消 | 延迟队列 + 定时兜底（双轨） | 主轨为 Redisson 延迟队列实时关单；第二轨 `UnpaidOrderCancelTask` 兜底，扫描窗口由 `ProgramOrderConstant` 派生（失效时长 + 1 分钟容差），避免延迟队列消息丢失导致库存僵尸占用 |
-| 分布式事务 | 最终一致性 + 补偿 | 避免 Seata 带来的性能开销，延迟队列兜底 |
-| ID 生成 | 雪花算法 + 基因法 | 全局唯一 + 单调递增 + 天然支持分片路由 |
-| 可观测性 | Prometheus + Grafana + OpenTelemetry（OTLP→Jaeger） | 指标采集、可视化监控、全链路 Trace；Spring Boot Admin 客户端尚未接入注册地址，详见文末「当前范围与已知局限」 |
-
----
-
-## 当前范围与已知局限
-
-本节记录**当前代码的真实边界**，用于避免文档与实现脱节。
-
-### 已实现但此前文档漏写
-
-- **支付双通道**：支付宝（`AlipayStrategyHandler`）与微信支付 APIv3 Native（`WxPayStrategyHandler`）均已实现。微信侧含回调时间戳新鲜度校验、nonce 防重放（Redis 分布式去重 + 本地内存降级）、AES-GCM 解密验签、金额 / AppId / MchId 三方核对；退款结果由 `RefundCheckTask` 轮询兜底（未订阅退款通知）。
-- **订单超时双轨保障**：主轨为 Redisson 延迟队列，第二轨为 `UnpaidOrderCancelTask` 定时兜底；扫描窗口由 `ProgramOrderConstant` 派生，保证两轨口径一致。
-
-### 未实现 / 覆盖不足
-
-| 能力 | 现状 | 说明 |
-|------|------|------|
-| 购物车 | 未实现 | 下单流程为「详情页 → 选座 → 购票人 → 支付方式」，无购物车环节 |
-| 管理端仪表盘 | 未实现 | 仅 4 个路由模块、5 个列表页，无运营数据概览 |
-| 管理端基础数据页 | 接口层就绪、视图缺失 | `api/base-data`、`api/customize` 已定义但无视图引用 |
-| 座位图可视化编辑 | 未实现 | 管理端仅提供座位列表查询 |
-| 订单退款处理页 | 未实现 | 退款由后端取消链路与定时对账驱动，管理端无操作入口 |
-| 虚拟分片在线扩缩容 | 未实现 | 分片索引为纯位运算，扩容需停机迁移 |
-| K8s 清单覆盖面 | 3 / 9 服务 | 仅 gateway、order、program（含 HPA）；其余 6 个服务无清单 |
-| 集成测试覆盖面 | 2 / 9 服务 | Testcontainers IT 仅 order、program；`ticketflow-server-client` 148 个文件仅 1 个契约测试 |
-| Spring Boot Admin 客户端接入 | 未生效 | 7 个服务引入了 `spring-boot-admin-starter-client`，但未配置 `spring.boot.admin.client.url`，实例不会注册到 Admin 服务端；且客户端版本 2.3.1 与服务端 3.3.0 跨大版本不匹配 |
-
-### 工程质量基线（本地实测）
-
-- `mvn -o -B test`：44 个模块 BUILD SUCCESS，**542 个单元测试 0 失败 0 错误**。
-- `mvn -o -B checkstyle:check`：45 个模块 **0 违规**（强制门禁，命中即失败）。
-- `mvn -o -B -DskipTests compile spotbugs:check`：**0 BugInstance**（High 阈值强制门禁）。
-- 压测结果原始数据不入库，需本地复跑 `benchmark/scripts/run-single.sh` 生成。
-
-
