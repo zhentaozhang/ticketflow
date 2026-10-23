@@ -36,6 +36,7 @@ vue3/components.d.ts
 .omc/
 .playwright-mcp/
 .opencode/
+.archify/
 
 ### Docs / Markdown ###
 # 项目约定：Markdown 不入库（学习/设计/说明文档一律留本地），仅保留 README 作为项目说明。
