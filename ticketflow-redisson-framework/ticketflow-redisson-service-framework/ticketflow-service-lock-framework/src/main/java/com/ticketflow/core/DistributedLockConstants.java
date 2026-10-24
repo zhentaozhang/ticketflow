@@ -136,4 +136,9 @@ public class DistributedLockConstants {
      * 节目数据同步任务（事务外 outbox 重试，多实例互斥）
      * */
     public final static String ORDER_PROGRAM_SYNC_TASK_LOCK = "d_order_program_sync_task_lock";
+
+    /**
+     * 未支付账单主动查单任务（多实例互斥）
+     * */
+    public final static String PAY_BILL_RECONCILE_TASK_LOCK = "d_pay_bill_reconcile_task_lock";
 }

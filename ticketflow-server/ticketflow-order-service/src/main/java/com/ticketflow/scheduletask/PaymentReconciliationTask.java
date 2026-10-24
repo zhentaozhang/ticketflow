@@ -53,7 +53,10 @@ import static com.ticketflow.core.DistributedLockConstants.PAYMENT_RECONCILE_TAS
 public class PaymentReconciliationTask {
 
     /**
-     * 只核对这个时间窗内被取消的订单。再早的靠人工/离线对账，不在在线任务的职责范围内。
+     * 新鲜窗：取消不足 30 分钟的订单优先核对（离"钱可能正在到账"最近）。
+     * <p>
+     * 窗口本身不再是"职责边界"——窗口外的存量由 {@link #reconcileBacklogCancelledOrders()} 持续补扫，
+     * 否则一笔订单只要在取消后 30 分钟内没被扫到，就永久没人再核对它。
      */
     private static final int SCAN_WINDOW_MINUTES = 30;
 
@@ -146,14 +149,21 @@ public class PaymentReconciliationTask {
     }
 
     private void reconcile() {
-        reconcileUnpaidCancelledOrders();
+        // 新鲜窗优先：刚取消的订单离"钱可能正在到账"最近，晚一轮就是资损。
+        boolean freshDrained = reconcileRecentCancelledOrders();
+        // 新鲜窗排空了才往后推进存量。没排空还去啃存量，只会让新取消的订单排队更久。
+        if (freshDrained) {
+            reconcileBacklogCancelledOrders();
+        }
         retryUnconfirmedRefunds();
     }
 
     /**
-     * 第一段：最近取消、且还没做过支付对账的订单，逐笔向渠道确认真实结果。
+     * 第一段 A：最近取消、且还没做过支付对账的订单，逐笔向渠道确认真实结果。
+     *
+     * @return 新鲜窗是否已排空（本轮没扫满一批）。没排空说明系统正跟不上，本轮不再往后推进存量。
      */
-    private void reconcileUnpaidCancelledOrders() {
+    private boolean reconcileRecentCancelledOrders() {
         List<Order> candidates = orderMapper.selectList(Wrappers.lambdaQuery(Order.class)
                 .eq(Order::getOrderStatus, OrderStatus.CANCEL.getCode())
                 .eq(Order::getPayReconciliationStatus, ReconciliationStatus.RECONCILIATION_NO.getCode())
@@ -161,8 +171,50 @@ public class PaymentReconciliationTask {
                 .orderByAsc(Order::getCancelOrderTime)
                 .last("limit " + BATCH_SIZE));
         if (Objects.isNull(candidates) || candidates.isEmpty()) {
+            return true;
+        }
+        processCandidates(candidates, "");
+        return candidates.size() < BATCH_SIZE;
+    }
+
+    /**
+     * 第一段 B：窗口外的存量（取消时间早于 30 分钟的未对账订单），每轮补一批。
+     * <p>
+     * <b>为什么必须有这一段</b>：只扫固定窗口等于「过了窗口就永久不再核对」。
+     * 一笔订单若在取消后的 30 分钟内恰好没被扫到（渠道查不到、任务在重启、流量把批次挤满），
+     * 就再也不会有人来核对它——钱收了、单取消了、没人发现，正好是最坏的那种差异。
+     * <p>
+     * 这段让候选集按「取消时间升序」持续被消费：核对出结果就标记对账完成、离开候选集，
+     * 等价于一个不断向前推进的游标，且不需要额外存游标状态（进度就在订单表里）。
+     * <p>
+     * 代价要说清楚：一直核对失败（例如渠道长期不可用）的那批订单会占住队头，
+     * 让存量推进停滞。这是刻意选择——它们正是最需要被反复核对的对象，
+     * 与其静默跳过，不如积压暴露出来（见下面的 warn）。
+     */
+    private void reconcileBacklogCancelledOrders() {
+        List<Order> candidates = orderMapper.selectList(Wrappers.lambdaQuery(Order.class)
+                .eq(Order::getOrderStatus, OrderStatus.CANCEL.getCode())
+                .eq(Order::getPayReconciliationStatus, ReconciliationStatus.RECONCILIATION_NO.getCode())
+                .lt(Order::getCancelOrderTime, DateUtils.addMinute(DateUtils.now(), -SCAN_WINDOW_MINUTES))
+                .orderByAsc(Order::getCancelOrderTime)
+                .last("limit " + BATCH_SIZE));
+        if (Objects.isNull(candidates) || candidates.isEmpty()) {
             return;
         }
+        processCandidates(candidates, "backlog_");
+        if (candidates.size() >= BATCH_SIZE) {
+            log.warn("支付对账存量未排空：本轮又核对了一批 {} 笔窗口外的取消订单，仍有积压。"
+                    + "请检查渠道查询是否持续失败，或下调单轮批量/缩短扫描周期", BATCH_SIZE);
+        }
+    }
+
+    /**
+     * 逐笔核对一批订单：查渠道 → 有结论的标记对账完成 → 计数打点。
+     *
+     * @param metricPrefix 指标前缀（存量批次用 {@code backlog_} 区分，免得看板上分不清是新鲜窗还是补扫）
+     * @return 其中被判定「渠道已支付、已退款」的笔数
+     */
+    private int processCandidates(List<Order> candidates, String metricPrefix) {
         int refunded = 0;
         for (Order order : candidates) {
             try {
@@ -175,7 +227,7 @@ public class PaymentReconciliationTask {
                     refunded++;
                 }
                 BusinessMetrics.increment(meterRegistry, Metrics.PAYMENT_RECONCILE_TOTAL,
-                        Metrics.RESULT, result.name().toLowerCase());
+                        Metrics.RESULT, metricPrefix + result.name().toLowerCase());
             } catch (Exception e) {
                 // 单笔异常不影响后面的订单；不标记对账完成，下一轮会重试
                 log.error("支付对账单笔核对异常 orderNumber : {}", order.getOrderNumber(), e);
@@ -187,6 +239,7 @@ public class PaymentReconciliationTask {
             // 出现"渠道已支付但本地已取消"说明回调在丢，这是要叫人的信号
             log.warn("支付对账本轮发现 {} 笔“渠道已支付但本地已取消”的订单，已退款。回调可能存在丢失", refunded);
         }
+        return refunded;
     }
 
     /**

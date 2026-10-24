@@ -167,4 +167,37 @@ public final class Metrics {
      * 不能只留一行日志。
      */
     public static final String PAY_REFUND_CHECK_TOTAL = "ticketflow_pay_refund_check_total";
+
+    /* ==================== 未支付账单主动查单（pay-service，每 2 分钟） ==================== */
+
+    /**
+     * 「账单还是未支付」时主动问渠道的结果总数（{@code PayBillReconcileTask}），tags：{@link #RESULT}。
+     * <p>
+     * 背景：支付成功的实时链路只有「渠道回调」一条。回调丢了以后，账单会永远停在未支付，
+     * 用户却已经付钱——只能靠主动查单发现并补状态。
+     * 取值：
+     * <ul>
+     *   <li>{@link #RESULT_PAID}：渠道确认已支付、账单已补成已支付，<b>这个数字就是「回调丢了」的量</b>；</li>
+     *   <li>{@link #RESULT_CLOSED}：渠道侧交易已关闭（超时未支付），本地账单同步置已取消；</li>
+     *   <li>{@link #RESULT_UNPAID}：渠道侧仍是待支付，正常；</li>
+     *   <li>{@link #RESULT_QUERY_FAILED}：查渠道失败/查不到单，下轮再查；</li>
+     *   <li>{@link #RESULT_AMOUNT_MISMATCH}：渠道已支付但金额与账单不一致，<b>要叫人</b>
+     *       （不能改状态：金额是后续退款与对账的依据）；</li>
+     *   <li>{@link #RESULT_CONCURRENT}：条件更新 0 行，已被回调或其它实例先改掉；</li>
+     *   <li>{@link #RESULT_SKIPPED} / {@link #RESULT_ERROR}。</li>
+     * </ul>
+     */
+    public static final String PAY_BILL_RECONCILE_TOTAL = "ticketflow_pay_bill_reconcile_total";
+    /** 渠道确认已支付、本地账单补正为已支付（回调丢失的证据） */
+    public static final String RESULT_PAID = "paid";
+    /** 渠道侧交易已关闭，账单同步置已取消 */
+    public static final String RESULT_CLOSED = "closed";
+    /** 渠道侧仍是待支付（正常情况下就是这个） */
+    public static final String RESULT_UNPAID = "unpaid";
+    /** 查渠道失败/查不到单 */
+    public static final String RESULT_QUERY_FAILED = "query_failed";
+    /** 渠道已支付但金额与本地账单不一致（不能自动改状态） */
+    public static final String RESULT_AMOUNT_MISMATCH = "amount_mismatch";
+    /** 条件更新 0 行，已被回调/其它实例抢先 */
+    public static final String RESULT_CONCURRENT = "concurrent";
 }
