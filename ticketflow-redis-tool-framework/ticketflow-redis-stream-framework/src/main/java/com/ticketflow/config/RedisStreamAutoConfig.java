@@ -80,8 +80,16 @@ public class RedisStreamAutoConfig {
                     StreamOffset.create(redisStreamConfigProperties.getStreamName(), ReadOffset.lastConsumed()),
                     redisStreamListener);
         } else {
-            // 广播模式（本项目用这个！）：每个节点仅需监听自启动时刻之后的增量失效事件
-            container.receive(StreamOffset.latest(redisStreamConfigProperties.getStreamName()), redisStreamListener);
+            // 广播模式（本项目用这个）：没有消费组，每个节点各读各的。
+            // 必须从 stream 开头读，而不是从 latest 读：
+            //   - 从 latest 读 = 本节点启动之前发出的失效通知永远收不到。节目缓存/本地缓存的
+            //     失效通知是「删键」语义，节点重启、滚动发布、或短暂断连期间的修改，
+            //     在 latest 模式下会一直留在该节点的本地缓存里，直到 TTL 兜底过期。
+            //   - 从开头读 = 启动时把 stream 里还留着的消息重放一遍，读完后容器自己记住
+            //     lastRecordId 继续按增量读，不会每轮都从头来。
+            // 重放是安全的：失效消费者是「删除本地 key」，重放多少次结果都一样（幂等）。
+            // 重放量由 RedisStreamPushHandler.STREAM_MAX_LENGTH 封顶（近似裁剪）。
+            container.receive(StreamOffset.fromStart(redisStreamConfigProperties.getStreamName()), redisStreamListener);
         }
         container.start();
         return container;
