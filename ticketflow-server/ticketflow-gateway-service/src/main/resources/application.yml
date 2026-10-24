@@ -102,7 +102,9 @@ management:
   endpoints:
     web:
       exposure:
-        include: '*'
+        # 网关端口对公网开放，actuator 只留探活与指标：
+        # env/beans/heapdump/threaddump/configprops 这类端点会泄露环境变量与 JVM 内部信息
+        include: health,info,prometheus
   health:
     elasticsearch:
       enabled: false

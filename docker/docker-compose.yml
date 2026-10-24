@@ -85,7 +85,8 @@ services:
     image: mysql:8.0
     container_name: ticketflow-mysql
     ports:
-      - "3306:3306"
+      # 只绑回环：基础设施端口不对局域网暴露，避免绕过网关直连 DB/缓存
+      - "127.0.0.1:3306:3306"
     volumes:
       # 数据持久化（首次启动为空时自动初始化，非空则跳过 init 脚本）
       - mysql-data:/var/lib/mysql
@@ -112,7 +113,8 @@ services:
     image: redis:7
     container_name: ticketflow-redis
     ports:
-      - "6379:6379"
+      # 只绑回环：Redis 已有 requirepass，再收口到本机
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     environment:
@@ -149,7 +151,7 @@ services:
     image: bitnami/kafka:3.6
     container_name: ticketflow-kafka
     ports:
-      - "19092:19092"
+      - "127.0.0.1:19092:19092"
     volumes:
       - kafka-data:/bitnami/kafka
     environment:
@@ -182,8 +184,8 @@ services:
     image: nacos/nacos-server:v2.4.0
     container_name: ticketflow-nacos
     ports:
-      - "8848:8848"
-      - "9848:9848"
+      - "127.0.0.1:8848:8848"
+      - "127.0.0.1:9848:9848"
     volumes:
       - nacos-data:/home/nacos/data
     environment:
@@ -205,8 +207,8 @@ services:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: ticketflow-es
     ports:
-      - "9200:9200"
-      - "9300:9300"
+      - "127.0.0.1:9200:9200"
+      - "127.0.0.1:9300:9300"
     volumes:
       - es-data:/usr/share/elasticsearch/data
     environment:
@@ -220,7 +222,7 @@ services:
     image: bladex/sentinel-dashboard:1.8.8
     container_name: ticketflow-sentinel
     ports:
-      - "8082:8858"
+      - "127.0.0.1:8082:8858"
     environment:
       SENTINEL_AUTH_USER: sentinel
       SENTINEL_AUTH_PASSWORD: sentinel
@@ -231,7 +233,7 @@ services:
     image: prom/prometheus:v2.53.0
     container_name: ticketflow-prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - prometheus-data:/prometheus
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -245,7 +247,7 @@ services:
     image: grafana/grafana:11.0.0
     container_name: ticketflow-grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - grafana-data:/var/lib/grafana
       # provisioning：datasource/dashboard 以代码形式纳管（observability-as-code）
@@ -262,9 +264,9 @@ services:
     image: jaegertracing/all-in-one:1.76.0
     container_name: ticketflow-jaeger
     ports:
-      - "16686:16686"   # Jaeger UI（http://localhost:16686）
-      - "4317:4317"     # OTLP gRPC
-      - "4318:4318"     # OTLP HTTP（各服务上报入口）
+      - "127.0.0.1:16686:16686"   # Jaeger UI（http://localhost:16686）
+      - "127.0.0.1:4317:4317"     # OTLP gRPC
+      - "127.0.0.1:4318:4318"     # OTLP HTTP（各服务上报入口）
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
       TZ: Asia/Shanghai
@@ -276,7 +278,7 @@ services:
     image: prom/alertmanager:v0.27.0
     container_name: ticketflow-alertmanager
     ports:
-      - "9093:9093"   # Alertmanager UI（http://localhost:9093）
+      - "127.0.0.1:9093:9093"   # Alertmanager UI（http://localhost:9093）
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - alertmanager-data:/alertmanager
@@ -292,7 +294,7 @@ services:
     image: grafana/loki:2.9.8
     container_name: ticketflow-loki
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     volumes:
       - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro
       - loki-data:/loki
@@ -322,6 +324,8 @@ services:
       args:
         SVC: gateway
         PORT: "6085"
+    # 唯一对外发布的应用端口：其余服务只在 compose 网络内可达，
+    # 且下游都装有 InternalTokenFilter——即使端口被误映射出去，直连也调不通业务接口。
     ports:
       - "6085:6085"
     environment:
@@ -357,8 +361,7 @@ services:
       args:
         SVC: user
         PORT: "6082"
-    ports:
-      - "6082:6082"
+    # 不发布端口：只有网关是可对外入口；直连本服务会被 InternalTokenFilter 拒绝（见下方 gateway 注释）
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: user
@@ -387,8 +390,7 @@ services:
       args:
         SVC: base-data
         PORT: "6083"
-    ports:
-      - "6083:6083"
+    # 不发布端口：私钥类接口只能经网关/内部 Feign 携带 internalToken 调用
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: base-data
@@ -417,8 +419,7 @@ services:
       args:
         SVC: customize
         PORT: "6084"
-    ports:
-      - "6084:6084"
+    # 不发布端口：只有网关是可对外入口
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: customize
@@ -448,8 +449,7 @@ services:
       args:
         SVC: program
         PORT: "6086"
-    ports:
-      - "6086:6086"
+    # 不发布端口：/program/interior/** 与 /program/record/task/** 不允许外部直连
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: program
@@ -481,8 +481,7 @@ services:
       args:
         SVC: order
         PORT: "8081"
-    ports:
-      - "8081:8081"
+    # 不发布端口：只有网关是可对外入口
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: order
@@ -514,8 +513,7 @@ services:
       args:
         SVC: pay
         PORT: "6087"
-    ports:
-      - "6087:6087"
+    # 不发布端口：支付回调等敏感入口只经网关/渠道校验
     # 支付宝密钥属敏感信息，不写入 compose：
     # 由 docker/app/pay.env 注入（首次由 Makefile 从 pay.env.example 生成，该文件已 gitignore）。
     env_file:
@@ -549,8 +547,7 @@ services:
       args:
         SVC: admin
         PORT: "10082"
-    ports:
-      - "10082:10082"
+    # 不发布端口：管理端经网关聚合，Basic Auth 不再作为唯一防线
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: admin
@@ -576,8 +573,7 @@ services:
       args:
         SVC: migrate
         PORT: "6088"
-    ports:
-      - "6088:6088"
+    # 不发布端口：数据迁移任务只允许从集群内部触发
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: migrate

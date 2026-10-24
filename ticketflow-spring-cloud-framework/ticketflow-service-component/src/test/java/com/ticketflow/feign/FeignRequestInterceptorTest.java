@@ -12,8 +12,10 @@ import java.util.Collection;
 
 import static com.ticketflow.constant.Constant.CODE;
 import static com.ticketflow.constant.Constant.GRAY_PARAMETER;
+import static com.ticketflow.constant.Constant.INTERNAL_TOKEN;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -27,7 +29,7 @@ class FeignRequestInterceptorTest {
 
     @Test
     void applyShouldSkipWhenNoRequestAttributes() {
-        FeignRequestInterceptor interceptor = new FeignRequestInterceptor("false");
+        FeignRequestInterceptor interceptor = new FeignRequestInterceptor("false", "");
         RequestTemplate template = new RequestTemplate();
 
         assertDoesNotThrow(() -> interceptor.apply(template));
@@ -40,7 +42,7 @@ class FeignRequestInterceptorTest {
         when(request.getHeader(CODE)).thenReturn("2");
         when(request.getHeader(GRAY_PARAMETER)).thenReturn("true");
         RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
-        FeignRequestInterceptor interceptor = new FeignRequestInterceptor("false");
+        FeignRequestInterceptor interceptor = new FeignRequestInterceptor("false", "");
         RequestTemplate template = new RequestTemplate();
 
         interceptor.apply(template);
@@ -55,7 +57,7 @@ class FeignRequestInterceptorTest {
         when(request.getHeader(CODE)).thenReturn("2");
         when(request.getHeader(GRAY_PARAMETER)).thenReturn(null);
         RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
-        FeignRequestInterceptor interceptor = new FeignRequestInterceptor("true");
+        FeignRequestInterceptor interceptor = new FeignRequestInterceptor("true", "");
         RequestTemplate template = new RequestTemplate();
 
         interceptor.apply(template);
@@ -66,11 +68,32 @@ class FeignRequestInterceptorTest {
     @Test
     void applyShouldSwallowExceptionWhenAttributesNotServlet() {
         RequestContextHolder.setRequestAttributes(mock(RequestAttributes.class));
-        FeignRequestInterceptor interceptor = new FeignRequestInterceptor("false");
+        FeignRequestInterceptor interceptor = new FeignRequestInterceptor("false", "");
         RequestTemplate template = new RequestTemplate();
 
         assertDoesNotThrow(() -> interceptor.apply(template));
         assertTrue(template.headers().isEmpty());
+    }
+
+    @Test
+    void applyShouldCarryInternalTokenEvenWithoutRequestAttributes() {
+        // 定时任务/异步线程没有 RequestContextHolder，但服务间调用依然必须带内部令牌
+        FeignRequestInterceptor interceptor = new FeignRequestInterceptor("false", "unit-token");
+        RequestTemplate template = new RequestTemplate();
+
+        interceptor.apply(template);
+
+        assertEquals(headerValue(template, INTERNAL_TOKEN), "unit-token");
+    }
+
+    @Test
+    void applyShouldSkipInternalTokenWhenNotConfigured() {
+        FeignRequestInterceptor interceptor = new FeignRequestInterceptor("false", "");
+        RequestTemplate template = new RequestTemplate();
+
+        interceptor.apply(template);
+
+        assertNull(headerValue(template, INTERNAL_TOKEN));
     }
 
     private String headerValue(RequestTemplate template, String name) {

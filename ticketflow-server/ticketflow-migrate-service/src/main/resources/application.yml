@@ -121,3 +121,11 @@ knife4j:
     language: zh_cn
     enable-version: true
     enable-swagger-models: true
+
+# 下游服务内部令牌：网关转发与 Feign 调用都会带 internalToken 头，
+# 缺失或不一致时 InternalTokenFilter 直接 403（fail closed）——
+# 即使服务端口被直接暴露（compose/NodePort/内网横向），也无法绕过网关调用内部接口。
+# 必须与网关 / user-service / base-data 的 INTERNAL_TOKEN 保持一致。
+ticketflow:
+  internal:
+    token: ${INTERNAL_TOKEN:ticketflow-dev-internal-token}

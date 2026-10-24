@@ -194,6 +194,16 @@ make down                  # 停止（数据卷保留）
 > 公开接口 `/channel/data/getByCode` 只返回公钥级别的 `ChannelDataPublicVo`；`/add`、`/approve`、`/test` 同样是内部接口，
 > 需要请求头 `internalToken`，其值由 `INTERNAL_TOKEN` 注入，**网关 / user-service / base-data 必须一致**；
 > base-data 未配置令牌时会对所有内部接口 fail-closed（拒绝）。新渠道登记后状态为"待审核"，调用 `/channel/data/approve` 才启用。
+>
+> **网络收口**：网关（6085）是唯一对外发布的应用端口，compose 里 user/base-data/customize/program/order/pay/admin/migrate
+> 的端口发布都已收回，基础设施端口（mysql/redis/kafka/nacos/es/sentinel/prometheus/grafana/jaeger/loki）全部绑回环地址。
+> 下游服务统一挂 `InternalTokenFilter`：请求头 `internalToken` 必须等于服务端 `ticketflow.internal.token`（由 `INTERNAL_TOKEN` 注入，
+> **网关与全部 7 个下游服务必须一致**），缺失或不一致返回 `403 {"code":520}`，未配置时 fail-closed。
+> 网关的 `InternalAccessFilter` 会剥掉客户端自带的 `internalToken` 再注入服务端令牌，并对 `/program/interior/`、
+> `/program/record/task/`、`/channel/data/`、`/message/record/` 直接返回 404；服务间 Feign 调用自动携带令牌（含定时任务线程）。
+> `/actuator/{health,info,prometheus}` 与接口文档路径不校验令牌，供探活、监控直抓与 knife4j 聚合使用；
+> 网关侧 `management.endpoints.web.exposure.include` 已收窄为 `health,info,prometheus`。
+> **上线必须同步**：三方支付回调地址（`notifyUrl`）要指向网关路由 `/ticketflow/pay/pay/notify`，否则回调不可达。
 
 ### 访问入口
 
