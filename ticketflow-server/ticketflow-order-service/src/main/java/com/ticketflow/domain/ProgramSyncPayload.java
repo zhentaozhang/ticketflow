@@ -3,8 +3,6 @@ package com.ticketflow.domain;
 import com.ticketflow.dto.TicketCategoryCountDto;
 import lombok.Data;
 
-import java.io.Serial;
-import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -23,10 +21,7 @@ import java.util.Map;
  * </ul>
  */
 @Data
-public class ProgramSyncPayload implements Serializable {
-
-    @Serial
-    private static final long serialVersionUID = 1L;
+public class ProgramSyncPayload {
 
     /** 节目 id */
     private Long programId;
