@@ -72,6 +72,9 @@ class UserServiceTest {
     private RedisCache redisCache;
 
     @Mock
+    private com.ticketflow.redis.session.UserSessionStore userSessionStore;
+
+    @Mock
     private TicketUserMapper ticketUserMapper;
 
     @Mock
@@ -111,6 +114,7 @@ class UserServiceTest {
         ReflectionTestUtils.setField(userService, "userEmailMapper", userEmailMapper);
         ReflectionTestUtils.setField(userService, "uidGenerator", uidGenerator);
         ReflectionTestUtils.setField(userService, "redisCache", redisCache);
+        ReflectionTestUtils.setField(userService, "userSessionStore", userSessionStore);
         ReflectionTestUtils.setField(userService, "ticketUserMapper", ticketUserMapper);
         ReflectionTestUtils.setField(userService, "bloomFilterHandler", bloomFilterHandler);
         ReflectionTestUtils.setField(userService, "compositeContainer", compositeContainer);
@@ -247,7 +251,8 @@ class UserServiceTest {
         UserLoginVo result = userService.login(dto);
 
         assertEquals(100L, result.getUserId());
-        verify(redisCache).set(any(), org.mockito.Mockito.argThat(u -> u instanceof User cached && java.util.Objects.equals(cached.getId(), 100L) && cached.getPassword() == null), eq(40L), eq(TimeUnit.MINUTES));
+        // 会话改由 UserSessionStore 写入（外层带 HMAC 签名），负载仍是脱敏后的 User
+        verify(userSessionStore).save(eq("2"), eq(100L), org.mockito.Mockito.argThat(u -> u instanceof User cached && java.util.Objects.equals(cached.getId(), 100L) && cached.getPassword() == null), eq(40L), eq(TimeUnit.MINUTES));
         String userId = JSONObject.parseObject(TokenUtil.parseToken(result.getToken(), SECRET)).getString("userId");
         assertEquals("100", userId);
     }
@@ -290,7 +295,8 @@ class UserServiceTest {
         boolean result = userService.logout(dto);
 
         assertTrue(result);
-        verify(redisCache).del(any(com.ticketflow.redis.RedisKeyBuild.class));
+        // 登出走 UserSessionStore.invalidate，保证 key 构造只有一处
+        verify(userSessionStore).invalidate("2", 100L);
     }
 
     @Test

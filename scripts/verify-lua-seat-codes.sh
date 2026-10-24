@@ -18,12 +18,14 @@ set -euo pipefail
 
 REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
 REDIS_PORT="${REDIS_PORT:-6379}"
+# Redis 认证口令：与 docker/docker-compose.yml 中 redis 的 requirepass 保持一致（生产用环境变量覆盖）
+REDIS_PASSWORD="${REDIS_PASSWORD:-ticketflow}"
 SCRIPT="${SCRIPT:-ticketflow-server/ticketflow-program-service/src/main/resources/lua/programDataCreateOrderResolution.lua}"
 
 PID=999999
 TID=200
 SEAT=3000
-R="redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT}"
+R="redis-cli -h ${REDIS_HOST} -p ${REDIS_PORT} -a ${REDIS_PASSWORD} --no-auth-warning"
 
 REMAIN_KEY="tflow_luacheck_remain"
 NO_SOLD_KEY="tflow_luacheck_no_sold_${PID}_${TID}"

@@ -4,7 +4,11 @@ import com.ticketflow.dto.UserUpdatePasswordDto;
 import com.ticketflow.entity.User;
 import com.ticketflow.enums.BaseCode;
 import com.ticketflow.exception.TicketFlowFrameException;
+import com.ticketflow.constant.Constant;
 import com.ticketflow.mapper.UserMapper;
+import com.ticketflow.redis.session.UserSessionStore;
+import com.ticketflow.threadlocal.BaseParameterHolder;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -24,13 +28,16 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 改密链路测试：原密码错误必须被拒绝，原密码正确才允许写入新哈希。
+ * 改密链路测试：原密码错误必须被拒绝，原密码正确才允许写入新哈希，并让旧会话立即失效。
  */
 @ExtendWith(MockitoExtension.class)
 class UserPasswordUpdateTest {
 
     @Mock
     private UserMapper userMapper;
+
+    @Mock
+    private UserSessionStore userSessionStore;
 
     private UserService userService;
 
@@ -43,6 +50,13 @@ class UserPasswordUpdateTest {
     void setUp() {
         userService = new UserService();
         ReflectionTestUtils.setField(userService, "userMapper", userMapper);
+        ReflectionTestUtils.setField(userService, "userSessionStore", userSessionStore);
+        BaseParameterHolder.setParameter(Constant.CODE, "ticketflow");
+    }
+
+    @AfterEach
+    void tearDown() {
+        BaseParameterHolder.removeParameterMap();
     }
 
     private User currentUser() {
@@ -80,5 +94,7 @@ class UserPasswordUpdateTest {
         String stored = captor.getValue().getPassword();
         assertNotEquals("brand-new-password", stored);
         assertTrue(encoder.matches("brand-new-password", stored));
+        // 改密后旧 token 必须立即失效，否则未撤销的会话仍能冒充本人
+        verify(userSessionStore).invalidate("ticketflow", USER_ID);
     }
 }

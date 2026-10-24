@@ -41,9 +41,11 @@ import com.ticketflow.mapper.UserMapper;
 import com.ticketflow.mapper.UserMobileMapper;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
+import com.ticketflow.redis.session.UserSessionStore;
 import com.ticketflow.service.lua.LoginErrorCountOperate;
 import com.ticketflow.servicelock.LockType;
 import com.ticketflow.servicelock.annotion.ServiceLock;
+import com.ticketflow.threadlocal.RequestIdentity;
 import com.ticketflow.util.StringUtil;
 import com.ticketflow.vo.GetChannelDataVo;
 import com.ticketflow.vo.TicketUserVo;
@@ -90,6 +92,12 @@ public class UserService extends ServiceImpl<UserMapper, User> {
 
     @Autowired
     private RedisCache redisCache;
+
+    /**
+     * 会话读写器：登录写入带 HMAC 签名的会话，改密/换绑后立即失效会话。
+     */
+    @Autowired
+    private UserSessionStore userSessionStore;
 
     @Autowired
     private TicketUserMapper ticketUserMapper;
@@ -226,8 +234,7 @@ public class UserService extends ServiceImpl<UserMapper, User> {
         User sessionUser = new User();
         BeanUtil.copyProperties(user, sessionUser);
         sessionUser.setPassword(null);
-        redisCache.set(RedisKeyBuild.createRedisKey(RedisKeyManage.USER_LOGIN, code, user.getId()), sessionUser,
-                tokenExpireTime, TimeUnit.MINUTES);
+        userSessionStore.save(code, user.getId(), sessionUser, tokenExpireTime, TimeUnit.MINUTES);
         userLoginVo.setUserId(userId);
         //生成token
         userLoginVo.setToken(createToken(user.getId(), getChannelDataByCode(code).getTokenSecret()));
@@ -278,7 +285,9 @@ public class UserService extends ServiceImpl<UserMapper, User> {
             throw new TicketFlowFrameException(BaseCode.USER_EMPTY);
         }
         String userId = JSONObject.parseObject(userStr).getString("userId");
-        redisCache.del(RedisKeyBuild.createRedisKey(RedisKeyManage.USER_LOGIN, userLogoutDto.getCode(), userId));
+        if (StringUtil.isNotEmpty(userId)) {
+            userSessionStore.invalidate(userLogoutDto.getCode(), Long.valueOf(userId));
+        }
         return true;
     }
 
@@ -316,6 +325,8 @@ public class UserService extends ServiceImpl<UserMapper, User> {
         // 改密同样哈希后入库
         updateUser.setPassword(passwordEncoder.encode(userUpdatePasswordDto.getPassword()));
         userMapper.updateById(updateUser);
+        // 改密后旧 token 立即失效，避免泄漏的 token 在有效期内继续可用
+        invalidateSession(user.getId());
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -339,6 +350,8 @@ public class UserService extends ServiceImpl<UserMapper, User> {
         userEmail.setUserId(user.getId());
         userEmail.setEmail(userUpdateEmailDto.getEmail());
         userEmailMapper.insert(userEmail);
+        // 登录凭证（邮箱）变更后强制重新登录
+        invalidateSession(user.getId());
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -365,6 +378,23 @@ public class UserService extends ServiceImpl<UserMapper, User> {
         // 新手机号加入布隆过滤器：register 时才会 add，改绑路径漏了，
         // 否则后续 doExist 因布隆不含新号而跳过 DB 判重，可导致两个用户绑定同一手机号。
         bloomFilterHandler.add(userUpdateMobileDto.getMobile());
+        // 登录凭证（手机号）变更后强制重新登录
+        invalidateSession(user.getId());
+    }
+
+    /**
+     * 使当前登录会话立即失效（改密/换绑手机/换绑邮箱后调用）。
+     * <p>
+     * 会话 key 由网关透传的 code + userId 组成，code 缺失说明不是网关链路（或本地直连调试），
+     * 此时无法定位 key，只记录告警，不影响主流程。
+     */
+    private void invalidateSession(Long userId) {
+        String code = RequestIdentity.getCode();
+        if (StringUtil.isEmpty(code)) {
+            log.warn("会话失效跳过：请求未携带渠道 code, userId={}", userId);
+            return;
+        }
+        userSessionStore.invalidate(code, userId);
     }
 
     @Transactional(rollbackFor = Exception.class)

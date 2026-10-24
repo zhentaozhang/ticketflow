@@ -42,6 +42,10 @@ x-app-env: &app-env
   NACOS_DISCOVERY_IP: ""                  # 空 -> entrypoint 自动取容器 IP 注册 Nacos
   REDIS_HOST: redis
   REDIS_PORT: "6379"
+  # Redis 认证口令（Spring Boot 自动绑定 spring.data.redis.password，Lettuce 与 Redisson 均生效）
+  SPRING_DATA_REDIS_PASSWORD: "${REDIS_PASSWORD:-ticketflow}"
+  # 登录会话 HMAC 签名密钥：网关与 user-service 必须一致，生产用强随机值覆盖
+  SESSION_SIGN_SECRET: "${SESSION_SIGN_SECRET:-ticketflow-dev-session-secret}"
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   MYSQL_HOST: mysql
   MYSQL_PORT: "3306"
@@ -108,9 +112,28 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: [ "redis-server", "--appendonly", "yes" ]
+    environment:
+      # Redis 认证口令：本地默认 ticketflow，生产部署必须用强随机值覆盖（REDIS_PASSWORD）
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-ticketflow}"
+    # requirepass 让匿名连接无法读写；同时禁用 FLUSHALL/FLUSHDB/CONFIG，
+    # 避免拿到一个连接就能清空数据或改写服务端配置。
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - "${REDIS_PASSWORD:-ticketflow}"
+      - --rename-command
+      - FLUSHALL
+      - ""
+      - --rename-command
+      - FLUSHDB
+      - ""
+      - --rename-command
+      - CONFIG
+      - ""
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
+      test: [ "CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep -q PONG" ]
       interval: 10s
       timeout: 3s
       retries: 5

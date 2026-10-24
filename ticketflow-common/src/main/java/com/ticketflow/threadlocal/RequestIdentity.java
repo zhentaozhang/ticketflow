@@ -38,6 +38,17 @@ public final class RequestIdentity {
     }
 
     /**
+     * 获取网关注入的渠道 code（下游请求头 code）。
+     * <p>
+     * 会话 key 由 code + userId 共同构成，因此会话失效/回查都需要 code。
+     * 缺失时返回 null（非网关链路），调用方需自行决定是拒绝还是跳过。
+     */
+    public static String getCode() {
+        String code = BaseParameterHolder.getParameter(Constant.CODE);
+        return code == null || code.trim().isEmpty() ? null : code.trim();
+    }
+
+    /**
      * 获取当前请求的登录用户 id，缺失时返回 null。
      * <p>
      * 仅用于可选登录态场景（例如匿名可访问但登录后行为不同的接口），写操作一律用

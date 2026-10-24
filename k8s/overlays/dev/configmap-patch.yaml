@@ -11,3 +11,7 @@ data:
   MYSQL_HOST: "host.docker.internal"
   MYSQL_PORT: "3306"
   ES_ADDR: "host.docker.internal:9200"
+  # 与 docker/docker-compose.yml 中 redis 的默认 requirepass 保持一致（仅本地开发）
+  SPRING_DATA_REDIS_PASSWORD: "ticketflow"
+  # 本地开发会话签名密钥（生产请用 Secret 注入强随机值）
+  SESSION_SIGN_SECRET: "ticketflow-dev-session-secret"

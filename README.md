@@ -181,6 +181,15 @@ make down                  # 停止（数据卷保留）
 - 仅本机 IDE 跑应用、中间件放容器：`docker compose -f docker/docker-compose.yml up -d mysql redis kafka nacos elasticsearch sentinel`
 - 构建后端：`make build`（等价 `mvn -DskipTests -T 4 package`）
 
+> **Redis 认证**：compose 里的 Redis 已开启 `requirepass`（默认口令 `ticketflow`，用环境变量 `REDIS_PASSWORD` 覆盖），
+> 并禁用了 `FLUSHALL` / `FLUSHDB` / `CONFIG`。应用侧通过 `SPRING_DATA_REDIS_PASSWORD` 注入同一口令，
+> 用 `docker exec ticketflow-redis redis-cli -a ticketflow --no-auth-warning` 连进去排查数据。
+>
+> **会话签名**：登录会话（`user_login_{code}_{userId}`）外层带 HMAC 签名，网关验签通过才视为已登录，
+> 仅拿到 Redis 写权限无法伪造会话。密钥 `ticketflow.session.sign-secret` 由 `SESSION_SIGN_SECRET` 注入，
+> **网关与 user-service 必须一致**（不一致会导致登录成功后所有受保护请求返回 1001）；
+> 升级到带签名版本后旧会话全部失效，用户需重新登录。
+
 ### 访问入口
 
 | 入口 | 地址 | 说明 |

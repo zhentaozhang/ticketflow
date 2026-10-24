@@ -26,12 +26,14 @@ ROUNDS=${6:-1}
 export TARGET_HOST=${TARGET_HOST:-127.0.0.1}
 BASE_URL="http://${TARGET_HOST}:6086"
 
+# Redis 认证口令：与 docker/docker-compose.yml 中 redis 的 requirepass 保持一致
+REDIS_PASSWORD=${REDIS_PASSWORD:-ticketflow}
 # Redis 命令（单机走 docker exec；双机走 redis-cli -h 被测机）
 redis_cmd() {
   if [ -z "$TARGET_HOST" ] || [ "$TARGET_HOST" = "127.0.0.1" ]; then
-    docker exec ticketflow-redis redis-cli "$@" 2>/dev/null
+    docker exec ticketflow-redis redis-cli -a "$REDIS_PASSWORD" --no-auth-warning "$@" 2>/dev/null
   else
-    redis-cli -h "$TARGET_HOST" -p 6379 "$@" 2>/dev/null
+    redis-cli -h "$TARGET_HOST" -p 6379 -a "$REDIS_PASSWORD" --no-auth-warning "$@" 2>/dev/null
   fi
 }
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
@@ -73,7 +75,7 @@ generate_snapshot() {
     | awk '/PartitionCount/{print $2}' | head -1 || echo "N/A")
   [ -z "$KAFKA_PARTS" ] && KAFKA_PARTS="N/A"
   SEAT_COUNT=$(wc -l < "$SEATS_CSV" 2>/dev/null || echo "N/A")
-  REDIS_MODE=$(redis-cli -h 127.0.0.1 -p 6379 info replication 2>/dev/null | grep '^role:' | cut -d: -f2 | tr -d '\r' || echo "N/A")
+  REDIS_MODE=$(redis-cli -h 127.0.0.1 -p 6379 -a "$REDIS_PASSWORD" --no-auth-warning info replication 2>/dev/null | grep '^role:' | cut -d: -f2 | tr -d '\r' || echo "N/A")
 
   cat > "$SNAPSHOT_FILE" <<EOF
 {
@@ -129,7 +131,7 @@ wait_for_pending_drain() {
   local PENDING_KEY="ticketflow-d_mai_order_create_pending_9999"
   local max_wait=90 waited=0 len=""
   while [ "$waited" -lt "$max_wait" ]; do
-    len=$(redis-cli -h "$TARGET_HOST" -p 6379 LLEN "$PENDING_KEY" 2>/dev/null | tr -d '\r')
+    len=$(redis-cli -h "$TARGET_HOST" -p 6379 -a "$REDIS_PASSWORD" --no-auth-warning LLEN "$PENDING_KEY" 2>/dev/null | tr -d '\r')
     if [ -z "$len" ] || [ "$len" = "0" ]; then
       break
     fi
