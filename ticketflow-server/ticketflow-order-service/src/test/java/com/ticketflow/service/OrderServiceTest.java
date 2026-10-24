@@ -199,6 +199,23 @@ class OrderServiceTest {
         ReflectionTestUtils.setField(orderService, "transactionTemplate", transactionTemplate);
     }
 
+    /**
+     * 退款单已被渠道确认到账（refundStatus=2）。
+     * 退款「受理成功」不等于「钱已到账」，订单侧只有拿到 2 才允许置已退单。
+     */
+    private void stubRefundStatusConfirmed() {
+        RefundStatusVo refundStatusVo = new RefundStatusVo();
+        refundStatusVo.setRefundStatus(RefundStatus.REFUND_SUCCESS.getCode());
+        when(payClient.refundStatus(any(RefundStatusDto.class))).thenReturn(ApiResponse.ok(refundStatusVo));
+    }
+
+    /** 退款单仍是受理待确认（0 态）：钱可能已经退出去了，也可能没有，一律按未确认处理。 */
+    private void stubRefundStatusUnconfirmed() {
+        RefundStatusVo refundStatusVo = new RefundStatusVo();
+        refundStatusVo.setRefundStatus(RefundStatus.REFUND_ACCEPT.getCode());
+        when(payClient.refundStatus(any(RefundStatusDto.class))).thenReturn(ApiResponse.ok(refundStatusVo));
+    }
+
     // ==================== 创建 doCreate/create/createByMq ====================
 
     private OrderCreateDomain buildCreateDomain() {
@@ -412,6 +429,8 @@ class OrderServiceTest {
         tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
         when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        // 退款请求成功只是受理，订单置已退单前必须先查到退款单状态 =2
+        stubRefundStatusConfirmed();
         OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
         assertEquals(OrderStatus.REFUND.getCode(), vo.getOrderStatus());
         assertNotNull(vo.getRefundOrderTime());
@@ -432,6 +451,7 @@ class OrderServiceTest {
         tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
         when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        stubRefundStatusConfirmed();
         // 钱已经退出去，本地却没推进成功：视图必须保持已取消，让下一次轮询继续尝试
         when(orderRefundSettleService.settleRefund(anyLong())).thenReturn(false);
         OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
@@ -832,6 +852,7 @@ class OrderServiceTest {
         tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
         when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        stubRefundStatusConfirmed();
 
         assertEquals(PaymentReconcileResult.REFUNDED, orderService.reconcilePayment(order));
 
@@ -852,6 +873,7 @@ class OrderServiceTest {
         tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
         when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        stubRefundStatusConfirmed();
         when(orderRefundSettleService.settleRefund(anyLong())).thenReturn(false);
 
         // 钱已退但本地没落：报 REFUND_FAILED，订单保持已取消 + 待对账，下一轮继续（退款幂等键防二次退款）
@@ -883,6 +905,86 @@ class OrderServiceTest {
 
         assertEquals(PaymentReconcileResult.CHECK_FAILED, orderService.reconcilePayment(order));
         verify(payClient, never()).refund(any());
+    }
+
+    @Test
+    void reconcilePayment退款受理但渠道未确认到账时不置已退单并保留对账重试() {
+        Order order = buildOrder(OrderStatus.CANCEL.getCode());
+        order.setPayOrderType(PayChannel.WX.getCode());
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        // 渠道受理了退款，但退款单还是 0 态：钱不一定已经退给用户
+        stubRefundStatusUnconfirmed();
+
+        assertEquals(PaymentReconcileResult.REFUND_FAILED, orderService.reconcilePayment(order));
+
+        // 绝不能置已退单：受理当到账就是资损
+        verify(orderRefundSettleService, never()).settleRefund(anyLong());
+        // 订单保持已取消 + 打上对账异常标记，让对账任务继续把它拎出来重试
+        ArgumentCaptor<Order> orderCaptor = ArgumentCaptor.forClass(Order.class);
+        verify(orderMapper).update(orderCaptor.capture(), any(Wrapper.class));
+        assertEquals(ReconciliationStatus.RECONCILIATION_FAIL.getCode(),
+                orderCaptor.getValue().getPayReconciliationStatus());
+    }
+
+    @Test
+    void reconcilePayment退款单状态查询失败时按未确认处理且不置已退单() {
+        Order order = buildOrder(OrderStatus.CANCEL.getCode());
+        order.setPayOrderType(PayChannel.ALIPAY.getCode());
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        when(payClient.refundStatus(any(RefundStatusDto.class))).thenReturn(ApiResponse.error(500, "pay服务不可用"));
+
+        assertEquals(PaymentReconcileResult.REFUND_FAILED, orderService.reconcilePayment(order));
+
+        verify(orderRefundSettleService, never()).settleRefund(anyLong());
+    }
+
+    @Test
+    void reconcilePayment退款单状态查询抛异常时按未确认处理且不置已退单() {
+        Order order = buildOrder(OrderStatus.CANCEL.getCode());
+        order.setPayOrderType(PayChannel.WX.getCode());
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        when(payClient.refundStatus(any(RefundStatusDto.class))).thenThrow(new RuntimeException("超时"));
+
+        assertEquals(PaymentReconcileResult.REFUND_FAILED, orderService.reconcilePayment(order));
+
+        verify(orderRefundSettleService, never()).settleRefund(anyLong());
+    }
+
+    // ==================== 未确认退款的重新确认 reconfirmRefund ====================
+
+    @Test
+    void reconfirmRefund退款单已确认到账时完成本地收尾() {
+        stubRefundStatusConfirmed();
+
+        assertTrue(orderService.reconfirmRefund(buildOrder(OrderStatus.CANCEL.getCode())));
+
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
+    }
+
+    @Test
+    void reconfirmRefund退款单仍未确认时不收尾并保留对账重试入口() {
+        stubRefundStatusUnconfirmed();
+
+        assertFalse(orderService.reconfirmRefund(buildOrder(OrderStatus.CANCEL.getCode())));
+
+        verify(orderRefundSettleService, never()).settleRefund(anyLong());
+        // 退款单号由「订单号 + 原支付金额」推导，重试时不依赖任何本地存储
+        ArgumentCaptor<RefundStatusDto> refundStatusCaptor = ArgumentCaptor.forClass(RefundStatusDto.class);
+        verify(payClient).refundStatus(refundStatusCaptor.capture());
+        assertEquals("1001", refundStatusCaptor.getValue().getOutOrderNo());
+        assertEquals("closed-refund:1001:100.00", refundStatusCaptor.getValue().getOutRefundNo());
     }
 
     // ==================== checkOrderStatus ====================
@@ -1132,6 +1234,7 @@ class OrderServiceTest {
         notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
         when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        stubRefundStatusConfirmed();
         String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
         assertEquals(ALIPAY_NOTIFY_SUCCESS_RESULT, result);
         verify(payClient).refund(any(RefundDto.class));
@@ -1147,6 +1250,7 @@ class OrderServiceTest {
         notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
         when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        stubRefundStatusConfirmed();
         when(orderRefundSettleService.settleRefund(anyLong())).thenReturn(false);
 
         // 钱已退、本地没落：必须应答 failure，让支付宝按重试阶梯再来（同一 refundRequestId 不会二次退款）
@@ -1283,6 +1387,7 @@ class OrderServiceTest {
         when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
         when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        stubRefundStatusConfirmed();
         String result = orderService.wxNotify(buildWxRequest());
         assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
         verify(payClient).refund(any(RefundDto.class));
@@ -1338,6 +1443,7 @@ class OrderServiceTest {
         doThrow(new TicketFlowFrameException(BaseCode.ORDER_STATUS_CHANGED))
                 .when(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        stubRefundStatusConfirmed();
 
         String result = orderService.wxNotify(buildWxRequest());
 
@@ -1357,6 +1463,7 @@ class OrderServiceTest {
         doThrow(new TicketFlowFrameException(BaseCode.ORDER_STATUS_CHANGED))
                 .when(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        stubRefundStatusConfirmed();
         // 钱已经退出去，本地没落成功：不能应答成功，必须让微信按重试阶梯再来（同一退款幂等键不会二次退款）
         when(orderRefundSettleService.settleRefund(anyLong())).thenReturn(false);
 
@@ -1413,6 +1520,7 @@ class OrderServiceTest {
         doThrow(new TicketFlowFrameException(BaseCode.ORDER_STATUS_CHANGED))
                 .when(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        stubRefundStatusConfirmed();
 
         String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
 

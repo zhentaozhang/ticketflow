@@ -133,4 +133,38 @@ public final class Metrics {
     public static final String ORDER_REFUND_SETTLE_TOTAL = "ticketflow_order_refund_settle_total";
     /** 重复调用命中幂等（本地已是终态） */
     public static final String RESULT_IDEMPOTENT = "idempotent";
+    /**
+     * 退款已受理但<b>渠道还没确认到账</b>（退款单状态 0/1/3），订单保持已取消等待对账重试。
+     * 这一类不能再靠「退款请求返回成功」推断成已退单——钱可能没到买家手上。
+     */
+    public static final String RESULT_UNCONFIRMED = "unconfirmed";
+
+    /* ==================== 退款受理与确认（pay-service） ==================== */
+
+    /**
+     * 退款受理结果总数（{@code PayService#refund}），tags：{@link #RESULT}。
+     * 取值：
+     * <ul>
+     *   <li>{@link #RESULT_ACCEPTED}：本次首次受理，已落「受理待确认」退款单后调渠道；</li>
+     *   <li>{@link #RESULT_SUCCESS}：渠道同步确认已退款（refund_status=2）；</li>
+     *   <li>{@link #RESULT_PROCESSING}：渠道受理，退款处理中（refund_status=1），由确认任务跟进；</li>
+     *   <li>{@link #RESULT_UNKNOWN}：<b>钱可能已经退出去了但结果未知</b>（refund_status=0），必须靠确认任务查渠道；</li>
+     *   <li>{@link #RESULT_FAIL}：渠道明确失败/关闭（refund_status=3），可用同一幂等键重入；</li>
+     *   <li>{@link #RESULT_IDEMPOTENT}：同一幂等键重试命中已有退款单。</li>
+     * </ul>
+     */
+    public static final String PAY_REFUND_TOTAL = "ticketflow_pay_refund_total";
+    /** 首次受理（已落受理单） */
+    public static final String RESULT_ACCEPTED = "accepted";
+    /** 渠道受理中（refund_status=1） */
+    public static final String RESULT_PROCESSING = "processing";
+
+    /**
+     * 退款确认任务单条结果总数（{@code RefundCheckTask}），tags：{@link #RESULT}。
+     * 取值：{@link #RESULT_SUCCESS} / {@link #RESULT_PROCESSING} / {@link #RESULT_FAIL} / {@link #RESULT_ERROR} / {@link #RESULT_UNKNOWN}。
+     * <p>
+     * 其中 {@code fail}/{@code unknown} 是<b>要叫人的信号</b>：钱退没退成必须有人工出口，
+     * 不能只留一行日志。
+     */
+    public static final String PAY_REFUND_CHECK_TOTAL = "ticketflow_pay_refund_check_total";
 }

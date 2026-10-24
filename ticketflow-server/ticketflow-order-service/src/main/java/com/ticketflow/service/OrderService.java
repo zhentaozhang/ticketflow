@@ -33,6 +33,7 @@ import com.ticketflow.dto.PayDto;
 import com.ticketflow.dto.ProgramOperateDataDto;
 import com.ticketflow.dto.ReduceRemainNumberDto;
 import com.ticketflow.dto.RefundDto;
+import com.ticketflow.dto.RefundStatusDto;
 import com.ticketflow.dto.TicketCategoryCountDto;
 import com.ticketflow.dto.TradeCheckDto;
 import com.ticketflow.dto.UserGetAndTicketUserListDto;
@@ -49,6 +50,7 @@ import com.ticketflow.enums.PaymentReconcileResult;
 import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.enums.RecordType;
 import com.ticketflow.enums.ReconciliationStatus;
+import com.ticketflow.enums.RefundStatus;
 import com.ticketflow.enums.SellStatus;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.mapper.OrderMapper;
@@ -56,6 +58,8 @@ import com.ticketflow.mapper.OrderProgramMapper;
 import com.ticketflow.mapper.OrderProgramSyncMapper;
 import com.ticketflow.mapper.OrderTicketUserMapper;
 import com.ticketflow.mapper.OrderTicketUserRecordMapper;
+import com.ticketflow.observability.BusinessMetrics;
+import com.ticketflow.observability.Metrics;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -75,6 +79,7 @@ import com.ticketflow.vo.OrderGetVo;
 import com.ticketflow.vo.OrderListVo;
 import com.ticketflow.vo.OrderPayCheckVo;
 import com.ticketflow.vo.OrderTicketInfoVo;
+import com.ticketflow.vo.RefundStatusVo;
 import com.ticketflow.vo.SeatVo;
 import com.ticketflow.vo.TicketUserInfoVo;
 import com.ticketflow.vo.TicketUserVo;
@@ -82,6 +87,7 @@ import com.ticketflow.vo.TradeCheckVo;
 import com.ticketflow.vo.UserAndTicketUserInfoVo;
 import com.ticketflow.vo.UserGetAndTicketUserListVo;
 import com.ticketflow.vo.UserInfoVo;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
@@ -209,6 +215,12 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
      */
     @Autowired
     private OrderProgramSyncService orderProgramSyncService;
+
+    /**
+     * 退款/对账指标（registry 缺失时 {@link BusinessMetrics} 静默降级）
+     */
+    @Autowired(required = false)
+    private MeterRegistry meterRegistry;
 
     @Autowired
     private TransactionTemplate transactionTemplate;
@@ -391,17 +403,15 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 refundDto.setChannel(channel);
                 refundDto.setReason("延迟订单关闭");
                 // 稳定幂等键：同一订单的关闭退款重试复用同一 outRefundNo，避免二次退款
-                refundDto.setRefundRequestId("closed-refund:" + order.getOrderNumber() + ":" + order.getOrderPrice().toPlainString());
+                refundDto.setRefundRequestId(closedRefundNo(String.valueOf(order.getOrderNumber()), order.getOrderPrice()));
                 ApiResponse<String> response = payClient.refund(refundDto);
                 if (response.getCode().equals(BaseCode.SUCCESS.getCode())) {
-                    // 退款已在渠道侧成功：本地收尾走带事务的独立 bean（本类内部调用 @Transactional 不生效），
-                    // 主表 CAS 置已退单 + 退款时间 + 对账标记 + 购票人子表一起写，重复回调幂等。
-                    if (orderRefundSettleService.settleRefund(order.getOrderNumber())) {
+                    // 退款请求返回成功只代表渠道受理，不代表钱已到买家：必须再查退款单状态，
+                    // refundStatus=2（渠道确认已退款）才允许把订单置为已退单。
+                    if (confirmRefundAndSettle(order.getOrderNumber(), resolveOutRefundNo(response, refundDto))) {
                         // 退款成功视图才置退款状态，失败保持数据库的取消状态，下次轮询重试退款
                         orderPayCheckVo.setOrderStatus(OrderStatus.REFUND.getCode());
                         orderPayCheckVo.setRefundOrderTime(DateUtils.now());
-                    } else {
-                        log.error("退款成功但本地收尾未完成，保持取消状态等待重试 orderNumber : {}", order.getOrderNumber());
                     }
                 } else {
                     log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
@@ -799,27 +809,105 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         refundDto.setChannel(channel);
         refundDto.setReason("延迟订单关闭");
         // 稳定幂等键：同一订单 + 金额的关闭退款重试复用同一 outRefundNo，避免二次退款
-        refundDto.setRefundRequestId("closed-refund:" + outTradeNo + ":" + amount.toPlainString());
+        refundDto.setRefundRequestId(closedRefundNo(outTradeNo, amount));
         ApiResponse<String> response = payClient.refund(refundDto);
         if (!Objects.equals(response.getCode(), BaseCode.SUCCESS.getCode())) {
             log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
             return false;
         }
-        // 渠道退款已成功，接着做本地收尾：主表 CAS 置已退单（带退款时间/对账标记）+ 购票人子表。
-        // 收尾失败必须返回 false：钱已经退出去，本地却没落，不能对渠道应答成功把差异吞掉。
+        // 退款请求成功 ≠ 钱已到账：只有退款单状态 =2 才做本地收尾（主表 CAS 置已退单 + 退款时间 +
+        // 对账标记 + 购票人子表）。未确认时必须返回 false：应答成功会让这笔退款永久丢掉重试入口。
+        if (!confirmRefundAndSettle(Long.parseLong(outTradeNo), resolveOutRefundNo(response, refundDto))) {
+            return false;
+        }
+        log.info("订单已关闭，退款确认到账并置为已退单 outTradeNo : {}", outTradeNo);
+        return true;
+    }
+
+    /**
+     * 退款「到账确认 + 本地收尾」。
+     * <p>
+     * 只认退款单状态 {@code refundStatus=2}（渠道确认已退款）：支付宝「受理即成功」、微信「受理中」
+     * 都可能还没把钱退给用户，只凭退款请求返回成功就置已退单，等于把受理当到账。
+     * <p>
+     * 未确认时把订单标记成「对账有问题」（{@code pay_reconciliation_status=-1}），
+     * 让支付对账任务继续把这单拎出来重试——否则它会随着取消时间的推移被 30 分钟窗口筛掉，
+     * 变成一笔「系统显示已取消、钱却没退」的静默差异。
+     *
+     * @return true = 已确认到账且本地收尾完成
+     */
+    private boolean confirmRefundAndSettle(Long orderNumber, String outRefundNo) {
+        Integer refundStatus = queryRefundStatus(String.valueOf(orderNumber), outRefundNo);
+        if (!Objects.equals(refundStatus, RefundStatus.REFUND_SUCCESS.getCode())) {
+            log.error("退款已受理但渠道尚未确认到账，订单保持已取消等待对账重试 orderNumber : {} outRefundNo : {} refundStatus : {}",
+                    orderNumber, outRefundNo, refundStatus);
+            BusinessMetrics.increment(meterRegistry, Metrics.ORDER_REFUND_SETTLE_TOTAL,
+                    Metrics.RESULT, Metrics.RESULT_UNCONFIRMED);
+            markPaymentReconciled(orderNumber, ReconciliationStatus.RECONCILIATION_FAIL);
+            return false;
+        }
         boolean settled;
         try {
-            settled = orderRefundSettleService.settleRefund(Long.parseLong(outTradeNo));
+            settled = orderRefundSettleService.settleRefund(orderNumber);
         } catch (Exception e) {
-            log.error("退款成功但本地收尾异常，待渠道/对账重试 outTradeNo : {}", outTradeNo, e);
+            log.error("退款确认到账但本地收尾异常，待渠道/对账重试 orderNumber : {}", orderNumber, e);
             return false;
         }
         if (!settled) {
-            log.error("退款成功但本地收尾未完成，待渠道/对账重试 outTradeNo : {}", outTradeNo);
-            return false;
+            log.error("退款确认到账但本地收尾未完成，待渠道/对账重试 orderNumber : {}", orderNumber);
         }
-        log.info("订单已关闭，退款完成并置为已退单 outTradeNo : {}", outTradeNo);
-        return true;
+        return settled;
+    }
+
+    /**
+     * 「关闭退款」的幂等键：订单号 + 原支付金额固定推导，重试天然复用同一退款单号。
+     * 对账任务正是靠它重新定位退款单，不需要额外存储。
+     */
+    private static String closedRefundNo(String outTradeNo, BigDecimal amount) {
+        return "closed-refund:" + outTradeNo + ":" + amount.toPlainString();
+    }
+
+    /**
+     * 重新确认「关闭退款」是否已到账，并做本地收尾。对账任务用它重试「已受理但未确认」的退款：
+     * 退款单号由 {@link #closedRefundNo} 推导，不依赖任何本地存储。
+     *
+     * @return true = 已确认到账且本地已置为已退单
+     */
+    public boolean reconfirmRefund(Order order) {
+        return confirmRefundAndSettle(order.getOrderNumber(),
+                closedRefundNo(String.valueOf(order.getOrderNumber()), order.getOrderPrice()));
+    }
+
+    /**
+     * 查询退款单状态。查不到/查失败一律返回 null（调用方按「未确认」处理）：
+     * 宁可让对账继续重试，也不能凭猜测定资金终态。
+     */
+    private Integer queryRefundStatus(String outOrderNo, String outRefundNo) {
+        RefundStatusDto refundStatusDto = new RefundStatusDto();
+        refundStatusDto.setOutOrderNo(outOrderNo);
+        refundStatusDto.setOutRefundNo(outRefundNo);
+        try {
+            ApiResponse<RefundStatusVo> response = payClient.refundStatus(refundStatusDto);
+            if (Objects.equals(response.getCode(), BaseCode.SUCCESS.getCode()) && Objects.nonNull(response.getData())) {
+                return response.getData().getRefundStatus();
+            }
+            log.error("退款单状态查询失败 outRefundNo : {} response : {}",
+                    outRefundNo, JSON.toJSONString(response));
+        } catch (Exception e) {
+            log.error("退款单状态查询异常 outRefundNo : {}", outRefundNo, e);
+        }
+        return null;
+    }
+
+    /**
+     * 取本次退款单号：优先用支付服务返回的 outRefundNo，
+     * 缺失时退回自己传的幂等键（两者在 pay-service 里是同一个值，渠道按它幂等）。
+     */
+    private String resolveOutRefundNo(ApiResponse<String> response, RefundDto refundDto) {
+        if (Objects.nonNull(response.getData()) && !response.getData().isBlank()) {
+            return response.getData();
+        }
+        return refundDto.getRefundRequestId();
     }
 
     // 支付/取消核心编排：

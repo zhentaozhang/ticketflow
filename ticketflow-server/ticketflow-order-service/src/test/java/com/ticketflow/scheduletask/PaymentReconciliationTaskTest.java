@@ -102,7 +102,8 @@ class PaymentReconciliationTaskTest {
 
     @Test
     void 渠道已支付并退款成功时标记对账完成并上报资损信号() {
-        when(orderMapper.selectList(any())).thenReturn(List.of(buildCancelledOrder()));
+        // 第一段扫「未对账」的取消单，第二段扫「退款未确认」的单：这里第二轮为空
+        when(orderMapper.selectList(any())).thenReturn(List.of(buildCancelledOrder()), List.of());
         when(orderService.reconcilePayment(any(Order.class))).thenReturn(PaymentReconcileResult.REFUNDED);
 
         paymentReconciliationTask.paymentReconciliation();
@@ -140,6 +141,53 @@ class PaymentReconciliationTaskTest {
         verify(orderService, timeout(3000)).markPaymentReconciled(2002L,
                 ReconciliationStatus.RECONCILIATION_SUCCESS);
         verify(orderService, never()).markPaymentReconciled(eq(ORDER_NUMBER), any());
+    }
+
+    // ==================== 第二段：退款已受理但未确认到账的重试 ====================
+
+    @Test
+    void 退款仍未确认到账时重新驱动渠道退款且不标记对账完成() {
+        when(orderMapper.selectList(any()))
+                .thenReturn(List.of())      // 第一段：已对账过的取消单不会再扫出来
+                .thenReturn(List.of(buildCancelledOrder()));  // 第二段：退款未确认的单
+        when(orderService.reconfirmRefund(any(Order.class))).thenReturn(false);
+        when(orderService.reconcilePayment(any(Order.class))).thenReturn(PaymentReconcileResult.REFUND_FAILED);
+
+        paymentReconciliationTask.paymentReconciliation();
+
+        verify(orderService, timeout(3000)).reconfirmRefund(any(Order.class));
+        verify(orderService, timeout(3000)).reconcilePayment(any(Order.class));
+        verify(meterRegistry, timeout(3000)).counter(eq(Metrics.PAYMENT_RECONCILE_TOTAL),
+                eq(Metrics.RESULT), eq("refund_refund_failed"));
+        // 没确认到账就不能标记完成，否则这单再也不会被扫出来
+        verify(orderService, never()).markPaymentReconciled(any(), any());
+    }
+
+    @Test
+    void 退款单已确认到账时先收尾并标记对账完成不再驱动退款() {
+        when(orderMapper.selectList(any()))
+                .thenReturn(List.of())
+                .thenReturn(List.of(buildCancelledOrder()));
+        when(orderService.reconfirmRefund(any(Order.class))).thenReturn(true);
+
+        paymentReconciliationTask.paymentReconciliation();
+
+        verify(orderService, timeout(3000)).markPaymentReconciled(ORDER_NUMBER,
+                ReconciliationStatus.RECONCILIATION_SUCCESS);
+        // 已确认到账就不要再碰渠道的退款写接口
+        verify(orderService, never()).reconcilePayment(any());
+    }
+
+    @Test
+    void 退款超窗仍未确认时告警等人核对() {
+        when(orderMapper.selectList(any())).thenReturn(List.of());
+        when(orderMapper.selectCount(any())).thenReturn(3L);
+
+        paymentReconciliationTask.paymentReconciliation();
+
+        verify(meterRegistry, timeout(3000)).counter(eq(Metrics.PAYMENT_RECONCILE_TOTAL),
+                eq(Metrics.RESULT), eq(Metrics.RESULT_UNCONFIRMED));
+        verify(orderService, never()).reconcilePayment(any());
     }
 
     @Test

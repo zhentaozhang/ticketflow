@@ -10,13 +10,17 @@ import com.ticketflow.dto.NotifyDto;
 import com.ticketflow.dto.PayBillDto;
 import com.ticketflow.dto.PayDto;
 import com.ticketflow.dto.RefundDto;
+import com.ticketflow.dto.RefundStatusDto;
 import com.ticketflow.dto.TradeCheckDto;
 import com.ticketflow.entity.PayBill;
 import com.ticketflow.entity.RefundBill;
 import com.ticketflow.enums.BaseCode;
 import com.ticketflow.enums.PayBillStatus;
 import com.ticketflow.enums.PayChannel;
+import com.ticketflow.enums.RefundStatus;
 import com.ticketflow.exception.TicketFlowFrameException;
+import com.ticketflow.observability.BusinessMetrics;
+import com.ticketflow.observability.Metrics;
 import com.ticketflow.mapper.PayBillMapper;
 import com.ticketflow.mapper.RefundBillMapper;
 import com.ticketflow.pay.PayResult;
@@ -28,6 +32,8 @@ import com.ticketflow.servicelock.annotion.ServiceLock;
 import com.ticketflow.util.DateUtils;
 import com.ticketflow.vo.NotifyVo;
 import com.ticketflow.vo.PayBillVo;
+import com.ticketflow.vo.RefundStatusVo;
+import io.micrometer.core.instrument.MeterRegistry;
 import com.ticketflow.vo.TradeCheckVo;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -76,6 +82,12 @@ public class PayService {
      */
     @Autowired
     private TransactionTemplate transactionTemplate;
+
+    /**
+     * 退款受理/确认指标（registy 缺失时 {@link BusinessMetrics} 静默降级，不影响交易主流程）
+     */
+    @Autowired(required = false)
+    private MeterRegistry meterRegistry;
 
     /**
      * 通用支付，用订单号加锁防止多次支付成功，不依赖第三方支付的幂等性
@@ -262,20 +274,17 @@ public class PayService {
         if (!Objects.equals(payBill.getPayBillStatus(), PayBillStatus.PAY.getCode())) {
             throw new TicketFlowFrameException(BaseCode.PAY_BILL_IS_NOT_PAY_STATUS);
         }
-        // 累计已退金额（含渠道受理中未完成的退款单，不含退款失败的终态单），防止超退
+        // 累计已退金额（含「受理待确认」与「处理中」的退款单，不含退款失败终态单），防止超退。
+        // 0 态的钱可能已经退出去了，必须算进累计，否则并发/重试下能退超支付金额
         List<RefundBill> refundBillList = refundBillMapper.selectList(
                 Wrappers.lambdaQuery(RefundBill.class)
                         .eq(RefundBill::getOutOrderNo, refundDto.getOrderNumber())
                         .eq(RefundBill::getStatus, 1)
-                        .in(RefundBill::getRefundStatus, 1, 2));
+                        .in(RefundBill::getRefundStatus,
+                                RefundStatus.REFUND_ACCEPT.getCode(),
+                                RefundStatus.REFUND_PROCESSING.getCode(),
+                                RefundStatus.REFUND_SUCCESS.getCode()));
         BigDecimal refundedAmount = refundBillList.stream().map(RefundBill::getRefundAmount)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-        // 已确认到账的累计退款（不含处理中单）：账单置 REFUND 的判断依据。
-        // 处理中单最终可能失败，若按含在途的累计判断，在途单失败后账单已置 REFUND
-        // 无法继续退款，会导致少退
-        BigDecimal confirmedRefundedAmount = refundBillList.stream()
-                .filter(refundBill -> Objects.equals(refundBill.getRefundStatus(), 2))
-                .map(RefundBill::getRefundAmount)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
         if (refundedAmount.add(refundDto.getAmount()).compareTo(payBill.getPayAmount()) > 0) {
@@ -289,59 +298,215 @@ public class PayService {
                 || refundDto.getRefundRequestId().isBlank())
                 ? String.valueOf(uidGenerator.getUid())
                 : refundDto.getRefundRequestId();
-        // 同一幂等键已受理过：区分退款单状态
+        // 同一幂等键已受理过：按退款单状态续做 —— 已成功/处理中直接返回，
+        // 受理待确认（0）只查渠道不重发，失败（3）允许用同一幂等键重入
         RefundBill existRefund = refundBillMapper.selectOne(
                 Wrappers.lambdaQuery(RefundBill.class).eq(RefundBill::getOutRefundNo, outRefundNo));
         if (Objects.nonNull(existRefund)) {
-            // 若退款单此前已被置为失败终态（3），不能误判成功返回，必须抛出错误通知调用方
-            if (Objects.equals(existRefund.getRefundStatus(), 3)) {
-                log.error("退款幂等命中但该退款单此前已确认失败 outRefundNo : {}", outRefundNo);
-                throw new TicketFlowFrameException(BaseCode.REFUND_ERROR.getCode(), "该退款请求此前已执行失败");
-            }
-            log.info("退款幂等命中（处理中或成功），直接返回 outRefundNo : {}", outRefundNo);
-            return outRefundNo;
+            return resumeRefund(existRefund, refundDto, payBill);
         }
-        // 调用支付渠道退款
+        // 先落「受理待确认」退款单，再调渠道：钱一旦出去，系统里必须先有这条记录。
+        // 旧顺序是先调渠道再落库，落库失败就是「渠道退了款、本地无退款单」，
+        // 退款确认任务永远看不到这笔钱（P0-10 孤儿退款）
+        RefundBill acceptRefundBill = buildAcceptRefundBill(refundDto, payBill, outRefundNo);
+        try {
+            transactionTemplate.executeWithoutResult(status -> refundBillMapper.insert(acceptRefundBill));
+        } catch (DuplicateKeyException e) {
+            // 并发下同一幂等键落库：按已存在的那条退款单续做，渠道侧同单号本身也是幂等的
+            RefundBill concurrentRefund = refundBillMapper.selectOne(
+                    Wrappers.lambdaQuery(RefundBill.class).eq(RefundBill::getOutRefundNo, outRefundNo));
+            if (Objects.isNull(concurrentRefund)) {
+                log.error("退款受理单落库冲突但查不到记录 outRefundNo : {}", outRefundNo, e);
+                throw new TicketFlowFrameException(BaseCode.REFUND_ERROR);
+            }
+            log.warn("退款单已存在（并发重复），按已有状态续做 outRefundNo : {}", outRefundNo);
+            return resumeRefund(concurrentRefund, refundDto, payBill);
+        }
+        BusinessMetrics.increment(meterRegistry, Metrics.PAY_REFUND_TOTAL,
+                Metrics.RESULT, Metrics.RESULT_ACCEPTED);
+        return callChannelRefund(acceptRefundBill, refundDto, payBill);
+    }
+
+    /**
+     * 同一幂等键（outRefundNo）再次请求退款时，按退款单已有状态续做。
+     * <p>
+     * 四种状态的处理各不相同，这里的取舍是「宁可让调用方重试，也不能误判资金结果」：
+     * <ul>
+     *   <li><b>2 已退款</b>、<b>1 处理中</b>：渠道已受理，直接返回单号；</li>
+     *   <li><b>0 受理待确认</b>：上一次已经把退款发出去了却没拿到结果，只<b>查</b>不重发——
+     *       查不到明确结果就继续挂着（不在本地编造成功，也不编造失败，钱可能已经退出去了）；</li>
+     *   <li><b>3 退款失败</b>：渠道明确没退成，允许用同一幂等键重入（重置为 0 后重新发起）。</li>
+     * </ul>
+     */
+    private String resumeRefund(RefundBill existRefund, RefundDto refundDto, PayBill payBill) {
+        String outRefundNo = existRefund.getOutRefundNo();
+        RefundStatus refundStatus = RefundStatus.getRc(existRefund.getRefundStatus());
+        if (Objects.isNull(refundStatus)) {
+            log.error("退款单状态非法 outRefundNo : {} refundStatus : {}",
+                    outRefundNo, existRefund.getRefundStatus());
+            throw new TicketFlowFrameException(BaseCode.REFUND_ERROR);
+        }
+        switch (refundStatus) {
+            case REFUND_SUCCESS:
+            case REFUND_PROCESSING:
+                log.info("退款幂等命中（{}），直接返回 outRefundNo : {}", refundStatus.getMsg(), outRefundNo);
+                BusinessMetrics.increment(meterRegistry, Metrics.PAY_REFUND_TOTAL,
+                        Metrics.RESULT, Metrics.RESULT_IDEMPOTENT);
+                return outRefundNo;
+            case REFUND_ACCEPT:
+                // 只查不重发：同一退款意图绝不能因为「我们没拿到结果」而再发一次
+                RefundResult queryResult = payStrategyContext.get(refundDto.getChannel())
+                        .queryRefund(refundDto.getOrderNumber(), outRefundNo);
+                if (queryResult.isSuccess() && Objects.nonNull(queryResult.getRefundStatus())) {
+                    applyRefundResult(existRefund, queryResult.getRefundStatus(), payBill);
+                    return outRefundNo;
+                }
+                log.error("退款结果仍未确认，保持受理态由确认任务继续查 outRefundNo : {} message : {}",
+                        outRefundNo, queryResult.getMessage());
+                BusinessMetrics.increment(meterRegistry, Metrics.PAY_REFUND_TOTAL,
+                        Metrics.RESULT, Metrics.RESULT_UNKNOWN);
+                throw new TicketFlowFrameException(BaseCode.REFUND_ERROR.getCode(),
+                        "退款结果未确认，请稍后重试或等待渠道异步确认");
+            case REFUND_FAIL:
+                // 渠道明确失败 = 钱没退出去，允许重入：重置回受理态后用同一幂等键重新发起
+                log.warn("退款此前确认失败，按同一幂等键重新发起 outRefundNo : {}", outRefundNo);
+                markRefundStatus(existRefund.getId(), RefundStatus.REFUND_ACCEPT);
+                return callChannelRefund(existRefund, refundDto, payBill);
+            default:
+                throw new TicketFlowFrameException(BaseCode.REFUND_ERROR);
+        }
+    }
+
+    /**
+     * 组装「受理待确认」退款单：退款动作还没发生，付款时间留空，
+     * 渠道给出结果后再回填状态与退款时间。
+     */
+    private RefundBill buildAcceptRefundBill(RefundDto refundDto, PayBill payBill, String outRefundNo) {
+        RefundBill refundBill = new RefundBill();
+        refundBill.setId(uidGenerator.getUid());
+        refundBill.setOutOrderNo(payBill.getOutOrderNo());
+        refundBill.setPayBillId(payBill.getId());
+        refundBill.setOutRefundNo(outRefundNo);
+        refundBill.setRefundAmount(refundDto.getAmount());
+        refundBill.setRefundStatus(RefundStatus.REFUND_ACCEPT.getCode());
+        refundBill.setReason(refundDto.getReason());
+        return refundBill;
+    }
+
+    /**
+     * 调用渠道退款并回填结果。
+     * <p>
+     * 关键取舍：<b>渠道调用异常时退款单保持 0 态</b>。超时/网络异常下我们无法判断钱是否已经退出去，
+     * 此时置「失败」等于把一笔可能成功的退款永久丢掉；置「成功」更是直接资损。
+     * 保持 0 态交给 {@code RefundCheckTask} 查渠道确认，是本流程唯一安全的出口。
+     */
+    private String callChannelRefund(RefundBill refundBill, RefundDto refundDto, PayBill payBill) {
         PayStrategyHandler payStrategyHandler = payStrategyContext.get(refundDto.getChannel());
-        RefundResult refundResult = payStrategyHandler.refund(refundDto.getOrderNumber(), refundDto.getAmount(),
-                payBill.getPayAmount(), refundDto.getReason(), outRefundNo);
+        RefundResult refundResult;
+        try {
+            refundResult = payStrategyHandler.refund(refundDto.getOrderNumber(), refundDto.getAmount(),
+                    payBill.getPayAmount(), refundDto.getReason(), refundBill.getOutRefundNo());
+        } catch (Exception e) {
+            log.error("退款渠道调用异常，退款单保持受理待确认 outRefundNo : {}",
+                    refundBill.getOutRefundNo(), e);
+            BusinessMetrics.increment(meterRegistry, Metrics.PAY_REFUND_TOTAL,
+                    Metrics.RESULT, Metrics.RESULT_UNKNOWN);
+            if (e instanceof TicketFlowFrameException ticketFlowFrameException) {
+                throw ticketFlowFrameException;
+            }
+            throw new TicketFlowFrameException(BaseCode.REFUND_ERROR);
+        }
         if (!refundResult.isSuccess()) {
+            // 渠道明确拒绝/关闭：确认没退出去，落失败终态（可用同一幂等键重入）
+            markRefundStatus(refundBill.getId(), RefundStatus.REFUND_FAIL);
+            log.error("退款渠道明确失败 outRefundNo : {} message : {}",
+                    refundBill.getOutRefundNo(), refundResult.getMessage());
+            BusinessMetrics.increment(meterRegistry, Metrics.PAY_REFUND_TOTAL,
+                    Metrics.RESULT, Metrics.RESULT_FAIL);
             throw new TicketFlowFrameException(BaseCode.REFUND_ERROR.getCode(), refundResult.getMessage());
         }
-        // 本地落库放进独立事务（渠道 HTTP 调用已在事务外完成）：
-        // 降退款记录 refundStatus 1=渠道已受理处理中，2=已退款成功；并按累计到账决定是否置账单 REFUND。
-        try {
-            transactionTemplate.executeWithoutResult(status -> {
-                RefundBill refundBill = new RefundBill();
-                refundBill.setId(uidGenerator.getUid());
-                refundBill.setOutOrderNo(payBill.getOutOrderNo());
-                refundBill.setPayBillId(payBill.getId());
-                refundBill.setOutRefundNo(outRefundNo);
-                refundBill.setRefundAmount(refundDto.getAmount());
-                refundBill.setRefundStatus(refundResult.getRefundStatus());
-                refundBill.setRefundTime(DateUtils.now());
-                refundBill.setReason(refundDto.getReason());
-                refundBillMapper.insert(refundBill);
-                // 渠道已确认成功（refundStatus=2）且已确认到账累计（含本次）达到支付金额才将账单置为 REFUND；
-                // 渠道处理中（refundStatus=1，常见于微信）保持 PAY，由 RefundCheckTask 确认成功后翻转；
-                // 部分退款保持 PAY 可继续退；条件更新兜底并发：0 行说明账单状态已被其他流程更新，不覆盖
-                if (Objects.equals(refundResult.getRefundStatus(), 2)
-                        && confirmedRefundedAmount.add(refundDto.getAmount()).compareTo(payBill.getPayAmount()) >= 0) {
-                    PayBill updatePayBill = new PayBill();
-                    updatePayBill.setPayBillStatus(PayBillStatus.REFUND.getCode());
-                    LambdaUpdateWrapper<PayBill> payBillLambdaUpdateWrapper =
-                            Wrappers.lambdaUpdate(PayBill.class)
-                                    .eq(PayBill::getOutOrderNo, payBill.getOutOrderNo())
-                                    .eq(PayBill::getPayBillStatus, PayBillStatus.PAY.getCode());
-                    payBillMapper.update(updatePayBill, payBillLambdaUpdateWrapper);
-                }
-            });
-        } catch (DuplicateKeyException e) {
-            // 并发下同一幂等键落库：渠道侧同 outRefundNo 已去重，本地按幂等成功返回
-            log.warn("退款单已存在（并发重复），幂等返回 outRefundNo : {}", outRefundNo);
-            return outRefundNo;
+        // 渠道没给状态时按「处理中」处理：等确认任务查渠道，不当成功
+        Integer refundStatus = Objects.isNull(refundResult.getRefundStatus())
+                ? RefundStatus.REFUND_PROCESSING.getCode() : refundResult.getRefundStatus();
+        applyRefundResult(refundBill, refundStatus, payBill);
+        return refundBill.getOutRefundNo();
+    }
+
+    /**
+     * 回填渠道退款结果，并按「已确认到账」累计决定是否把支付账单置为已退款。
+     * <p>
+     * 账单置 REFUND 只统计 refund_status=2 的单：在途（0/1）单最终可能失败，
+     * 若按含在途的累计判断，在途单失败后账单已置 REFUND 无法继续退款，会导致少退。
+     */
+    private void applyRefundResult(RefundBill refundBill, Integer refundStatus, PayBill payBill) {
+        transactionTemplate.executeWithoutResult(status -> {
+            RefundBill updateRefundBill = new RefundBill();
+            updateRefundBill.setId(refundBill.getId());
+            updateRefundBill.setRefundStatus(refundStatus);
+            updateRefundBill.setRefundTime(DateUtils.now());
+            refundBillMapper.updateById(updateRefundBill);
+            if (!Objects.equals(refundStatus, RefundStatus.REFUND_SUCCESS.getCode())) {
+                return;
+            }
+            BigDecimal confirmedRefundedAmount = refundBillMapper.selectList(
+                            Wrappers.lambdaQuery(RefundBill.class)
+                                    .eq(RefundBill::getOutOrderNo, payBill.getOutOrderNo())
+                                    .eq(RefundBill::getStatus, 1)
+                                    .eq(RefundBill::getRefundStatus, RefundStatus.REFUND_SUCCESS.getCode()))
+                    .stream()
+                    // 再按状态过滤一次：SQL 条件与内存口径必须一致，脏数据/在途单不能当已确认金额
+                    .filter(bill -> Objects.equals(bill.getRefundStatus(), RefundStatus.REFUND_SUCCESS.getCode()))
+                    .map(RefundBill::getRefundAmount)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+            if (confirmedRefundedAmount.compareTo(payBill.getPayAmount()) < 0) {
+                return;
+            }
+            PayBill updatePayBill = new PayBill();
+            updatePayBill.setPayBillStatus(PayBillStatus.REFUND.getCode());
+            // 条件更新兜底并发：0 行说明账单状态已被其他流程更新，不覆盖
+            payBillMapper.update(updatePayBill, Wrappers.lambdaUpdate(PayBill.class)
+                    .eq(PayBill::getOutOrderNo, payBill.getOutOrderNo())
+                    .eq(PayBill::getPayBillStatus, PayBillStatus.PAY.getCode()));
+        });
+        if (Objects.equals(refundStatus, RefundStatus.REFUND_SUCCESS.getCode())) {
+            BusinessMetrics.increment(meterRegistry, Metrics.PAY_REFUND_TOTAL,
+                    Metrics.RESULT, Metrics.RESULT_SUCCESS);
+        } else {
+            BusinessMetrics.increment(meterRegistry, Metrics.PAY_REFUND_TOTAL,
+                    Metrics.RESULT, Metrics.RESULT_PROCESSING);
         }
-        return outRefundNo;
+    }
+
+    private void markRefundStatus(Long refundBillId, RefundStatus refundStatus) {
+        RefundBill updateRefundBill = new RefundBill();
+        updateRefundBill.setId(refundBillId);
+        updateRefundBill.setRefundStatus(refundStatus.getCode());
+        refundBillMapper.updateById(updateRefundBill);
+    }
+
+    /**
+     * 查询退款单状态。订单侧只有拿到 refundStatus=2（渠道确认已退款）才允许把订单置为已退单：
+     * 只凭「退款请求返回成功」就置已退单，等于把「受理」当「到账」，用户可能一分钱都没收到。
+     *
+     * @param refundStatusDto 订单号（分片键）+ 退款单号
+     * @return 退款单状态；<b>查不到退款单也返回空状态</b>，由调用方按「未确认」处理
+     */
+    public RefundStatusVo refundStatus(RefundStatusDto refundStatusDto) {
+        RefundStatusVo refundStatusVo = new RefundStatusVo();
+        refundStatusVo.setOutOrderNo(refundStatusDto.getOutOrderNo());
+        refundStatusVo.setOutRefundNo(refundStatusDto.getOutRefundNo());
+        RefundBill refundBill = refundBillMapper.selectOne(Wrappers.lambdaQuery(RefundBill.class)
+                .eq(RefundBill::getOutOrderNo, refundStatusDto.getOutOrderNo())
+                .eq(RefundBill::getOutRefundNo, refundStatusDto.getOutRefundNo())
+                .eq(RefundBill::getStatus, 1));
+        if (Objects.isNull(refundBill)) {
+            log.error("退款单状态查询：退款单不存在 outOrderNo : {} outRefundNo : {}",
+                    refundStatusDto.getOutOrderNo(), refundStatusDto.getOutRefundNo());
+            return refundStatusVo;
+        }
+        refundStatusVo.setRefundStatus(refundBill.getRefundStatus());
+        refundStatusVo.setRefundTime(refundBill.getRefundTime());
+        return refundStatusVo;
     }
 
     public PayBillVo detail(PayBillDto payBillDto) {

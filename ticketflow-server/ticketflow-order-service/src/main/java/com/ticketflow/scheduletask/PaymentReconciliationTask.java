@@ -58,6 +58,15 @@ public class PaymentReconciliationTask {
     private static final int SCAN_WINDOW_MINUTES = 30;
 
     /**
+     * 「退款已受理、渠道还没确认到账」的订单重试窗口（24 小时）。
+     * <p>
+     * 这类订单已经脱离上面 30 分钟的「未对账」窗口（它们被标记成对账有问题），必须单独扫：
+     * 否则会出现「系统显示已取消、钱却没退」的静默差异——用户没收到退款，系统里也没有任何东西再去找它。
+     * 超过这个窗口仍没确认的，说明渠道一直没给出结果，只能叫人工，不要再无限打扰渠道接口。
+     */
+    private static final int REFUND_CONFIRM_WINDOW_MINUTES = 24 * 60;
+
+    /**
      * 单轮最多核对多少笔。逐单查渠道是外部调用，必须限量，不能把一轮变成一次全量扫描。
      */
     private static final int BATCH_SIZE = 50;
@@ -137,6 +146,14 @@ public class PaymentReconciliationTask {
     }
 
     private void reconcile() {
+        reconcileUnpaidCancelledOrders();
+        retryUnconfirmedRefunds();
+    }
+
+    /**
+     * 第一段：最近取消、且还没做过支付对账的订单，逐笔向渠道确认真实结果。
+     */
+    private void reconcileUnpaidCancelledOrders() {
         List<Order> candidates = orderMapper.selectList(Wrappers.lambdaQuery(Order.class)
                 .eq(Order::getOrderStatus, OrderStatus.CANCEL.getCode())
                 .eq(Order::getPayReconciliationStatus, ReconciliationStatus.RECONCILIATION_NO.getCode())
@@ -145,30 +162,101 @@ public class PaymentReconciliationTask {
                 .last("limit " + BATCH_SIZE));
         if (Objects.isNull(candidates) || candidates.isEmpty()) {
             return;
-    }
-    int refunded = 0;
-    for (Order order : candidates) {
-        try {
-            PaymentReconcileResult result = orderService.reconcilePayment(order);
-            if (result.isSettled()) {
-                orderService.markPaymentReconciled(order.getOrderNumber(),
-                        ReconciliationStatus.RECONCILIATION_SUCCESS);
+        }
+        int refunded = 0;
+        for (Order order : candidates) {
+            try {
+                PaymentReconcileResult result = orderService.reconcilePayment(order);
+                if (result.isSettled()) {
+                    orderService.markPaymentReconciled(order.getOrderNumber(),
+                            ReconciliationStatus.RECONCILIATION_SUCCESS);
+                }
+                if (Objects.equals(result, PaymentReconcileResult.REFUNDED)) {
+                    refunded++;
+                }
+                BusinessMetrics.increment(meterRegistry, Metrics.PAYMENT_RECONCILE_TOTAL,
+                        Metrics.RESULT, result.name().toLowerCase());
+            } catch (Exception e) {
+                // 单笔异常不影响后面的订单；不标记对账完成，下一轮会重试
+                log.error("支付对账单笔核对异常 orderNumber : {}", order.getOrderNumber(), e);
+                BusinessMetrics.increment(meterRegistry, Metrics.PAYMENT_RECONCILE_TOTAL,
+                        Metrics.RESULT, Metrics.RESULT_ERROR);
             }
-            if (Objects.equals(result, PaymentReconcileResult.REFUNDED)) {
-                refunded++;
-            }
-            BusinessMetrics.increment(meterRegistry, Metrics.PAYMENT_RECONCILE_TOTAL,
-                    Metrics.RESULT, result.name().toLowerCase());
-        } catch (Exception e) {
-            // 单笔异常不影响后面的订单；不标记对账完成，下一轮会重试
-            log.error("支付对账单笔核对异常 orderNumber : {}", order.getOrderNumber(), e);
-            BusinessMetrics.increment(meterRegistry, Metrics.PAYMENT_RECONCILE_TOTAL,
-                    Metrics.RESULT, Metrics.RESULT_ERROR);
+        }
+        if (refunded > 0) {
+            // 出现"渠道已支付但本地已取消"说明回调在丢，这是要叫人的信号
+            log.warn("支付对账本轮发现 {} 笔“渠道已支付但本地已取消”的订单，已退款。回调可能存在丢失", refunded);
         }
     }
-    if (refunded > 0) {
-        // 出现"渠道已支付但本地已取消"说明回调在丢，这是要叫人的信号
-        log.warn("支付对账本轮发现 {} 笔“渠道已支付但本地已取消”的订单，已退款。回调可能存在丢失", refunded);
+
+    /**
+     * 第二段：重试「退款已受理但渠道还没确认到账」的订单。
+     * <p>
+     * 顺序刻意是「先只查退款单状态，必要时才重新驱动渠道」：查询是幂等读操作，重新退款才是有资金含义的写操作。
+     * 退款单号由订单号 + 金额推导（见 OrderService#reconfirmRefund），重试复用同一个幂等键，不会退第二次款。
+     */
+    private void retryUnconfirmedRefunds() {
+        List<Order> candidates = orderMapper.selectList(Wrappers.lambdaQuery(Order.class)
+                .eq(Order::getOrderStatus, OrderStatus.CANCEL.getCode())
+                .eq(Order::getPayReconciliationStatus, ReconciliationStatus.RECONCILIATION_FAIL.getCode())
+                .ge(Order::getCancelOrderTime, DateUtils.addMinute(DateUtils.now(), -REFUND_CONFIRM_WINDOW_MINUTES))
+                .orderByAsc(Order::getCancelOrderTime)
+                .last("limit " + BATCH_SIZE));
+        if (Objects.isNull(candidates) || candidates.isEmpty()) {
+            reportStaleUnconfirmedRefunds();
+            return;
+        }
+        int confirmed = 0;
+        for (Order order : candidates) {
+            try {
+                // 先只查退款单状态（无渠道写操作）：已确认到账的直接收尾
+                if (orderService.reconfirmRefund(order)) {
+                    orderService.markPaymentReconciled(order.getOrderNumber(),
+                            ReconciliationStatus.RECONCILIATION_SUCCESS);
+                    confirmed++;
+                    BusinessMetrics.increment(meterRegistry, Metrics.PAYMENT_RECONCILE_TOTAL,
+                            Metrics.RESULT, Metrics.RESULT_SUCCESS);
+                    continue;
+                }
+                // 还没确认到账：必要时重新驱动一次渠道退款（幂等键保证不会退第二次款）
+                PaymentReconcileResult result = orderService.reconcilePayment(order);
+                if (Objects.equals(result, PaymentReconcileResult.REFUNDED)) {
+                    orderService.markPaymentReconciled(order.getOrderNumber(),
+                            ReconciliationStatus.RECONCILIATION_SUCCESS);
+                    confirmed++;
+                }
+                BusinessMetrics.increment(meterRegistry, Metrics.PAYMENT_RECONCILE_TOTAL,
+                        Metrics.RESULT, "refund_" + result.name().toLowerCase());
+            } catch (Exception e) {
+                log.error("退款确认重试单笔异常 orderNumber : {}", order.getOrderNumber(), e);
+                BusinessMetrics.increment(meterRegistry, Metrics.PAYMENT_RECONCILE_TOTAL,
+                        Metrics.RESULT, Metrics.RESULT_ERROR);
+            }
+        }
+        if (confirmed > 0) {
+            log.info("退款确认重试本轮确认到账 {} 笔，剩余 {} 笔仍待确认", confirmed, candidates.size() - confirmed);
+        }
+        reportStaleUnconfirmedRefunds();
     }
+
+    /**
+     * 超出重试窗口仍未确认到账的退款：不再自动重试，留一条告警日志等人去渠道侧查单。
+     */
+    private void reportStaleUnconfirmedRefunds() {
+        try {
+            Long staleCount = orderMapper.selectCount(Wrappers.lambdaQuery(Order.class)
+                    .eq(Order::getOrderStatus, OrderStatus.CANCEL.getCode())
+                    .eq(Order::getPayReconciliationStatus, ReconciliationStatus.RECONCILIATION_FAIL.getCode())
+                    .lt(Order::getCancelOrderTime,
+                            DateUtils.addMinute(DateUtils.now(), -REFUND_CONFIRM_WINDOW_MINUTES)));
+            if (Objects.nonNull(staleCount) && staleCount > 0) {
+                log.error("有 {} 笔订单退款受理超过 {} 分钟仍未确认到账，已停止自动重试，需要人工核对渠道退款单",
+                        staleCount, REFUND_CONFIRM_WINDOW_MINUTES);
+                BusinessMetrics.increment(meterRegistry, Metrics.PAYMENT_RECONCILE_TOTAL,
+                        Metrics.RESULT, Metrics.RESULT_UNCONFIRMED);
+            }
+        } catch (Exception e) {
+            log.warn("统计超窗未确认退款失败", e);
+        }
     }
 }
