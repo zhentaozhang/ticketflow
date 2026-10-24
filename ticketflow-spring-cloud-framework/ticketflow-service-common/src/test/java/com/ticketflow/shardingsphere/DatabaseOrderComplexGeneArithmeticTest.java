@@ -7,10 +7,12 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -93,6 +95,30 @@ class DatabaseOrderComplexGeneArithmeticTest {
         long orderNumber = 1L << 32 | 0x00L;
         long userId = 0x3FL;
         assertThrows(IllegalArgumentException.class, () -> doSharding(DB_NAMES, colsOf("order_number", orderNumber, userId)));
+    }
+
+    @Test
+    void doSharding_orderNumberIn_routesToEveryMatchingDatabase() {
+        // 回归 P0-1：IN 查询跨库基因位时必须 union 路由，只取 findFirst 会静默丢掉另一个库的数据
+        long geneDs0 = 0x2AL; // (0x2A >> 2) & 1 = 0 → ds_0
+        long geneDs1 = 0x3FL; // (0x3F >> 2) & 1 = 1 → ds_1
+        List<Long> orderNumbers = List.of(1L << 32 | geneDs0, 1L << 32 | geneDs1);
+        Collection<String> result = doSharding(DB_NAMES, colsOfList("order_number", orderNumbers));
+        assertEquals(Set.of("ds_0", "ds_1"), new HashSet<>(result));
+        assertEquals(2, result.size());
+    }
+
+    @Test
+    void doSharding_orderNumberIn_sameDatabase_dedupesToSingleDb() {
+        List<Long> orderNumbers = List.of(1L << 32 | 0x22L, 1L << 32 | 0x2AL); // 0x22/0x2A >> 2 & 1 都为 0
+        Collection<String> result = doSharding(DB_NAMES, colsOfList("order_number", orderNumbers));
+        assertEquals(List.of("ds_0"), new ArrayList<>(result));
+    }
+
+    private Map<String, Collection<Long>> colsOfList(String column, List<Long> values) {
+        Map<String, Collection<Long>> map = new LinkedHashMap<>();
+        map.put(column, values);
+        return map;
     }
 
     @Test

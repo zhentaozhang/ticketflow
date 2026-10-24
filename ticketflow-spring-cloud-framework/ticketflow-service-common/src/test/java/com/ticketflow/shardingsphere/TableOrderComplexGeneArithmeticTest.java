@@ -7,10 +7,12 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -112,6 +114,35 @@ class TableOrderComplexGeneArithmeticTest {
         long orderNumber = 1L << 32 | 0x00L;
         long userId = 0x03L;
         assertThrows(IllegalArgumentException.class, () -> doSharding(cols("order_number", orderNumber, userId)));
+    }
+
+    @Test
+    void doSharding_orderNumberIn_routesToEveryMatchingTable() {
+        // 回归 P0-1：IN 查询跨基因位时必须 union 路由，只取 findFirst 会静默丢掉其余分表的数据
+        List<Long> orderNumbers = List.of(1L << 32 | 0x2AL, 1L << 32 | 0x2BL);
+        Collection<String> result = doSharding(colsOfList("order_number", orderNumbers));
+        assertEquals(Set.of("d_order_2", "d_order_3"), new HashSet<>(result));
+        assertEquals(2, result.size());
+    }
+
+    @Test
+    void doSharding_userIdIn_sameGene_dedupesToSingleTable() {
+        List<Long> userIds = List.of(0x30L, 0x34L);
+        Collection<String> result = doSharding(colsOfList("user_id", userIds));
+        assertEquals(List.of("d_order_0"), new ArrayList<>(result));
+    }
+
+    @Test
+    void doSharding_programIdIn_unionAllFourTables() {
+        Collection<String> result = doSharding(colsOfList("program_id", List.of(0L, 1L, 2L, 3L)));
+        assertEquals(4, result.size());
+        assertTrue(result.containsAll(TABLE_NAMES));
+    }
+
+    private Map<String, Collection<Long>> colsOfList(String column, List<Long> values) {
+        Map<String, Collection<Long>> map = new LinkedHashMap<>();
+        map.put(column, values);
+        return map;
     }
 
     @Test
