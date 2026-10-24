@@ -634,6 +634,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     private static final int ORDER_LIST_MAX_PAGE_SIZE = 50;
 
     /**
+     * 订单侧重建座位/余票派生 hash 时的最短有效期（秒）。
+     * <p>
+     * 这里拿不到演出时间（不能为了算 TTL 再读一次节目缓存），所以退化为固定安全值：
+     * 必须明显长于未支付订单的自动取消窗口——锁定座位 hash 若在取消前过期，
+     * 取消链路的 HINCRBY 会在空 key 上从 0 起算，等于把余票改成一个错误数字。
+     */
+    private static final long PROGRAM_HASH_EXPIRE_SECONDS = 1800L;
+
+    /**
+     * 节目操作流水 hash 的保留时长（秒）：在派生数据有效期之上再保留 7 天，供对账回看。
+     */
+    private static final long PROGRAM_RECORD_EXPIRE_SECONDS = 604800L;
+
+    /**
      * 支付对账（定时兜底用）：向渠道确认这一笔的真实结果，并只在“渠道确实收了钱”时收尾。
      * <p>
      * 要解决的问题：回调丢失时会出现“用户付了钱、订单却被超时取消”，
@@ -1213,11 +1227,14 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         String recordTye = Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode()) ? RecordType.INCREASE.getValue() : RecordType.CHANGE_STATUS.getValue();
         keys.add(recordTye + GLIDE_LINE + identifierId + GLIDE_LINE + userId);
         keys.add(recordTye);
-        Object[] data = new String[4];
+        Object[] data = new String[6];
         data[0] = JSON.toJSONString(unLockSeatIdjsonArray);
         data[1] = JSON.toJSONString(addSeatDatajsonArray);
         data[2] = JSON.toJSONString(jsonArray);
         data[3] = JSON.toJSONString(seatIdAndTicketUserIdDomainList);
+        // 派生 hash 有效期：Lua 只在新建 key 时补设期，已有 TTL 不会被延长。
+        data[4] = String.valueOf(PROGRAM_HASH_EXPIRE_SECONDS);
+        data[5] = String.valueOf(PROGRAM_RECORD_EXPIRE_SECONDS);
 
         ProgramOperateDataDto programOperateDataDto = new ProgramOperateDataDto();
         programOperateDataDto.setProgramId(programId);
@@ -1572,11 +1589,14 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         String recordType = RecordType.INCREASE.getValue();
         keys.add(recordType + GLIDE_LINE + orderCreateMq.getIdentifierId() + GLIDE_LINE + orderCreateMq.getUserId());
         keys.add(recordType);
-        Object[] data = new String[4];
+        Object[] data = new String[6];
         data[0] = JSON.toJSONString(unLockSeatIdjsonArray);
         data[1] = JSON.toJSONString(addSeatDatajsonArray);
         data[2] = JSON.toJSONString(jsonArray);
         data[3] = JSON.toJSONString(seatIdAndTicketUserIdDomainList);
+        // 派生 hash 有效期：Lua 只在新建 key 时补设期，已有 TTL 不会被延长。
+        data[4] = String.valueOf(PROGRAM_HASH_EXPIRE_SECONDS);
+        data[5] = String.valueOf(PROGRAM_RECORD_EXPIRE_SECONDS);
         orderProgramCacheResolutionOperate.programCacheReverseOperate(keys, data);
         log.info("丢弃订单回滚Redis座位完成 订单号 : {}", orderCreateMq.getOrderNumber());
     }

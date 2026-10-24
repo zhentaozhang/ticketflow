@@ -1,6 +1,4 @@
-package com.ticketflow.service.cache;
-
-import com.ticketflow.util.DateUtils;
+package com.ticketflow.util;
 
 import java.util.Date;
 import java.util.Objects;
@@ -15,8 +13,19 @@ import java.util.concurrent.ThreadLocalRandom;
  * <p>
  * 本工具类通过在业务到期剩余时间上叠加随机浮动（Jitter），将大量 Key 的自然到期时间平滑打散，
  * 同时严格限制不过期超过演出开始时间（只向下扰动，不向上延期）。
+ * <p>
+ * 约定：<b>本类永远不返回 {@code 0} 或负数 TTL</b>。Redis 的 {@code SET key v EX 0} 会直接报错
+ * （{@code ERR invalid expire time}），{@code EXPIRE key 0} 会立刻删除整个 key，
+ * 二者都不是"不缓存/立即过期"的合法表达。业务时间缺失或已过去时，统一回退到
+ * {@link #FALLBACK_EXPIRE_SECONDS} 的短有效期，既避免参数错误打穿到接口，也避免每个请求都回源数据库。
  */
 public final class CacheTtlUtil {
+
+    /**
+     * 兜底有效期（秒）。业务截止时间缺失或已经过去时使用：
+     * 演出已结束的数据仍保留 5 分钟可读窗口，避免缓存被立刻清空后所有请求同时回源。
+     */
+    public static final long FALLBACK_EXPIRE_SECONDS = 300L;
 
     /**
      * 临近演出的阈值（秒）。小于该值时不再叠加抖动，避免过度缩短有效期或引发异常。
@@ -41,11 +50,11 @@ public final class CacheTtlUtil {
      * 计算带随机抖动的 Redis 缓存过期时间（秒）。
      *
      * @param expireDate 业务截止时间（如演出开始时间）
-     * @return 实际应该设置的 Redis TTL（秒），确保大于等于 0
+     * @return 实际应该设置的 Redis TTL（秒），严格大于 0
      */
     public static long calculateExpireSeconds(Date expireDate) {
         if (Objects.isNull(expireDate)) {
-            return 0L;
+            return FALLBACK_EXPIRE_SECONDS;
         }
         return calculateExpireSeconds(DateUtils.now(), expireDate);
     }
@@ -55,15 +64,16 @@ public final class CacheTtlUtil {
      *
      * @param baseDate   基准时间（通常为当前时间）
      * @param expireDate 业务截止时间
-     * @return 实际应该设置的 Redis TTL（秒）
+     * @return 实际应该设置的 Redis TTL（秒），严格大于 0
      */
     public static long calculateExpireSeconds(Date baseDate, Date expireDate) {
         if (Objects.isNull(baseDate) || Objects.isNull(expireDate)) {
-            return 0L;
+            return FALLBACK_EXPIRE_SECONDS;
         }
         long baseSeconds = DateUtils.countBetweenSecond(baseDate, expireDate);
         if (baseSeconds <= 0) {
-            return 0L;
+            // 演出已经开始或已结束：不再按"剩余时间"计算，回退到短有效期
+            return FALLBACK_EXPIRE_SECONDS;
         }
         if (baseSeconds <= CRITICAL_EXPIRE_SECONDS) {
             return baseSeconds;

@@ -19,7 +19,7 @@ import com.ticketflow.mapper.ProgramMapper;
 import com.ticketflow.mapper.TicketCategoryMapper;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
-import com.ticketflow.service.cache.CacheTtlUtil;
+import com.ticketflow.util.CacheTtlUtil;
 import com.ticketflow.service.cache.local.LocalCacheTicketCategory;
 import com.ticketflow.servicelock.LockType;
 import com.ticketflow.util.ServiceLockTool;

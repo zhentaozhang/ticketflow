@@ -12,6 +12,10 @@
 --- ARGV[1]: 票档列表 JSON
 --- ARGV[2]: 座位数据 JSON
 --- ARGV[3]: 购票人 id 列表 JSON
+--- ARGV[4]: 单账号限购数量（0 表示不限购）
+--- ARGV[5]: 本次购买数量（用于累加单账号购买数）
+--- ARGV[6]: 座位/余票 hash 的有效期（秒），仅在新建 key 时补设
+--- ARGV[7]: 流水 hash 的有效期（秒），仅在新建 key 时补设
 ---
 --- 错误码：
 --- 40001 — 座位不存在
@@ -45,6 +49,26 @@ local ticket_count_list = cjson.decode(ARGV[1])
 local ticket_user_id_list = cjson.decode(ARGV[3])
 local per_account_limit = ARGV[4] and tonumber(ARGV[4]) or 0
 local current_purchase_count = ARGV[5] and tonumber(ARGV[5]) or 0
+
+-- 派生 hash 的有效期（秒）。缺省取安全下限：座位/余票 30 分钟，流水 7 天。
+-- 这里唯一的职责是「新建 key 时补设期」，已有 TTL 一律不延长。
+local cache_expire_seconds = ARGV[6] and tonumber(ARGV[6]) or 0
+local record_expire_seconds = ARGV[7] and tonumber(ARGV[7]) or 0
+if (not cache_expire_seconds or cache_expire_seconds <= 0) then
+	cache_expire_seconds = 1800
+end
+if (not record_expire_seconds or record_expire_seconds <= 0) then
+	record_expire_seconds = 604800
+end
+
+-- 未售/锁定/已售三个座位 hash 与余票 hash 都是派生数据：
+-- 座位从一个集合整体 HDEL 后 key 会消失，随后的 HMSET/HINCRBY 重建出来的 key 没有 TTL，
+-- 不加设期就会永久驻留。每个写点补一次设期，让重建出来的 key 也能自愈过期。
+local function apply_expire_if_absent(hash_key, expire_seconds)
+	if (redis.call('ttl', hash_key) < 0) then
+		redis.call('expire', hash_key, expire_seconds)
+	end
+end
 
 -- 保存最终可以购买的座位，同时构建票档和座位的变更记录。
 local purchase_seat_list = {}
@@ -253,6 +277,7 @@ for index, ticket_count in ipairs(ticket_count_list) do
 		ticket_remain_number_hash_key,
 		ticket_category_id,
 		"-" .. count)
+	apply_expire_if_absent(ticket_remain_number_hash_key, cache_expire_seconds)
 end
 
 -- 原子累加单账号购买数量，并设置默认30分钟TTL
@@ -276,13 +301,12 @@ for ticket_category_id, seat_id_array in pairs(seat_id_list) do
 end
 
 for ticket_category_id, seat_data_array in pairs(seat_data_list) do
-	redis.call(
-		'hmset',
-		string.format(
-			placeholder_seat_lock_hash_key,
-			program_id,
-			tostring(ticket_category_id)),
-		unpack(seat_data_array))
+	local seat_lock_hash_key = string.format(
+		placeholder_seat_lock_hash_key,
+		program_id,
+		tostring(ticket_category_id))
+	redis.call('hmset', seat_lock_hash_key, unpack(seat_data_array))
+	apply_expire_if_absent(seat_lock_hash_key, cache_expire_seconds)
 end
 
 -- 第六阶段：使用 Redis 服务端时间写入流水。
@@ -297,11 +321,10 @@ local purchase_record = {
 	ticketCategoryRecordList = ticket_category_record_list
 }
 
-redis.call(
-	'hset',
-	string.format(record_hash_key, program_id),
-	identifier_id,
-	cjson.encode(purchase_record))
+local program_record_hash_key = string.format(record_hash_key, program_id)
+redis.call('hset', program_record_hash_key, identifier_id, cjson.encode(purchase_record))
+apply_expire_if_absent(program_record_hash_key, record_expire_seconds)
+
 
 -- 第七阶段：返回执行结果和锁定后的座位信息。
 return string.format(

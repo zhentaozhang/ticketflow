@@ -16,7 +16,7 @@ import com.ticketflow.client.OrderClient;
 import com.ticketflow.client.UserClient;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
-import com.ticketflow.service.cache.CacheTtlUtil;
+import com.ticketflow.util.CacheTtlUtil;
 import com.ticketflow.dto.AccountOrderCountDto;
 import com.ticketflow.dto.AreaGetDto;
 import com.ticketflow.dto.AreaSelectDto;

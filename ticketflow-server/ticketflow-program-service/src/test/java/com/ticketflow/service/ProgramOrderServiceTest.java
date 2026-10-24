@@ -327,6 +327,11 @@ class ProgramOrderServiceTest {
             JSONArray matchedSeatArray = JSON.parseArray(seatDataArray.getJSONObject(0).getString("seatDataList"));
             List<Long> matchedSeatIds = matchedSeatArray.stream().map(o -> ((JSONObject) o).getLong("id")).toList();
             assertEquals(List.of(50L, 51L), matchedSeatIds);
+            // Lua 的 ARGV[6]/ARGV[7]：座位/余票有效期与流水保留时长，缺了它们新建的 key 就没有 TTL
+            long cacheExpireSeconds = Long.parseLong(dataCaptor.getValue()[5]);
+            long recordExpireSeconds = Long.parseLong(dataCaptor.getValue()[6]);
+            assertTrue(cacheExpireSeconds >= 1800L, "座位/余票有效期不得短于 30 分钟：" + cacheExpireSeconds);
+            assertEquals(cacheExpireSeconds + 604800L, recordExpireSeconds);
         }
 
         @Test
@@ -753,7 +758,10 @@ class ProgramOrderServiceTest {
             method.setAccessible(true);
             method.invoke(programOrderService, PROGRAM_ID, seats, OrderStatus.NO_PAY);
 
-            verify(programCacheResolutionOperate).programCacheOperate(anyList(), any());
+            ArgumentCaptor<String[]> dataCaptor = ArgumentCaptor.forClass(String[].class);
+            verify(programCacheResolutionOperate).programCacheOperate(anyList(), dataCaptor.capture());
+            // 查不到演出时间（测试未 stub）时必须回退最短安全值，而不是抛异常或传 0
+            assertEquals("1800", dataCaptor.getValue()[3]);
         }
 
         @Test

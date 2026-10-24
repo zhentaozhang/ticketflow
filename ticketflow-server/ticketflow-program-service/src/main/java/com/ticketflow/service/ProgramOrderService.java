@@ -26,7 +26,7 @@ import com.ticketflow.enums.SellStatus;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.mapper.ProgramRecordTaskMapper;
 import com.ticketflow.redis.RedisKeyBuild;
-import com.ticketflow.service.cache.CacheTtlUtil;
+import com.ticketflow.util.CacheTtlUtil;
 import com.ticketflow.service.delaysend.DelayOrderCancelSend;
 import com.ticketflow.service.domain.CreateOrderTemporaryData;
 import com.ticketflow.service.kafka.CreateOrderMqDomain;
@@ -93,6 +93,20 @@ public class ProgramOrderService {
      * 因此无需长时间阻塞请求线程；500ms 已覆盖正常发送，超时路径不影响正确性。
      */
     private static final long KAFKA_SEND_AWAIT_MS = 500L;
+
+    /**
+     * 座位/余票派生 hash 的最短有效期（秒）。
+     * 演出时间算出来的值可能很短（临近开演）甚至已经过期，但未支付订单的自动取消窗口
+     * 需要这些 key 还在——锁定座位一旦提前过期，取消时 HINCRBY 会在空 key 上从 0 起算。
+     * 30 分钟远大于取消窗口，同时也能让陈旧派生数据自愈过期。
+     */
+    private static final long PROGRAM_HASH_MIN_EXPIRE_SECONDS = 1800L;
+
+    /**
+     * 节目操作流水 hash 的保留时长（秒），在座位/余票有效期之上额外保留 7 天。
+     * 流水只增不减会永久驻留，但对账需要用近期流水，所以"过期"而非"永存"。
+     */
+    private static final long PROGRAM_RECORD_RETAIN_SECONDS = 604800L;
 
     /**
      * 对账记录任务专用线程池：与通用 BusinessThreadPool 隔离。
@@ -432,7 +446,7 @@ public class ProgramOrderService {
                 RedisKeyManage.ACCOUNT_ORDER_COUNT, programOrderCreateDto.getUserId(), programId).getRelKey();
 
         List<String> keys = new ArrayList<>();
-        String[] data = new String[5];
+        String[] data = new String[7];
         //更新票档数据集合
         JSONArray jsonArray = new JSONArray();
         //添加座位数据集合
@@ -507,6 +521,13 @@ public class ProgramOrderService {
                 .toList());
         data[3] = String.valueOf(perAccountLimit);
         data[4] = String.valueOf(currentPurchaseCount);
+        // 派生 hash 的有效期：由演出时间决定，并保证不短于 PROGRAM_HASH_MIN_EXPIRE_SECONDS。
+        // Lua 只在新建 key 时用它补设期，已有 TTL 不会被延长。
+        long cacheExpireSeconds = Math.max(
+                CacheTtlUtil.calculateExpireSeconds(programShowTime.getShowTime()),
+                PROGRAM_HASH_MIN_EXPIRE_SECONDS);
+        data[5] = String.valueOf(cacheExpireSeconds);
+        data[6] = String.valueOf(cacheExpireSeconds + PROGRAM_RECORD_RETAIN_SECONDS);
 
         ProgramCacheCreateOrderData programCacheCreateOrderData;
         if (CollectionUtil.isNotEmpty(seatDtoList)) {
@@ -967,7 +988,7 @@ public class ProgramOrderService {
         List<String> keys = new ArrayList<>();
         keys.add("#");
 
-        String[] data = new String[3];
+        String[] data = new String[4];
         Map<Long, Long> ticketCategoryCountMap =
                 seatVoList.stream().collect(Collectors.groupingBy(SeatVo::getTicketCategoryId, Collectors.counting()));
         JSONArray jsonArray = new JSONArray();
@@ -1021,6 +1042,27 @@ public class ProgramOrderService {
         data[0] = JSON.toJSONString(jsonArray);
         data[1] = JSON.toJSONString(delSeatIdjsonArray);
         data[2] = JSON.toJSONString(addSeatDatajsonArray);
+        data[3] = String.valueOf(resolveProgramHashExpireSeconds(programId));
         programCacheResolutionOperate.programCacheOperate(keys, data);
+    }
+
+    /**
+     * 计算座位/余票派生 hash 的有效期（秒）。
+     * <p>
+     * 回滚/取消链路必须足够健壮：查不到演出时间时退化为最短安全值，而不是让整条回滚因为算不出 TTL 而失败。
+     *
+     * @param programId 节目 id
+     * @return 有效期秒数，恒大于 0
+     */
+    private long resolveProgramHashExpireSeconds(Long programId) {
+        try {
+            ProgramShowTime programShowTime =
+                    programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(programId);
+            return Math.max(CacheTtlUtil.calculateExpireSeconds(programShowTime.getShowTime()),
+                    PROGRAM_HASH_MIN_EXPIRE_SECONDS);
+        } catch (Exception e) {
+            log.warn("计算节目派生缓存有效期失败，回退最短安全值 programId : {}", programId, e);
+            return PROGRAM_HASH_MIN_EXPIRE_SECONDS;
+        }
     }
 }

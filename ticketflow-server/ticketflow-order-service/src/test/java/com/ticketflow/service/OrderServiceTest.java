@@ -1132,6 +1132,11 @@ class OrderServiceTest {
         JSONArray seatUserJsonArray = JSON.parseArray(String.valueOf(data[3]));
         assertEquals(SEAT_ID, seatUserJsonArray.getJSONObject(0).getLong("seatId"));
         assertEquals(TICKET_USER_ID, seatUserJsonArray.getJSONObject(0).getLong("ticketUserId"));
+
+        // 派生 hash 有效期随参数传给 Lua：座位/余票 30 分钟、流水在此基础上再保留 7 天。
+        // 这两个参数缺失会让重建出来的 key 永久驻留，所以按契约断言。
+        assertEquals("1800", String.valueOf(data[4]));
+        assertEquals("604800", String.valueOf(data[5]));
     }
 
     @Test

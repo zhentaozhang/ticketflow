@@ -3,6 +3,7 @@ package com.ticketflow.redis;
 import com.alibaba.fastjson.JSON;
 import com.ticketflow.util.StringUtil;
 import lombok.AllArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.DefaultTypedTuple;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -28,8 +29,20 @@ import java.util.stream.Collectors;
  * 所有操作基于 FastJSON 序列化/反序列化，
  * 对外暴露 getInstance() 方法供 Lua 脚本执行使用
  */
+@Slf4j
 @AllArgsConstructor
 public class RedisCacheImpl implements RedisCache {
+
+    /**
+     * TTL 非法（0 或负数）时的兜底有效期（秒）。
+     * <p>
+     * Redis 没有"有效期 0"这种语义：{@code SET key v EX 0} 直接报
+     * {@code ERR invalid expire time}，{@code EXPIRE key 0} 会立即删除整个 key。
+     * 上游 TTL 由业务截止时间算出，演出已过去或时间字段缺失时都可能得到 0，
+     * 若原样透传就会把"参数错误"变成"接口 500"或"缓存永远建不起来"。
+     * 这里统一回退为 5 分钟，让调用方拿到可用结果并留下告警日志。
+     */
+    private static final long FALLBACK_TTL_SECONDS = 300L;
 
     private StringRedisTemplate redisTemplate;
 
@@ -154,6 +167,11 @@ public class RedisCacheImpl implements RedisCache {
         CacheUtil.checkNotBlank(redisKeyBuild);
         String key = redisKeyBuild.getRelKey();
         String json = object instanceof String ? (String) object : JSON.toJSONString(object);
+        if (ttl <= 0) {
+            warnInvalidTtl(key, ttl);
+            redisTemplate.opsForValue().set(key, json, FALLBACK_TTL_SECONDS, TimeUnit.SECONDS);
+            return;
+        }
         redisTemplate.opsForValue().set(key, json, ttl, timeUnit);
     }
 
@@ -162,6 +180,10 @@ public class RedisCacheImpl implements RedisCache {
         CacheUtil.checkNotBlank(redisKeyBuild);
         String key = redisKeyBuild.getRelKey();
         String json = object instanceof String ? (String) object : JSON.toJSONString(object);
+        if (ttl <= 0) {
+            warnInvalidTtl(key, ttl);
+            return redisTemplate.opsForValue().setIfAbsent(key, json, FALLBACK_TTL_SECONDS, TimeUnit.SECONDS);
+        }
         return redisTemplate.opsForValue().setIfAbsent(key, json, ttl, timeUnit);
     }
 
@@ -422,7 +444,15 @@ public class RedisCacheImpl implements RedisCache {
     public Boolean expire(RedisKeyBuild redisKeyBuild, long ttl, TimeUnit timeUnit) {
         CacheUtil.checkNotBlank(redisKeyBuild);
         String key = redisKeyBuild.getRelKey();
+        if (ttl <= 0) {
+            warnInvalidTtl(key, ttl);
+            return redisTemplate.expire(key, FALLBACK_TTL_SECONDS, TimeUnit.SECONDS);
+        }
         return redisTemplate.expire(key, ttl, timeUnit);
+    }
+
+    private static void warnInvalidTtl(String key, long ttl) {
+        log.warn("Redis 有效期非法(<=0)，已回退为 {} 秒 key : {} 原 ttl : {}", FALLBACK_TTL_SECONDS, key, ttl);
     }
 
     // 暴露底层 StringRedisTemplate，供 Lua 脚本通过 execute(redisScript, keys, args) 调用
