@@ -3,9 +3,13 @@ package com.ticketflow.controller;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.dto.ProgramOperateDataDto;
 import com.ticketflow.dto.ReduceRemainNumberDto;
+import com.ticketflow.dto.SeatSellStatusDto;
 import com.ticketflow.service.ProgramService;
+import com.ticketflow.vo.SeatSellStatusVo;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.Valid;
+
+import java.util.List;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -33,5 +37,11 @@ public class ProgramInteriorController {
     @PostMapping(value = "/operate/program/data")
     public ApiResponse<Boolean> operateProgramData(@Valid @RequestBody ProgramOperateDataDto programOperateDataDto){
         return ApiResponse.ok(programService.operateProgramData(programOperateDataDto));
+    }
+
+    @Operation(summary  = "查询座位售卖状态（订单服务核对节目服务DB是否已收敛）")
+    @PostMapping(value = "/seat/status")
+    public ApiResponse<List<SeatSellStatusVo>> selectSeatSellStatus(@Valid @RequestBody SeatSellStatusDto seatSellStatusDto){
+        return ApiResponse.ok(programService.selectSeatSellStatus(seatSellStatusDto));
     }
 }

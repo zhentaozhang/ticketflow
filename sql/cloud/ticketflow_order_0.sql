@@ -31,11 +31,17 @@ CREATE TABLE `d_order_0` (
   `create_time` datetime DEFAULT NULL COMMENT '创建时间',
   `edit_time` datetime DEFAULT NULL COMMENT '编辑时间',
   `status` tinyint(1) DEFAULT '1' COMMENT '1:正常 0:删除',
+  `program_sync_status` tinyint(1) NOT NULL DEFAULT '0' COMMENT '节目数据同步状态 0:无需同步 1:待同步 2:已同步 3:死信',
+  `program_sync_attempts` int(3) NOT NULL DEFAULT '0' COMMENT '节目数据同步已尝试次数',
+  `program_sync_next_time` datetime DEFAULT NULL COMMENT '节目数据下次允许同步的时间',
+  `program_sync_payload` text COMMENT '待同步给节目服务的 ProgramOperateDataDto JSON',
+  `program_sync_error` varchar(500) DEFAULT NULL COMMENT '最近一次同步失败原因',
   PRIMARY KEY (`id`),
   UNIQUE KEY `d_order_order_number_IDX` (`order_number`) USING BTREE,
   KEY `d_order_pay_reconcile_IDX` (`order_status`,`pay_reconciliation_status`,`cancel_order_time`) USING BTREE,
   KEY `user_id_IDX` (`user_id`) USING BTREE,
-  KEY `program_id_IDX` (`program_id`) USING BTREE
+  KEY `program_id_IDX` (`program_id`) USING BTREE,
+  KEY `idx_program_sync` (`program_sync_status`,`program_sync_next_time`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='订单表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -80,11 +86,17 @@ CREATE TABLE `d_order_1` (
   `create_time` datetime DEFAULT NULL COMMENT '创建时间',
   `edit_time` datetime DEFAULT NULL COMMENT '编辑时间',
   `status` tinyint(1) DEFAULT '1' COMMENT '1:正常 0:删除',
+  `program_sync_status` tinyint(1) NOT NULL DEFAULT '0' COMMENT '节目数据同步状态 0:无需同步 1:待同步 2:已同步 3:死信',
+  `program_sync_attempts` int(3) NOT NULL DEFAULT '0' COMMENT '节目数据同步已尝试次数',
+  `program_sync_next_time` datetime DEFAULT NULL COMMENT '节目数据下次允许同步的时间',
+  `program_sync_payload` text COMMENT '待同步给节目服务的 ProgramOperateDataDto JSON',
+  `program_sync_error` varchar(500) DEFAULT NULL COMMENT '最近一次同步失败原因',
   PRIMARY KEY (`id`),
   UNIQUE KEY `d_order_order_number_IDX` (`order_number`) USING BTREE,
   KEY `d_order_pay_reconcile_IDX` (`order_status`,`pay_reconciliation_status`,`cancel_order_time`) USING BTREE,
   KEY `user_id_IDX` (`user_id`) USING BTREE,
-  KEY `program_id_IDX` (`program_id`) USING BTREE
+  KEY `program_id_IDX` (`program_id`) USING BTREE,
+  KEY `idx_program_sync` (`program_sync_status`,`program_sync_next_time`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='订单表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -129,11 +141,17 @@ CREATE TABLE `d_order_2` (
   `create_time` datetime DEFAULT NULL COMMENT '创建时间',
   `edit_time` datetime DEFAULT NULL COMMENT '编辑时间',
   `status` tinyint(1) DEFAULT '1' COMMENT '1:正常 0:删除',
+  `program_sync_status` tinyint(1) NOT NULL DEFAULT '0' COMMENT '节目数据同步状态 0:无需同步 1:待同步 2:已同步 3:死信',
+  `program_sync_attempts` int(3) NOT NULL DEFAULT '0' COMMENT '节目数据同步已尝试次数',
+  `program_sync_next_time` datetime DEFAULT NULL COMMENT '节目数据下次允许同步的时间',
+  `program_sync_payload` text COMMENT '待同步给节目服务的 ProgramOperateDataDto JSON',
+  `program_sync_error` varchar(500) DEFAULT NULL COMMENT '最近一次同步失败原因',
   PRIMARY KEY (`id`),
   UNIQUE KEY `d_order_order_number_IDX` (`order_number`) USING BTREE,
   KEY `d_order_pay_reconcile_IDX` (`order_status`,`pay_reconciliation_status`,`cancel_order_time`) USING BTREE,
   KEY `user_id_IDX` (`user_id`) USING BTREE,
-  KEY `program_id_IDX` (`program_id`) USING BTREE
+  KEY `program_id_IDX` (`program_id`) USING BTREE,
+  KEY `idx_program_sync` (`program_sync_status`,`program_sync_next_time`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='订单表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -178,11 +196,17 @@ CREATE TABLE `d_order_3` (
   `create_time` datetime DEFAULT NULL COMMENT '创建时间',
   `edit_time` datetime DEFAULT NULL COMMENT '编辑时间',
   `status` tinyint(1) DEFAULT '1' COMMENT '1:正常 0:删除',
+  `program_sync_status` tinyint(1) NOT NULL DEFAULT '0' COMMENT '节目数据同步状态 0:无需同步 1:待同步 2:已同步 3:死信',
+  `program_sync_attempts` int(3) NOT NULL DEFAULT '0' COMMENT '节目数据同步已尝试次数',
+  `program_sync_next_time` datetime DEFAULT NULL COMMENT '节目数据下次允许同步的时间',
+  `program_sync_payload` text COMMENT '待同步给节目服务的 ProgramOperateDataDto JSON',
+  `program_sync_error` varchar(500) DEFAULT NULL COMMENT '最近一次同步失败原因',
   PRIMARY KEY (`id`),
   UNIQUE KEY `d_order_order_number_IDX` (`order_number`) USING BTREE,
   KEY `d_order_pay_reconcile_IDX` (`order_status`,`pay_reconciliation_status`,`cancel_order_time`) USING BTREE,
   KEY `user_id_IDX` (`user_id`) USING BTREE,
-  KEY `program_id_IDX` (`program_id`) USING BTREE
+  KEY `program_id_IDX` (`program_id`) USING BTREE,
+  KEY `idx_program_sync` (`program_sync_status`,`program_sync_next_time`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='订单表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 

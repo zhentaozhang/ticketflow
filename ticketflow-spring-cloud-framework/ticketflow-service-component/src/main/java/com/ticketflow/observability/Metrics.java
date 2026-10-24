@@ -91,4 +91,31 @@ public final class Metrics {
      * 跳过本身不丢数据（下轮扫的是同一个时间窗口），连续多轮跳过才说明单轮对账变慢了，需要告警。
      */
     public static final String RESULT_SKIPPED = "skipped";
+
+    /* ==================== 节目数据同步（order-service，事务外 outbox，每分钟） ==================== */
+
+    /**
+     * 支付/取消后"把节目服务 DB 收敛到目标状态"的结果总数，tags：{@link #RESULT}。
+     * 取值：
+     * <ul>
+     *   <li>{@link #RESULT_SUCCESS}：首次推送就成功；</li>
+     *   <li>{@link #RESULT_VERIFIED}：推送返回失败/超时，但复核发现 DB 其实已生效（响应丢失），不重复推送；</li>
+     *   <li>{@link #RESULT_RETRY}：本次没收敛，已排下一轮重试；</li>
+     *   <li>{@link #RESULT_NOT_CONVERGED}：Redis（权威）还没收敛，拒绝推进 DB，退避重试；</li>
+     *   <li>{@link #RESULT_DEAD}：重试次数用尽，转人工——<b>这是要叫人的信号</b>；</li>
+     *   <li>{@link #RESULT_UNSYNCED}：差异扫描发现"终态订单却没有同步登记"，同样需要人工确认；</li>
+     *   <li>{@link #RESULT_ERROR}：同步过程抛异常。</li>
+     * </ul>
+     */
+    public static final String ORDER_PROGRAM_SYNC_TOTAL = "ticketflow_order_program_sync_total";
+    /** 推送返回失败但复核发现已生效（响应丢失，不重复推送） */
+    public static final String RESULT_VERIFIED = "verified";
+    /** 未收敛，已排下一轮重试 */
+    public static final String RESULT_RETRY = "retry";
+    /** Redis 权威数据还没收敛，拒绝把 DB 推到前面 */
+    public static final String RESULT_NOT_CONVERGED = "not_converged";
+    /** 重试次数用尽，转人工 */
+    public static final String RESULT_DEAD = "dead";
+    /** 差异扫描发现终态订单未登记节目数据同步 */
+    public static final String RESULT_UNSYNCED = "unsynced";
 }

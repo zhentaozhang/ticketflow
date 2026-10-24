@@ -18,6 +18,7 @@ import com.ticketflow.core.SpringUtil;
 import com.ticketflow.domain.OrderCreateDomain;
 import com.ticketflow.domain.OrderCreateMq;
 import com.ticketflow.domain.OrderTraceResult;
+import com.ticketflow.domain.ProgramSyncPayload;
 import com.ticketflow.domain.SeatIdAndTicketUserIdDomain;
 import com.ticketflow.dto.*;
 import com.ticketflow.entity.Order;
@@ -29,6 +30,7 @@ import com.ticketflow.enums.*;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.mapper.OrderMapper;
 import com.ticketflow.mapper.OrderProgramMapper;
+import com.ticketflow.mapper.OrderProgramSyncMapper;
 import com.ticketflow.mapper.OrderTicketUserMapper;
 import com.ticketflow.mapper.OrderTicketUserRecordMapper;
 import com.ticketflow.redis.RedisCache;
@@ -109,6 +111,8 @@ class OrderServiceTest {
     private ProgramClient programClient;
     private OrderTicketUserRecordMapper orderTicketUserRecordMapper;
     private OrderProgramMapper orderProgramMapper;
+    private OrderProgramSyncMapper orderProgramSyncMapper;
+    private OrderProgramSyncService orderProgramSyncService;
     private DelayOperateProgramDataSend delayOperateProgramDataSend;
     private RLock lock;
 
@@ -155,6 +159,8 @@ class OrderServiceTest {
         programClient = mock(ProgramClient.class);
         orderTicketUserRecordMapper = mock(OrderTicketUserRecordMapper.class);
         orderProgramMapper = mock(OrderProgramMapper.class);
+        orderProgramSyncMapper = mock(OrderProgramSyncMapper.class);
+        orderProgramSyncService = mock(OrderProgramSyncService.class);
         delayOperateProgramDataSend = mock(DelayOperateProgramDataSend.class);
         // createMq 用 TransactionTemplate 显式圈建单事务；单测里直接执行回调，等价于无事务语义
         TransactionTemplate transactionTemplate = mock(TransactionTemplate.class);
@@ -182,6 +188,8 @@ class OrderServiceTest {
         ReflectionTestUtils.setField(orderService, "programClient", programClient);
         ReflectionTestUtils.setField(orderService, "orderTicketUserRecordMapper", orderTicketUserRecordMapper);
         ReflectionTestUtils.setField(orderService, "orderProgramMapper", orderProgramMapper);
+        ReflectionTestUtils.setField(orderService, "orderProgramSyncMapper", orderProgramSyncMapper);
+        ReflectionTestUtils.setField(orderService, "orderProgramSyncService", orderProgramSyncService);
         ReflectionTestUtils.setField(orderService, "delayOperateProgramDataSend", delayOperateProgramDataSend);
         ReflectionTestUtils.setField(orderService, "transactionTemplate", transactionTemplate);
     }
@@ -574,10 +582,13 @@ class OrderServiceTest {
         verify(redisTemplate).execute(any(RedisScript.class), eq(List.of(expectedAccountKey)), eq("1"));
         verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
         verify(programClient, never()).operateProgramData(any());
+        // V3 走延迟消息收敛 DB，不进 outbox（本次改造只覆盖 V4）
+        verify(orderProgramSyncMapper, never()).enqueue(any(), any(), any());
+        verify(orderProgramSyncService, never()).flushAfterCommit(any());
     }
 
     @Test
-    void updateOrderRelatedData支付时写入变更记录并调用V4节目服务() {
+    void updateOrderRelatedData支付时登记节目数据同步并在提交后推送() {
         stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
         when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.ok(true));
         orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
@@ -592,20 +603,31 @@ class OrderServiceTest {
         assertEquals(RecordType.CHANGE_STATUS.getCode(), recordCaptor.getValue().get(0).getRecordTypeCode());
 
         verify(redisTemplate, never()).execute(any(RedisScript.class), anyList(), any());
-        ArgumentCaptor<ProgramOperateDataDto> operateCaptor = ArgumentCaptor.forClass(ProgramOperateDataDto.class);
-        verify(programClient).operateProgramData(operateCaptor.capture());
-        assertEquals(PROGRAM_ID, operateCaptor.getValue().getProgramId());
-        assertEquals(SellStatus.SOLD.getCode(), operateCaptor.getValue().getSellStatus());
+
+        // 入队在事务内：状态 CAS 与"留下待同步记录"要么同时成立，要么都不成立
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(orderProgramSyncMapper).enqueue(eq(ORDER_NUMBER), any(), payloadCaptor.capture());
+        ProgramSyncPayload enqueuedPayload = JSON.parseObject(payloadCaptor.getValue(), ProgramSyncPayload.class);
+        assertEquals(PROGRAM_ID, enqueuedPayload.getProgramId());
+        assertEquals(ORDER_NUMBER, enqueuedPayload.getOrderNumber());
+        assertEquals(IDENTIFIER_ID, enqueuedPayload.getIdentifierId());
+        assertEquals(SellStatus.SOLD.getCode(), enqueuedPayload.getSellStatus());
+        assertEquals(List.of(SEAT_ID), enqueuedPayload.getTicketCategorySeatMap().get(TICKET_CATEGORY_ID));
+
+        // 真正的 Feign 收敛交给提交后的 outbox 执行端，OrderService 不再直接调节目服务
+        ArgumentCaptor<ProgramSyncPayload> flushCaptor = ArgumentCaptor.forClass(ProgramSyncPayload.class);
+        verify(orderProgramSyncService).flushAfterCommit(flushCaptor.capture());
+        assertEquals(ORDER_NUMBER, flushCaptor.getValue().getOrderNumber());
         verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+        verify(programClient, never()).operateProgramData(any());
     }
 
     @Test
-    void updateOrderRelatedData支付时V4节目服务返回失败不抛异常且Lua仍执行() {
+    void updateOrderRelatedData支付时节目数据同步抛异常不影响已提交状态() {
         stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
-        when(programClient.operateProgramData(any(ProgramOperateDataDto.class)))
-                .thenReturn(ApiResponse.error(500, "program服务不可用"));
+        // 事务已提交后的同步失败：不能回滚订单，也不能把异常抛给调用方（否则支付回调会以为失败并重试）
+        doThrow(new RuntimeException("节目服务异常")).when(orderProgramSyncService).flushAfterCommit(any());
 
-        // 事务外尽力而为：Feign 失败不阻断订单状态流转，Lua（Redis 权威）照常执行
         assertDoesNotThrow(() -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
 
         ArgumentCaptor<Order> updateOrderCaptor = ArgumentCaptor.forClass(Order.class);
@@ -615,15 +637,17 @@ class OrderServiceTest {
     }
 
     @Test
-    void updateOrderRelatedData支付时V4节目服务抛异常不抛异常且Lua仍执行() {
-        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode());
-        when(programClient.operateProgramData(any(ProgramOperateDataDto.class)))
-                .thenThrow(new RuntimeException("program服务异常"));
+    void updateOrderRelatedDataV3支付时不登记outbox走延迟消息() {
+        stubUpdateOrderRelatedDataCommon(OrderStatus.NO_PAY.getCode(), ProgramOrderVersion.V3_VERSION.getValue());
 
-        assertDoesNotThrow(() -> orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY));
+        orderService.updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
 
-        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
+        // V3 由延迟消息收敛 DB（延迟链路未纳入本次 outbox，属已知边界）
+        verify(orderProgramSyncMapper, never()).enqueue(any(), any(), any());
+        verify(orderProgramSyncService, never()).flushAfterCommit(any());
         verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+        verify(delayOperateProgramDataSend).sendMessage(anyString());
+        verify(programClient, never()).operateProgramData(any());
     }
 
     @Test
@@ -638,6 +662,10 @@ class OrderServiceTest {
             // 同步器激活：incrBy/Lua 不应立即执行，而是注册到 afterCommit 回调（事务提交后）
             verify(redisTemplate, never()).execute(any(RedisScript.class), anyList(), any());
             verify(orderProgramCacheResolutionOperate, never()).programCacheReverseOperate(anyList(), any(Object[].class));
+            // 节目数据同步也只在事务提交后才推进，不能在状态还没落库时就去推 DB
+            verify(orderProgramSyncService, never()).flushAfterCommit(any());
+            // 但入队必须在事务内完成，否则提交后崩溃会丢掉同步任务
+            verify(orderProgramSyncMapper).enqueue(eq(ORDER_NUMBER), any(), anyString());
         } finally {
             TransactionSynchronizationManager.clearSynchronization();
         }
@@ -877,44 +905,31 @@ class OrderServiceTest {
     }
 
     @Test
-    void updateProgramRelatedDataResolutionV4支付时走Feign更新节目数据() {
+    void updateProgramRelatedDataResolutionV4支付时只收敛Redis不直接调节目服务() {
         SeatVo seatVo = new SeatVo();
         seatVo.setId(SEAT_ID);
         when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
-        when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.ok(true));
         java.util.Map<Long, List<Long>> seatMap = java.util.Map.of(TICKET_CATEGORY_ID, List.of(SEAT_ID));
         orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.PAY,
                 IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue());
-        verify(programClient).operateProgramData(any(ProgramOperateDataDto.class));
         verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+        // DB 收敛已移交 outbox：本方法不再做"尽力而为"的 Feign 调用（丢了就没人补）
+        verify(programClient, never()).operateProgramData(any());
         verify(delayOperateProgramDataSend, never()).sendMessage(anyString());
     }
 
     @Test
-    void updateProgramRelatedDataResolutionV4取消时座位标记未售卖() {
+    void updateProgramRelatedDataResolutionV4取消时走Lua且不直接调节目服务() {
         SeatVo seatVo = new SeatVo();
         seatVo.setId(SEAT_ID);
         when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
-        when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.ok(true));
         java.util.Map<Long, List<Long>> seatMap = java.util.Map.of(TICKET_CATEGORY_ID, List.of(SEAT_ID));
         orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.CANCEL,
                 IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue());
-        ArgumentCaptor<ProgramOperateDataDto> operateCaptor = ArgumentCaptor.forClass(ProgramOperateDataDto.class);
-        verify(programClient).operateProgramData(operateCaptor.capture());
-        assertEquals(SellStatus.NO_SOLD.getCode(), operateCaptor.getValue().getSellStatus());
-    }
-
-    @Test
-    void updateProgramRelatedDataResolutionV4节目服务失败时不抛异常且Lua仍执行() {
-        SeatVo seatVo = new SeatVo();
-        seatVo.setId(SEAT_ID);
-        when(redisCache.multiGetForHash(any(), anyList(), any())).thenReturn(List.of(seatVo));
-        when(programClient.operateProgramData(any(ProgramOperateDataDto.class))).thenReturn(ApiResponse.error(7777, "失败"));
-        java.util.Map<Long, List<Long>> seatMap = java.util.Map.of(TICKET_CATEGORY_ID, List.of(SEAT_ID));
-        // 事务外尽力而为：Feign 失败不抛异常，Lua（Redis 权威）照常执行，DB 侧由投影任务/守恒任务观测兜底
-        assertDoesNotThrow(() -> orderService.updateProgramRelatedDataResolution(PROGRAM_ID, seatMap, OrderStatus.CANCEL,
-                IDENTIFIER_ID, USER_ID, List.of(), ProgramOrderVersion.V4_VERSION.getValue()));
         verify(orderProgramCacheResolutionOperate).programCacheReverseOperate(anyList(), any(Object[].class));
+        verify(programClient, never()).operateProgramData(any());
+        // V4 取消不延迟发消息，DB 收敛由 outbox 重试保证
+        verify(delayOperateProgramDataSend, never()).sendMessage(anyString());
     }
 
     // ==================== 丢弃订单座位回滚 rollbackProgramSeatByDiscard ====================

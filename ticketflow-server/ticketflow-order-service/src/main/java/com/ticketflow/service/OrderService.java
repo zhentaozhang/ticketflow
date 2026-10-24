@@ -17,6 +17,7 @@ import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.domain.OrderCreateDomain;
 import com.ticketflow.domain.OrderCreateMq;
+import com.ticketflow.domain.ProgramSyncPayload;
 import com.ticketflow.domain.SeatIdAndTicketUserIdDomain;
 import com.ticketflow.dto.AccountOrderCountDto;
 import com.ticketflow.dto.NotifyDto;
@@ -52,6 +53,7 @@ import com.ticketflow.enums.SellStatus;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.mapper.OrderMapper;
 import com.ticketflow.mapper.OrderProgramMapper;
+import com.ticketflow.mapper.OrderProgramSyncMapper;
 import com.ticketflow.mapper.OrderTicketUserMapper;
 import com.ticketflow.mapper.OrderTicketUserRecordMapper;
 import com.ticketflow.redis.RedisCache;
@@ -191,6 +193,19 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
 
     @Autowired
     private OrderProgramMapper orderProgramMapper;
+
+    /**
+     * 节目数据同步 outbox 的写入端：与订单状态 CAS 在同一个本地事务里登记，
+     * 保证"状态改了必然留下待同步记录"，不会因为 Feign 失败/进程重启而漏掉。
+     */
+    @Autowired
+    private OrderProgramSyncMapper orderProgramSyncMapper;
+
+    /**
+     * 节目数据同步执行端：事务提交后推一次，失败由定时任务重试。
+     */
+    @Autowired
+    private OrderProgramSyncService orderProgramSyncService;
 
     @Autowired
     private TransactionTemplate transactionTemplate;
@@ -916,8 +931,31 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                             .collect(Collectors.toList()));
         });
 
-        // 8. 事务提交后执行 Redis / Lua / Feign 等操作。
-        // 订单状态已经提交，后续操作失败不再回滚订单事务，由对账任务最终修复。
+        // 8. 登记节目数据同步（V4）：DB 是 Redis 的派生态，状态改了就必须保证有人把 DB 推到目标状态。
+        // 登记与状态 CAS 在同一个本地事务里，所以"状态改成功"与"留下待同步记录"要么同时成立，要么都不成立；
+        // 真正的 Feign 调用放在事务提交后（见步骤 9），避免把外部调用塞进事务、拖住行锁。
+        // payload 只由本事务已经写下的数据构造，不读 Redis：Redis 故障不得回滚已提交的订单状态。
+        final ProgramSyncPayload programSyncPayload;
+        boolean syncProgramData = Objects.equals(order.getOrderVersion(), ProgramOrderVersion.V4_VERSION.getValue())
+                && (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())
+                || Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode()));
+        if (syncProgramData) {
+            programSyncPayload = ProgramSyncPayload.of(
+                    programId,
+                    order.getOrderNumber(),
+                    order.getIdentifierId(),
+                    Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())
+                            ? SellStatus.SOLD.getCode() : SellStatus.NO_SOLD.getCode(),
+                    order.getOrderVersion(),
+                    seatMap);
+            orderProgramSyncMapper.enqueue(
+                    order.getOrderNumber(), DateUtils.now(), JSON.toJSONString(programSyncPayload));
+        } else {
+            programSyncPayload = null;
+        }
+
+        // 9. 事务提交后执行 Redis / Lua / Feign 等操作。
+        // 订单状态已经提交，后续操作失败不再回滚订单事务，由对账任务与节目数据同步重试任务最终修复。
         Runnable afterCommitWork = () -> {
             try {
 
@@ -927,8 +965,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 }
 
                 // 根据版本执行对应的座位、库存及节目数据更新。
-                // V1-V3：Lua + 延迟任务收敛 DB；
-                // V4：Lua + Feign 直接推动 DB 收敛。
+                // V1-V3：Lua + 延迟消息收敛 DB（延迟链路没有闭环校验，属已知边界）；
+                // V4：Lua 收敛 Redis，随后由 outbox 推动 DB 收敛。
                 updateProgramRelatedDataResolution(
                         programId,
                         seatMap,
@@ -938,14 +976,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                         seatIdAndTicketUserIdDomainList,
                         order.getOrderVersion());
 
+                // 事务已提交、Redis 已收敛，现在推进派生数据；
+                // 失败只会留下一行待重试记录，不会影响已完成的支付/取消。
+                if (Objects.nonNull(programSyncPayload)) {
+                    orderProgramSyncService.flushAfterCommit(programSyncPayload);
+                }
+
             } catch (Exception e) {
-                // afterCommit 失败不能再回滚已提交事务，交由后续对账任务兜底。
+                // afterCommit 失败不能再回滚已提交事务，交由后续对账任务与重试任务兜底。
                 log.error("支付/取消后数据同步失败 订单号 : {} 状态 : {}",
                         orderNumber, orderStatus, e);
             }
         };
 
-        // 9. 正常事务场景下注册 afterCommit，确保只有 DB 事务提交成功后才执行后续同步。
+        // 10. 正常事务场景下注册 afterCommit，确保只有 DB 事务提交成功后才执行后续同步。
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
@@ -995,7 +1039,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
      * data[1] = addSeatDatajsonArray     —— 写入 NO_SOLD / SOLD hash 的座位
      * data[2] = jsonArray                —— 调整余票数量（cancel 加回 / pay 扣减）
      * data[3] = seatIdAndTicketUserIdDomainList —— 购票人关联记录
-     * V4 路径额外走 Feign 调用 operateProgramData 更新 DB（DB 状态统一切换）。
+     * V4 路径只负责 Lua 收敛 Redis；节目服务 DB 的收敛由订单事务里登记的 outbox 推动
+     * （{@link OrderProgramSyncService}），推不动就退避重试，不再"推一次失败只看日志"。
      *
      * @param orderVersion 见 ProgramOrderVersion：V1=1, V2=2, V3=3, V4=4
      */
@@ -1087,25 +1132,11 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 delayOperateProgramDataSend.sendMessage(JSON.toJSONString(programOperateDataDto));
             }
         } else {
-            //V4：先 Lua 收敛 Redis 权威数据（座位三区/余票），再 Feign 收敛 DB 派生数据。
-            //Redis 为权威，先更新；DB 为派生，后收敛——Feign 失败仅记日志（DB 滞后由对账任务观测兜底）
+            //V4：只 Lua 收敛 Redis 权威数据（座位三区/余票）。
+            //DB 派生数据的收敛不在这里做：订单事务里已经登记了 program_sync_payload，
+            //推送与重试由 OrderProgramSyncService 承担（Redis 未收敛不推 DB、失败指数退避、耗尽转死信），
+            //"推一次、失败只看一行日志"的裂缝由此被 outbox 兜住。
             orderProgramCacheResolutionOperate.programCacheReverseOperate(keys, data);
-            if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ||
-                    Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
-                programOperateDataDto.setSellStatus(Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ? SellStatus.SOLD.getCode() : SellStatus.NO_SOLD.getCode());
-                // 事务外尽力而为：Feign 失败仅记日志不阻断（Redis 已收敛），
-                // DB 侧由对账任务观测兜底
-                try {
-                    ApiResponse<Boolean> programApiResponse = programClient.operateProgramData(programOperateDataDto);
-                    if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
-                        log.error("program服务 operateProgramData 失败（事务外尽力而为） dto : {} response : {}",
-                                JSON.toJSONString(programOperateDataDto), JSON.toJSONString(programApiResponse));
-                    }
-                } catch (Exception e) {
-                    log.error("program服务 operateProgramData 异常（事务外尽力而为，DB 侧由对账任务观测兜底） dto : {}",
-                            JSON.toJSONString(programOperateDataDto), e);
-                }
-            }
         }
     }
 

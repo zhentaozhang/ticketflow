@@ -3,6 +3,7 @@ package com.ticketflow.client;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.dto.*;
 import com.ticketflow.vo.ProgramRecordTaskVo;
+import com.ticketflow.vo.SeatSellStatusVo;
 import com.ticketflow.vo.TicketCategoryDetailVo;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.stereotype.Component;
@@ -72,4 +73,12 @@ public interface ProgramClient {
      */
     @PostMapping(value = "/ticket/category/select/list/by/program")
     ApiResponse<List<TicketCategoryDetailVo>> selectListByProgram(TicketCategoryListByProgramDto ticketCategoryListByProgramDto);
+
+    /**
+     * 查询座位当前售卖状态。
+     * 订单服务支付/取消后用它对账"节目服务 DB 是否已经收敛到目标状态"：
+     * operateProgramData 的响应可能丢失，重试前必须先分清"已生效"和"没生效"。
+     */
+    @PostMapping(value = "/program/interior/seat/status")
+    ApiResponse<List<SeatSellStatusVo>> selectSeatSellStatus(SeatSellStatusDto seatSellStatusDto);
 }

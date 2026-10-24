@@ -31,6 +31,7 @@ import com.ticketflow.dto.ProgramRecommendListDto;
 import com.ticketflow.dto.ProgramResetExecuteDto;
 import com.ticketflow.dto.ProgramSearchDto;
 import com.ticketflow.dto.ReduceRemainNumberDto;
+import com.ticketflow.dto.SeatSellStatusDto;
 import com.ticketflow.dto.TicketCategoryCountDto;
 import com.ticketflow.dto.TicketUserListDto;
 import com.ticketflow.entity.Program;
@@ -81,6 +82,7 @@ import com.ticketflow.vo.ProgramHomeVo;
 import com.ticketflow.vo.ProgramListVo;
 import com.ticketflow.vo.ProgramSimpleInfoVo;
 import com.ticketflow.vo.ProgramVo;
+import com.ticketflow.vo.SeatSellStatusVo;
 import com.ticketflow.vo.TicketCategoryVo;
 import com.ticketflow.vo.TicketUserVo;
 import lombok.extern.slf4j.Slf4j;
@@ -901,6 +903,35 @@ public class ProgramService extends ServiceImpl<ProgramMapper, Program> {
             }
         }
         return true;
+    }
+
+    /**
+     * 查询座位当前售卖状态（只读，不做任何状态变更）。
+     * 订单服务支付/取消后用它核对 DB 是否已经收敛到目标状态：
+     * operateProgramData 的响应可能丢失，重试前先把"已生效"和"没生效"分开。
+     * 查不到的座位不返回（调用方按缺失处理，视为未收敛）。
+     */
+    public List<SeatSellStatusVo> selectSeatSellStatus(SeatSellStatusDto seatSellStatusDto) {
+        List<Long> seatIdList = seatSellStatusDto.getSeatIdList();
+        // 空列表直接返回，避免 "id IN ()" 触发 SQL 解析异常
+        if (CollectionUtil.isEmpty(seatIdList)) {
+            return new ArrayList<>();
+        }
+        List<Seat> seatList = seatMapper.selectList(
+                Wrappers.lambdaQuery(Seat.class)
+                        .eq(Seat::getProgramId, seatSellStatusDto.getProgramId())
+                        .in(Seat::getId, seatIdList));
+        if (CollectionUtil.isEmpty(seatList)) {
+            return new ArrayList<>();
+        }
+        List<SeatSellStatusVo> seatSellStatusVoList = new ArrayList<>(seatList.size());
+        for (Seat seat : seatList) {
+            SeatSellStatusVo seatSellStatusVo = new SeatSellStatusVo();
+            seatSellStatusVo.setSeatId(seat.getId());
+            seatSellStatusVo.setSellStatus(seat.getSellStatus());
+            seatSellStatusVoList.add(seatSellStatusVo);
+        }
+        return seatSellStatusVoList;
     }
 
     /**
