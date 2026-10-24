@@ -248,7 +248,9 @@ public class UserService extends ServiceImpl<UserMapper, User> {
     private GetChannelDataVo getChannelDataByClient(String code) {
         GetChannelDataByCodeDto getChannelDataByCodeDto = new GetChannelDataByCodeDto();
         getChannelDataByCodeDto.setCode(code);
-        ApiResponse<GetChannelDataVo> getChannelDataApiResponse = baseDataClient.getByCode(getChannelDataByCodeDto);
+        // 生成 JWT 需要渠道 tokenSecret，该密钥不再由公开接口下发，
+        // 改走内部接口 /channel/data/getSecretByCode（@InternalApi + 内部令牌）。
+        ApiResponse<GetChannelDataVo> getChannelDataApiResponse = baseDataClient.getSecretByCode(getChannelDataByCodeDto);
         if (Objects.equals(getChannelDataApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
             return getChannelDataApiResponse.getData();
         }

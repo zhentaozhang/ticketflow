@@ -1,5 +1,6 @@
 package com.ticketflow.controller;
 
+import com.ticketflow.annotation.InternalApi;
 import com.ticketflow.common.ApiResponse;
 import com.ticketflow.dto.ChannelDataAddDto;
 import com.ticketflow.service.ChannelDataService;
@@ -23,6 +24,10 @@ public class TestController {
     @Autowired
     private ChannelDataService channelDataService;
 
+    /**
+     * 测试接口会插入渠道数据，因此同样按内部接口保护，避免绕过 /channel/data/add 的鉴权。
+     */
+    @InternalApi
     @Operation(summary = "测试")
     @PostMapping(value = "/test")
     public ApiResponse<Boolean> test(@Valid @RequestBody ChannelDataAddDto channelDataAddDto) {

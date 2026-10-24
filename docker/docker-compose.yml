@@ -46,6 +46,9 @@ x-app-env: &app-env
   SPRING_DATA_REDIS_PASSWORD: "${REDIS_PASSWORD:-ticketflow}"
   # 登录会话 HMAC 签名密钥：网关与 user-service 必须一致，生产用强随机值覆盖
   SESSION_SIGN_SECRET: "${SESSION_SIGN_SECRET:-ticketflow-dev-session-secret}"
+  # 内部接口令牌：保护 base-data 的 /channel/data/getSecretByCode(+add/approve)，
+  # 网关 / user-service / base-data 必须一致；未配置时 base-data 拒绝所有内部调用
+  INTERNAL_TOKEN: "${INTERNAL_TOKEN:-ticketflow-dev-internal-token}"
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
   MYSQL_HOST: mysql
   MYSQL_PORT: "3306"

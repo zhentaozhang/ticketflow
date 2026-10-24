@@ -318,7 +318,7 @@ class UserServiceTest {
         GetChannelDataVo result = userService.getChannelDataByCode("2");
 
         assertEquals("2", result.getCode());
-        verify(baseDataClient).getByCode(any());
+        verify(baseDataClient).getSecretByCode(any());
     }
 
     @Test
@@ -382,6 +382,6 @@ class UserServiceTest {
         GetChannelDataVo channel = new GetChannelDataVo();
         channel.setCode("2");
         channel.setTokenSecret(SECRET);
-        when(baseDataClient.getByCode(any())).thenReturn(ApiResponse.ok(channel));
+        when(baseDataClient.getSecretByCode(any())).thenReturn(ApiResponse.ok(channel));
     }
 }

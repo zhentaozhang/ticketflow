@@ -60,6 +60,8 @@ public enum BaseCode {
 
     EMAIL_ERROR_COUNT_TOO_MANY(519, "邮箱输入错误次数过多，请稍后重试"),
 
+    INTERNAL_API_FORBIDDEN(520, "非法内部接口调用"),
+
     // ===== 认证/登录 (1000~1999) =====
     USER_NOT_LOGIN(1001, "用户未登录"),
 

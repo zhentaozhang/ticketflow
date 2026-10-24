@@ -15,3 +15,5 @@ data:
   SPRING_DATA_REDIS_PASSWORD: "ticketflow"
   # 本地开发会话签名密钥（生产请用 Secret 注入强随机值）
   SESSION_SIGN_SECRET: "ticketflow-dev-session-secret"
+  # 本地开发内部接口令牌（与 compose 默认值一致）
+  INTERNAL_TOKEN: "ticketflow-dev-internal-token"

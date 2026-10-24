@@ -189,6 +189,11 @@ make down                  # 停止（数据卷保留）
 > 仅拿到 Redis 写权限无法伪造会话。密钥 `ticketflow.session.sign-secret` 由 `SESSION_SIGN_SECRET` 注入，
 > **网关与 user-service 必须一致**（不一致会导致登录成功后所有受保护请求返回 1001）；
 > 升级到带签名版本后旧会话全部失效，用户需重新登录。
+>
+> **渠道密钥**：渠道配置里的 RSA/AES 私钥与 `tokenSecret` 只由内部接口 `/channel/data/getSecretByCode` 下发，
+> 公开接口 `/channel/data/getByCode` 只返回公钥级别的 `ChannelDataPublicVo`；`/add`、`/approve`、`/test` 同样是内部接口，
+> 需要请求头 `internalToken`，其值由 `INTERNAL_TOKEN` 注入，**网关 / user-service / base-data 必须一致**；
+> base-data 未配置令牌时会对所有内部接口 fail-closed（拒绝）。新渠道登记后状态为"待审核"，调用 `/channel/data/approve` 才启用。
 
 ### 访问入口
 

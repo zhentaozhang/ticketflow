@@ -109,4 +109,10 @@ knife4j:
     language: zh_cn
     enable-version: true
     enable-swagger-models: true
+# 内部接口令牌：/channel/data/getSecretByCode、/channel/data/add、/channel/data/approve
+# 需要请求头 internalToken 命中该值才放行；未配置则全部拒绝（fail closed）。
+# 必须与网关 / user-service 的 INTERNAL_TOKEN 保持一致。
+ticketflow:
+  internal:
+    token: ${INTERNAL_TOKEN:ticketflow-dev-internal-token}
 

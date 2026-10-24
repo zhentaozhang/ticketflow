@@ -132,3 +132,8 @@ knife4j:
 ticketflow:
   session:
     sign-secret: ${SESSION_SIGN_SECRET:ticketflow-dev-session-secret}
+  # 内部接口令牌：保护 /channel/data/getSecretByCode、/channel/data/add、/channel/data/approve
+  # 这类「会下发或改写渠道私钥」的接口；只有携带该头的服务端调用才放行。
+  # 未配置时 base-data 会拒绝所有内部接口（fail closed），不影响普通业务接口。
+  internal:
+    token: ${INTERNAL_TOKEN:ticketflow-dev-internal-token}
