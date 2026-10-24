@@ -158,6 +158,9 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     private OrderTicketUserMapper orderTicketUserMapper;
 
     @Autowired
+    private OrderRefundSettleService orderRefundSettleService;
+
+    @Autowired
     private OrderTicketUserService orderTicketUserService;
 
     @Autowired
@@ -391,13 +394,15 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 refundDto.setRefundRequestId("closed-refund:" + order.getOrderNumber() + ":" + order.getOrderPrice().toPlainString());
                 ApiResponse<String> response = payClient.refund(refundDto);
                 if (response.getCode().equals(BaseCode.SUCCESS.getCode())) {
-                    Order updateOrder = new Order();
-                    updateOrder.setEditTime(DateUtils.now());
-                    updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
-                    orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class).eq(Order::getOrderNumber, order.getOrderNumber()));
-                    // 退款成功视图才置退款状态，失败保持数据库的取消状态，下次轮询重试退款
-                    orderPayCheckVo.setOrderStatus(OrderStatus.REFUND.getCode());
-                    orderPayCheckVo.setCancelOrderTime(DateUtils.now());
+                    // 退款已在渠道侧成功：本地收尾走带事务的独立 bean（本类内部调用 @Transactional 不生效），
+                    // 主表 CAS 置已退单 + 退款时间 + 对账标记 + 购票人子表一起写，重复回调幂等。
+                    if (orderRefundSettleService.settleRefund(order.getOrderNumber())) {
+                        // 退款成功视图才置退款状态，失败保持数据库的取消状态，下次轮询重试退款
+                        orderPayCheckVo.setOrderStatus(OrderStatus.REFUND.getCode());
+                        orderPayCheckVo.setRefundOrderTime(DateUtils.now());
+                    } else {
+                        log.error("退款成功但本地收尾未完成，保持取消状态等待重试 orderNumber : {}", order.getOrderNumber());
+                    }
                 } else {
                     log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
                 }
@@ -800,11 +805,19 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
             return false;
         }
-        Order updateOrder = new Order();
-        updateOrder.setEditTime(DateUtils.now());
-        updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
-        orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class)
-                .eq(Order::getOrderNumber, Long.parseLong(outTradeNo)));
+        // 渠道退款已成功，接着做本地收尾：主表 CAS 置已退单（带退款时间/对账标记）+ 购票人子表。
+        // 收尾失败必须返回 false：钱已经退出去，本地却没落，不能对渠道应答成功把差异吞掉。
+        boolean settled;
+        try {
+            settled = orderRefundSettleService.settleRefund(Long.parseLong(outTradeNo));
+        } catch (Exception e) {
+            log.error("退款成功但本地收尾异常，待渠道/对账重试 outTradeNo : {}", outTradeNo, e);
+            return false;
+        }
+        if (!settled) {
+            log.error("退款成功但本地收尾未完成，待渠道/对账重试 outTradeNo : {}", outTradeNo);
+            return false;
+        }
         log.info("订单已关闭，退款完成并置为已退单 outTradeNo : {}", outTradeNo);
         return true;
     }

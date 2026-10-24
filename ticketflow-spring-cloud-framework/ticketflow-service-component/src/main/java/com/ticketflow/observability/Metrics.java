@@ -118,4 +118,19 @@ public final class Metrics {
     public static final String RESULT_DEAD = "dead";
     /** 差异扫描发现终态订单未登记节目数据同步 */
     public static final String RESULT_UNSYNCED = "unsynced";
+
+    /* ==================== 退款收尾（order-service，渠道退款成功后） ==================== */
+
+    /**
+     * 「渠道已付款、本地订单已取消」的退款在本地收尾的结果总数，tags：{@link #RESULT}。
+     * 取值：
+     * <ul>
+     *   <li>{@link #RESULT_SUCCESS}：主表置已退单（带退款时间）+ 购票人子表 + 对账标记一次事务写完；</li>
+     *   <li>{@link #RESULT_IDEMPOTENT}：重复回调/对账重试，本地已是已退单；</li>
+     *   <li>{@link #RESULT_ERROR}：<b>钱已退、本地状态没推进</b>，要叫人——限购额度不会释放、资金侧无退款流水。</li>
+     * </ul>
+     */
+    public static final String ORDER_REFUND_SETTLE_TOTAL = "ticketflow_order_refund_settle_total";
+    /** 重复调用命中幂等（本地已是终态） */
+    public static final String RESULT_IDEMPOTENT = "idempotent";
 }

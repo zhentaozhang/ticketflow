@@ -39,4 +39,7 @@ public class OrderPayCheckVo {
     
     @Schema(name ="payOrderTime", type ="Date", description ="支付订单时间")
     private Date payOrderTime;
+
+    @Schema(name ="refundOrderTime", type ="Date", description ="退款订单时间")
+    private Date refundOrderTime;
 }

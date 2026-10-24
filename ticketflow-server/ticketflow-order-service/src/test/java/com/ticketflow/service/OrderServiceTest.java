@@ -113,6 +113,7 @@ class OrderServiceTest {
     private OrderProgramMapper orderProgramMapper;
     private OrderProgramSyncMapper orderProgramSyncMapper;
     private OrderProgramSyncService orderProgramSyncService;
+    private OrderRefundSettleService orderRefundSettleService;
     private DelayOperateProgramDataSend delayOperateProgramDataSend;
     private RLock lock;
 
@@ -161,6 +162,9 @@ class OrderServiceTest {
         orderProgramMapper = mock(OrderProgramMapper.class);
         orderProgramSyncMapper = mock(OrderProgramSyncMapper.class);
         orderProgramSyncService = mock(OrderProgramSyncService.class);
+        orderRefundSettleService = mock(OrderRefundSettleService.class);
+        // 退款本地收尾默认成功：绝大多数用例只关心「退款成功后订单侧被推进到已退单」
+        when(orderRefundSettleService.settleRefund(anyLong())).thenReturn(true);
         delayOperateProgramDataSend = mock(DelayOperateProgramDataSend.class);
         // createMq 用 TransactionTemplate 显式圈建单事务；单测里直接执行回调，等价于无事务语义
         TransactionTemplate transactionTemplate = mock(TransactionTemplate.class);
@@ -190,6 +194,7 @@ class OrderServiceTest {
         ReflectionTestUtils.setField(orderService, "orderProgramMapper", orderProgramMapper);
         ReflectionTestUtils.setField(orderService, "orderProgramSyncMapper", orderProgramSyncMapper);
         ReflectionTestUtils.setField(orderService, "orderProgramSyncService", orderProgramSyncService);
+        ReflectionTestUtils.setField(orderService, "orderRefundSettleService", orderRefundSettleService);
         ReflectionTestUtils.setField(orderService, "delayOperateProgramDataSend", delayOperateProgramDataSend);
         ReflectionTestUtils.setField(orderService, "transactionTemplate", transactionTemplate);
     }
@@ -409,12 +414,30 @@ class OrderServiceTest {
         when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
         OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
         assertEquals(OrderStatus.REFUND.getCode(), vo.getOrderStatus());
-        assertNotNull(vo.getCancelOrderTime());
+        assertNotNull(vo.getRefundOrderTime());
         ArgumentCaptor<RefundDto> refundCaptor = ArgumentCaptor.forClass(RefundDto.class);
         verify(payClient).refund(refundCaptor.capture());
         assertEquals(PayChannel.ALIPAY.getValue(), refundCaptor.getValue().getChannel());
         assertEquals(String.valueOf(ORDER_NUMBER), refundCaptor.getValue().getOrderNumber());
-        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
+        // 本地收尾（主表 CAS + 子表 + 退款时间 + 对账标记）由带事务的独立 bean 承担，本类不再直接 update
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
+        verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
+    }
+
+    @Test
+    void payCheck取消订单退款成功但本地收尾失败时视图保持取消状态() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        // 钱已经退出去，本地却没推进成功：视图必须保持已取消，让下一次轮询继续尝试
+        when(orderRefundSettleService.settleRefund(anyLong())).thenReturn(false);
+        OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
+        assertEquals(OrderStatus.CANCEL.getCode(), vo.getOrderStatus());
+        assertNull(vo.getRefundOrderTime());
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
     }
 
     @Test
@@ -816,10 +839,24 @@ class OrderServiceTest {
         verify(payClient).refund(refundCaptor.capture());
         assertEquals(String.valueOf(ORDER_NUMBER), refundCaptor.getValue().getOrderNumber());
         assertEquals(PayChannel.WX.getValue(), refundCaptor.getValue().getChannel());
-        // 退款成功后订单置为已退单
-        ArgumentCaptor<Order> updateCaptor = ArgumentCaptor.forClass(Order.class);
-        verify(orderMapper).update(updateCaptor.capture(), any(Wrapper.class));
-        assertEquals(OrderStatus.REFUND.getCode(), updateCaptor.getValue().getOrderStatus());
+        // 退款成功后由本地收尾 bean 把订单推进到已退单（CAS + 子表 + 退款时间 + 对账标记）
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
+    }
+
+    @Test
+    void reconcilePayment退款成功但本地收尾失败时返回失败等下轮重试() {
+        Order order = buildOrder(OrderStatus.CANCEL.getCode());
+        order.setPayOrderType(PayChannel.WX.getCode());
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        when(orderRefundSettleService.settleRefund(anyLong())).thenReturn(false);
+
+        // 钱已退但本地没落：报 REFUND_FAILED，订单保持已取消 + 待对账，下一轮继续（退款幂等键防二次退款）
+        assertEquals(PaymentReconcileResult.REFUND_FAILED, orderService.reconcilePayment(order));
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
     }
 
     @Test
@@ -835,6 +872,7 @@ class OrderServiceTest {
         assertEquals(PaymentReconcileResult.REFUND_FAILED, orderService.reconcilePayment(order));
         // 退款失败不置退款状态（保持已取消，下一轮还会被扫到重试）
         verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
+        verify(orderRefundSettleService, never()).settleRefund(anyLong());
     }
 
     @Test
@@ -1097,7 +1135,24 @@ class OrderServiceTest {
         String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
         assertEquals(ALIPAY_NOTIFY_SUCCESS_RESULT, result);
         verify(payClient).refund(any(RefundDto.class));
-        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
+        // 本地收尾交给带事务的独立 bean（主表 CAS + 子表 + 退款时间 + 对账标记）
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
+        verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
+    }
+
+    @Test
+    void alipayNotify取消订单退款成功但本地收尾失败时返回failure() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.CANCEL.getCode()));
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(ALIPAY_NOTIFY_SUCCESS_RESULT);
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        when(orderRefundSettleService.settleRefund(anyLong())).thenReturn(false);
+
+        // 钱已退、本地没落：必须应答 failure，让支付宝按重试阶梯再来（同一 refundRequestId 不会二次退款）
+        String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
+        assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
     }
 
     @Test
@@ -1110,6 +1165,7 @@ class OrderServiceTest {
         String result = orderService.alipayNotify(buildAlipayRequest("out_trade_no=" + ORDER_NUMBER));
         assertEquals(ALIPAY_NOTIFY_FAILURE_RESULT, result);
         verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
+        verify(orderRefundSettleService, never()).settleRefund(anyLong());
     }
 
     @Test
@@ -1230,7 +1286,9 @@ class OrderServiceTest {
         String result = orderService.wxNotify(buildWxRequest());
         assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
         verify(payClient).refund(any(RefundDto.class));
-        verify(orderMapper).update(any(Order.class), any(Wrapper.class));
+        // 本地收尾交给带事务的独立 bean（主表 CAS + 子表 + 退款时间 + 对账标记），本类不再直接 update
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
+        verify(orderMapper, never()).update(any(Order.class), any(Wrapper.class));
         verify(orderServiceMock, never()).updateOrderRelatedData(any(), any());
     }
 
@@ -1285,9 +1343,27 @@ class OrderServiceTest {
 
         assertEquals(WX_NOTIFY_SUCCESS_RESULT, result);
         verify(payClient).refund(any(RefundDto.class));
-        ArgumentCaptor<Order> updateCaptor = ArgumentCaptor.forClass(Order.class);
-        verify(orderMapper).update(updateCaptor.capture(), any(Wrapper.class));
-        assertEquals(OrderStatus.REFUND.getCode(), updateCaptor.getValue().getOrderStatus());
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
+    }
+
+    @Test
+    void wxNotify取消订单退款成功但本地收尾失败时返回FAIL等待渠道重试() {
+        NotifyVo notifyVo = new NotifyVo();
+        notifyVo.setPayResult(WX_NOTIFY_SUCCESS_RESULT);
+        notifyVo.setOutTradeNo(String.valueOf(ORDER_NUMBER));
+        when(payClient.notify(any(NotifyDto.class))).thenReturn(ApiResponse.ok(notifyVo));
+        when(orderMapper.selectOne(any(Wrapper.class)))
+                .thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()), buildOrder(OrderStatus.CANCEL.getCode()));
+        doThrow(new TicketFlowFrameException(BaseCode.ORDER_STATUS_CHANGED))
+                .when(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        // 钱已经退出去，本地没落成功：不能应答成功，必须让微信按重试阶梯再来（同一退款幂等键不会二次退款）
+        when(orderRefundSettleService.settleRefund(anyLong())).thenReturn(false);
+
+        String result = orderService.wxNotify(buildWxRequest());
+
+        assertEquals(WX_NOTIFY_FAILURE_RESULT, result);
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
     }
 
     @Test

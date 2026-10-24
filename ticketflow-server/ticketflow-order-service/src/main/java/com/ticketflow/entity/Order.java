@@ -82,4 +82,9 @@ public class Order extends BaseTableData implements Serializable {
      * 支付订单时间
      */
     private Date payOrderTime;
+
+    /**
+     * 退款订单时间：渠道退款成功后本地置「已退单」的时刻，资金侧按它核对退款
+     */
+    private Date refundOrderTime;
 }
