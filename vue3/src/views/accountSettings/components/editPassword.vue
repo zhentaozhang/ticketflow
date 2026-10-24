@@ -5,6 +5,14 @@
       <div class="edit-card__header">修改登录密码</div>
       <div class="edit-card__body">
         <el-form ref="editPsdRef" :model="editPsdForm" :rules="editPsdRules" class="edit-form" label-position="top">
+          <el-form-item label="输入原密码" prop="oldPassword">
+            <el-input
+                v-model="editPsdForm.oldPassword"
+                type="password"
+                show-password
+                placeholder="请输入当前登录密码"
+            ></el-input>
+          </el-form-item>
           <el-form-item label="输入新密码" prop="password">
             <el-input
                 v-model="editPsdForm.password"
@@ -32,7 +40,6 @@ import Header from '@/components/header/index'
 import Footer from '@/components/footer/index'
 import {getEditPsdApi} from '@/api/accountSettings'
 import {ElMessage} from "element-plus"
-import {getUserIdKey} from "@/utils/auth"
 import {ref} from 'vue'
 import {useRouter} from 'vue-router'
 import { useAuthStore } from '@/store/modules/auth';
@@ -40,18 +47,24 @@ import { useAuthStore } from '@/store/modules/auth';
 
 const router = useRouter();
 const userStore = useAuthStore()
+// 身份由网关按登录态注入，前端不再传 id；改密必须带上原密码做二次校验
 const editPsdForm = ref({
-  password: '',
-  id: getUserIdKey()
+  oldPassword: '',
+  password: ''
 })
-const editPsdRules = ref([
-  {
-    required: true,
-    pattern: /^(?![\d]+$)(?![a-zA-Z]+$)(?![^\da-zA-Z]+$)([^\u4e00-\u9fa5\s]){6,20}$/,
-    message: '6-20位英文字母、数字或者符号（除空格），且字母、数字和标点符号至少包含两种',
-    trigger: ['blur', 'focus']
-  }
-])
+const editPsdRules = ref({
+  oldPassword: [
+    { required: true, message: '请输入原密码', trigger: 'blur' }
+  ],
+  password: [
+    {
+      required: true,
+      pattern: /^(?![\d]+$)(?![a-zA-Z]+$)(?![^\da-zA-Z]+$)([^\u4e00-\u9fa5\s]){6,20}$/,
+      message: '6-20位英文字母、数字或者符号（除空格），且字母、数字和标点符号至少包含两种',
+      trigger: ['blur', 'focus']
+    }
+  ]
+})
 
 
 function savePsd() {

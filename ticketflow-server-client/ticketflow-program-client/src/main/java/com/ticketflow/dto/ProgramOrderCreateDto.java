@@ -18,8 +18,7 @@ public class ProgramOrderCreateDto {
     @NotNull
     private Long programId;
     
-    @Schema(name ="userId", type ="Long", description ="用户id",requiredMode= RequiredMode.REQUIRED)
-    @NotNull
+    @Schema(name ="userId", type ="Long", description ="用户id（由网关按登录态注入，请求体中的值会被忽略）")
     private Long userId;
     
     @Schema(name ="ticketUserIdList", type ="List<Long>", description ="购票人id集合",requiredMode= RequiredMode.REQUIRED)

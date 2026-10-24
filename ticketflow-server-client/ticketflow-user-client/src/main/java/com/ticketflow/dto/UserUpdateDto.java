@@ -18,8 +18,7 @@ public class UserUpdateDto implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
     
-    @Schema(name ="id", type ="Long", description ="用户id",requiredMode= RequiredMode.REQUIRED)
-    @NotNull
+    @Schema(name ="id", type ="Long", description ="用户id（由网关按登录态注入，请求体中的值会被忽略）")
     private Long id;
     
     @Schema(name ="name", type ="String", description ="用户名字")

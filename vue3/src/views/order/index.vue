@@ -264,7 +264,7 @@ function handleOrderCreate(apiFn: Function, params: any) {
 function buildOrderParams() {
   let orderCreateParams: any = {
     programId: detailList.value.id,
-    userId: useUser.userId,
+    // 下单用户身份由网关按登录态注入，前端不再传 userId，避免越权替他人下单
     ticketUserIdList: ticketUserIdArr.value,
   }
 

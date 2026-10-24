@@ -307,6 +307,10 @@ public class UserService extends ServiceImpl<UserMapper, User> {
         if (Objects.isNull(user)) {
             throw new TicketFlowFrameException(BaseCode.USER_EMPTY);
         }
+        // 改密必须先校验原密码：只凭 token 就能改密等于 token 泄漏即账号被永久接管
+        if (!passwordEncoder.matches(userUpdatePasswordDto.getOldPassword(), user.getPassword())) {
+            throw new TicketFlowFrameException(BaseCode.NAME_PASSWORD_ERROR);
+        }
         User updateUser = new User();
         BeanUtil.copyProperties(userUpdatePasswordDto, updateUser);
         // 改密同样哈希后入库
