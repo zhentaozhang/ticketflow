@@ -61,6 +61,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.Callable;
@@ -524,6 +525,76 @@ class OrderServiceTest {
         when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
         orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
         verify(orderServiceMock, never()).updateOrderRelatedData(any(), any());
+    }
+
+    @Test
+    void payCheck状态落库失败时抛ORDER_STATUS_UPDATE_ERROR而不是报已支付() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        // 钱已经到渠道，本地事务却写失败：这里必须如实报错。
+        // 返回「已支付」会让前端显示购票成功，而订单随后会被关单任务取消并退款。
+        doThrow(new RuntimeException("数据库写入失败")).when(orderServiceMock)
+                .updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode())));
+        assertEquals(BaseCode.ORDER_STATUS_UPDATE_ERROR.getCode(), e.getCode());
+        verify(orderServiceMock).updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+    }
+
+    @Test
+    void payCheck状态落库失败时保留原业务异常码() {
+        when(orderMapper.selectOne(any(Wrapper.class))).thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()));
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        doThrow(new TicketFlowFrameException(BaseCode.ORDER_CANAL_ERROR)).when(orderServiceMock)
+                .updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+        TicketFlowFrameException e = assertThrows(TicketFlowFrameException.class,
+                () -> orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode())));
+        assertEquals(BaseCode.ORDER_CANAL_ERROR.getCode(), e.getCode());
+    }
+
+    @Test
+    void payCheck状态已被并发变更时按数据库最新状态回显() {
+        Order paidOrder = buildOrder(OrderStatus.PAY.getCode());
+        paidOrder.setPayOrderTime(new Date(1700000000000L));
+        when(orderMapper.selectOne(any(Wrapper.class)))
+                .thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()), paidOrder);
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        doThrow(new TicketFlowFrameException(BaseCode.ORDER_STATUS_CHANGED)).when(orderServiceMock)
+                .updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+        OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
+        // 并发仲裁不算失败：视图按数据库真实状态回显，且不能凭空捏造支付时间
+        assertEquals(OrderStatus.PAY.getCode(), vo.getOrderStatus());
+        assertEquals(new Date(1700000000000L), vo.getPayOrderTime());
+        verify(payClient, never()).refund(any(RefundDto.class));
+    }
+
+    @Test
+    void payCheck渠道已收款但订单已被取消时发起退款() {
+        Order cancelledOrder = buildOrder(OrderStatus.CANCEL.getCode());
+        when(orderMapper.selectOne(any(Wrapper.class)))
+                .thenReturn(buildOrder(OrderStatus.NO_PAY.getCode()), cancelledOrder);
+        TradeCheckVo tradeCheckVo = new TradeCheckVo();
+        tradeCheckVo.setSuccess(true);
+        tradeCheckVo.setPayBillStatus(PayBillStatus.PAY.getCode());
+        when(payClient.tradeCheck(any(TradeCheckDto.class))).thenReturn(ApiResponse.ok(tradeCheckVo));
+        when(payClient.refund(any(RefundDto.class))).thenReturn(ApiResponse.ok("refund"));
+        stubRefundStatusConfirmed();
+        doThrow(new TicketFlowFrameException(BaseCode.ORDER_STATUS_CHANGED)).when(orderServiceMock)
+                .updateOrderRelatedData(ORDER_NUMBER, OrderStatus.PAY);
+        OrderPayCheckVo vo = orderService.payCheck(buildPayCheckDto(PayChannel.ALIPAY.getCode()));
+        // 钱到了、票没给：按支付回调同一套收尾逻辑立刻退款，不必等对账任务
+        verify(payClient).refund(any(RefundDto.class));
+        verify(orderRefundSettleService).settleRefund(ORDER_NUMBER);
+        assertEquals(OrderStatus.CANCEL.getCode(), vo.getOrderStatus());
     }
 
     // ==================== 状态流转 updateOrderRelatedData ====================

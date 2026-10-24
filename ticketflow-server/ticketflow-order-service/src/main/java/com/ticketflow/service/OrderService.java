@@ -420,37 +420,102 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             return orderPayCheckVo;
         }
 
+        String channel = Optional.ofNullable(PayChannel.getRc(orderPayCheckDto.getPayChannelType()))
+                .map(PayChannel::getValue).orElseThrow(() -> new TicketFlowFrameException(BaseCode.PAY_CHANNEL_NOT_EXIST));
         TradeCheckDto tradeCheckDto = new TradeCheckDto();
         tradeCheckDto.setOutTradeNo(String.valueOf(orderPayCheckDto.getOrderNumber()));
-        tradeCheckDto.setChannel(Optional.ofNullable(PayChannel.getRc(orderPayCheckDto.getPayChannelType()))
-                .map(PayChannel::getValue).orElseThrow(() -> new TicketFlowFrameException(BaseCode.PAY_CHANNEL_NOT_EXIST)));
+        tradeCheckDto.setChannel(channel);
         ApiResponse<TradeCheckVo> tradeCheckVoApiResponse = payClient.tradeCheck(tradeCheckDto);
         if (!Objects.equals(tradeCheckVoApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
             throw new TicketFlowFrameException(tradeCheckVoApiResponse);
         }
         TradeCheckVo tradeCheckVo = Optional.ofNullable(tradeCheckVoApiResponse.getData())
                 .orElseThrow(() -> new TicketFlowFrameException(BaseCode.PAY_BILL_NOT_EXIST));
-        if (tradeCheckVo.isSuccess()) {
-            Integer payBillStatus = tradeCheckVo.getPayBillStatus();
-            Integer orderStatus = order.getOrderStatus();
-            if (!Objects.equals(orderStatus, payBillStatus)) {
-                orderPayCheckVo.setOrderStatus(payBillStatus);
-                try {
-                    if (Objects.equals(payBillStatus, PayBillStatus.PAY.getCode())) {
-                        orderPayCheckVo.setPayOrderTime(DateUtils.now());
-                        orderService.updateOrderRelatedData(order.getOrderNumber(), OrderStatus.PAY);
-                    } else if (Objects.equals(payBillStatus, PayBillStatus.CANCEL.getCode())) {
-                        orderPayCheckVo.setCancelOrderTime(DateUtils.now());
-                        orderService.updateOrderRelatedData(order.getOrderNumber(), OrderStatus.CANCEL);
-                    }
-                } catch (Exception e) {
-                    log.warn("updateOrderRelatedData warn message", e);
-                }
-            }
-        } else {
+        if (!tradeCheckVo.isSuccess()) {
             throw new TicketFlowFrameException(BaseCode.PAY_TRADE_CHECK_ERROR);
         }
+        Integer payBillStatus = tradeCheckVo.getPayBillStatus();
+        if (!Objects.equals(order.getOrderStatus(), payBillStatus)) {
+            if (Objects.equals(payBillStatus, PayBillStatus.PAY.getCode())) {
+                settleObservedOrderStatus(orderPayCheckVo, order.getOrderNumber(), OrderStatus.PAY, channel);
+            } else if (Objects.equals(payBillStatus, PayBillStatus.CANCEL.getCode())) {
+                settleObservedOrderStatus(orderPayCheckVo, order.getOrderNumber(), OrderStatus.CANCEL, channel);
+            }
+        }
         return orderPayCheckVo;
+    }
+
+    /**
+     * 把渠道已确认的状态落到本地订单，并且只在落库成功之后才更新返回视图。
+     * <p>
+     * 关键是<b>视图不能比数据库超前</b>，三档处理：
+     * <ul>
+     *   <li>落库成功：视图跟随目标状态；</li>
+     *   <li>状态已被另一条流程改掉（回调/另一实例/关单任务，{@link BaseCode#ORDER_STATUS_CHANGED} 一类）：
+     *       这是并发仲裁的正常结果。不能再按渠道状态回显，必须按数据库最新状态回显；
+     *       若最新状态是已取消，说明钱到了、票没给，这里直接复用支付回调的收尾逻辑发起退款，
+     *       不用等对账任务；</li>
+     *   <li>真正的执行失败（内层事务已回滚，订单根本没动）：<b>抛异常如实报错</b>。
+     *       钱已到账而订单停在未支付时若返回「已支付」，前端会显示购票成功，
+     *       订单随后被关单任务取消并退款—— 用户看到的是买到了又没了。
+     *       报错让调用方重试，订单最终由对账任务收敛。</li>
+     * </ul>
+     */
+    private void settleObservedOrderStatus(OrderPayCheckVo orderPayCheckVo, Long orderNumber,
+                                           OrderStatus targetStatus, String channel) {
+        try {
+            orderService.updateOrderRelatedData(orderNumber, targetStatus);
+        } catch (Exception e) {
+            if (isOrderStatusAlreadyChanged(e)) {
+                log.info("payCheck 订单状态已被另一条流程变更，按数据库最新状态回显 orderNumber : {} 渠道状态 : {}",
+                        orderNumber, targetStatus);
+                BusinessMetrics.increment(meterRegistry, Metrics.ORDER_PAY_CHECK_TOTAL,
+                        Metrics.RESULT, Metrics.RESULT_CONCURRENT);
+                // 渠道说钱到了、订单却被取消：钱收了票没给，必须先退款（内部自带日志与幂等键）
+                settleWhenOrderStatusChanged(orderNumber, channel);
+                refreshOrderPayCheckVo(orderPayCheckVo, orderNumber);
+                return;
+            }
+            log.error("payCheck 渠道已确认状态但订单状态落库失败 orderNumber : {} 目标状态 : {}",
+                    orderNumber, targetStatus, e);
+            BusinessMetrics.increment(meterRegistry, Metrics.ORDER_PAY_CHECK_TOTAL,
+                    Metrics.RESULT, Metrics.RESULT_FAIL);
+            if (e instanceof TicketFlowFrameException ticketFlowFrameException) {
+                throw ticketFlowFrameException;
+            }
+            throw new TicketFlowFrameException(BaseCode.ORDER_STATUS_UPDATE_ERROR.getCode(),
+                    BaseCode.ORDER_STATUS_UPDATE_ERROR.getMsg(), e);
+        }
+        orderPayCheckVo.setOrderStatus(targetStatus.getCode());
+        if (Objects.equals(targetStatus, OrderStatus.PAY)) {
+            orderPayCheckVo.setPayOrderTime(DateUtils.now());
+        } else {
+            orderPayCheckVo.setCancelOrderTime(DateUtils.now());
+        }
+        BusinessMetrics.increment(meterRegistry, Metrics.ORDER_PAY_CHECK_TOTAL,
+                Metrics.RESULT, Metrics.RESULT_SUCCESS);
+    }
+
+    /**
+     * 按数据库最新状态重写返回视图（并发仲裁后使用）。
+     * 读失败时保留原视图并记日志：调用方拿到的是渠道确认前的状态，不会谎报成功。
+     */
+    private void refreshOrderPayCheckVo(OrderPayCheckVo orderPayCheckVo, Long orderNumber) {
+        Order latest;
+        try {
+            latest = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class).eq(Order::getOrderNumber, orderNumber));
+        } catch (Exception e) {
+            log.error("payCheck 状态被并发变更后重新读取订单失败 orderNumber : {}", orderNumber, e);
+            return;
+        }
+        if (Objects.isNull(latest)) {
+            log.error("payCheck 状态被并发变更但订单已不存在 orderNumber : {}", orderNumber);
+            return;
+        }
+        orderPayCheckVo.setOrderStatus(latest.getOrderStatus());
+        orderPayCheckVo.setPayOrderTime(latest.getPayOrderTime());
+        orderPayCheckVo.setCancelOrderTime(latest.getCancelOrderTime());
+        orderPayCheckVo.setRefundOrderTime(latest.getRefundOrderTime());
     }
 
 

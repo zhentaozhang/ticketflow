@@ -139,6 +139,21 @@ public final class Metrics {
      */
     public static final String RESULT_UNCONFIRMED = "unconfirmed";
 
+    /**
+     * 「支付后主动核对」（{@code OrderService#payCheck}）把渠道确认的状态落到本地订单的结果总数，
+     * tags：{@link #RESULT}。
+     * <p>
+     * 取值：
+     * <ul>
+     *   <li>{@link #RESULT_SUCCESS}：状态已落库，返回视图与数据库一致；</li>
+     *   <li>{@link #RESULT_CONCURRENT}：状态已被另一条流程改掉（回调/另一实例/关单任务），
+     *       按数据库最新状态回显——这是正常的并发仲裁；</li>
+     *   <li>{@link #RESULT_FAIL}：<b>渠道说收款了、本地却写失败</b>，要叫人：
+     *       接口这次如实报错，订单会被关单任务取消并退款，但这类量说明写链路有故障。</li>
+     * </ul>
+     */
+    public static final String ORDER_PAY_CHECK_TOTAL = "ticketflow_order_pay_check_total";
+
     /* ==================== 退款受理与确认（pay-service） ==================== */
 
     /**
