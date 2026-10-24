@@ -3,14 +3,18 @@ package com.ticketflow.filter;
 import cn.dev33.satoken.config.SaTokenConfig;
 import com.ticketflow.properties.ApiVerify;
 import com.ticketflow.properties.BackManageProperties;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
+import org.springframework.core.Ordered;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
  * Servlet 过滤器链自动配置。
- * 注册 BackManageAuthFilter（后台认证）、
+ * 注册 InternalTokenFilter（内部令牌校验，网关之外的直连一律拒绝）、
+ * BackManageAuthFilter（后台认证）、
  * RequestWrapperFilter（请求体缓存）、
  * BaseParameterFilter（业务上下文参数透传）
  *
@@ -18,6 +22,20 @@ import org.springframework.web.filter.OncePerRequestFilter;
  */
 @EnableConfigurationProperties(BackManageProperties.class)
 public class FilterAutoConfiguration {
+
+    /**
+     * 内部令牌过滤器：最先执行，保证任何业务接口被绕过网关直连时直接 403。
+     * 令牌来自环境变量 INTERNAL_TOKEN（与网关 base-data 调用链共用同一套配置），未配置则 fail closed。
+     */
+    @Bean
+    public FilterRegistrationBean<InternalTokenFilter> internalTokenFilter(
+            @Value("${ticketflow.internal.token:}") String internalToken) {
+        FilterRegistrationBean<InternalTokenFilter> registration =
+                new FilterRegistrationBean<>(new InternalTokenFilter(internalToken));
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
+        registration.addUrlPatterns("/*");
+        return registration;
+    }
 
     @Bean
     public OncePerRequestFilter backManageAuthFilter(BackManageProperties backManageProperties) {

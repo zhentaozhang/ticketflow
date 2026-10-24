@@ -27,6 +27,9 @@ public class TicketFlowFrameException extends BaseException {
 
     public TicketFlowFrameException(String message) {
         super(message);
+        // 本类自带 message 字段，Lombok 生成的 getMessage() 会覆盖 Throwable 的实现，
+        // 只调 super(message) 会让 getMessage() 返回 null（前端异常提示变成空白）。
+        this.message = message;
     }
 
 
@@ -56,6 +59,7 @@ public class TicketFlowFrameException extends BaseException {
 
     public TicketFlowFrameException(Throwable cause) {
         super(cause);
+        this.message = cause == null ? null : cause.getMessage();
     }
 
     public TicketFlowFrameException(String message, Throwable cause) {

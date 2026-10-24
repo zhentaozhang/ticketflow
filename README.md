@@ -181,6 +181,30 @@ make down                  # 停止（数据卷保留）
 - 仅本机 IDE 跑应用、中间件放容器：`docker compose -f docker/docker-compose.yml up -d mysql redis kafka nacos elasticsearch sentinel`
 - 构建后端：`make build`（等价 `mvn -DskipTests -T 4 package`）
 
+> **Redis 认证**：compose 里的 Redis 已开启 `requirepass`（默认口令 `ticketflow`，用环境变量 `REDIS_PASSWORD` 覆盖），
+> 并禁用了 `FLUSHALL` / `FLUSHDB` / `CONFIG`。应用侧通过 `SPRING_DATA_REDIS_PASSWORD` 注入同一口令，
+> 用 `docker exec ticketflow-redis redis-cli -a ticketflow --no-auth-warning` 连进去排查数据。
+>
+> **会话签名**：登录会话（`user_login_{code}_{userId}`）外层带 HMAC 签名，网关验签通过才视为已登录，
+> 仅拿到 Redis 写权限无法伪造会话。密钥 `ticketflow.session.sign-secret` 由 `SESSION_SIGN_SECRET` 注入，
+> **网关与 user-service 必须一致**（不一致会导致登录成功后所有受保护请求返回 1001）；
+> 升级到带签名版本后旧会话全部失效，用户需重新登录。
+>
+> **渠道密钥**：渠道配置里的 RSA/AES 私钥与 `tokenSecret` 只由内部接口 `/channel/data/getSecretByCode` 下发，
+> 公开接口 `/channel/data/getByCode` 只返回公钥级别的 `ChannelDataPublicVo`；`/add`、`/approve`、`/test` 同样是内部接口，
+> 需要请求头 `internalToken`，其值由 `INTERNAL_TOKEN` 注入，**网关 / user-service / base-data 必须一致**；
+> base-data 未配置令牌时会对所有内部接口 fail-closed（拒绝）。新渠道登记后状态为"待审核"，调用 `/channel/data/approve` 才启用。
+>
+> **网络收口**：网关（6085）是唯一对外发布的应用端口，compose 里 user/base-data/customize/program/order/pay/admin/migrate
+> 的端口发布都已收回，基础设施端口（mysql/redis/kafka/nacos/es/sentinel/prometheus/grafana/jaeger/loki）全部绑回环地址。
+> 下游服务统一挂 `InternalTokenFilter`：请求头 `internalToken` 必须等于服务端 `ticketflow.internal.token`（由 `INTERNAL_TOKEN` 注入，
+> **网关与全部 7 个下游服务必须一致**），缺失或不一致返回 `403 {"code":520}`，未配置时 fail-closed。
+> 网关的 `InternalAccessFilter` 会剥掉客户端自带的 `internalToken` 再注入服务端令牌，并对 `/program/interior/`、
+> `/program/record/task/`、`/channel/data/`、`/message/record/` 直接返回 404；服务间 Feign 调用自动携带令牌（含定时任务线程）。
+> `/actuator/{health,info,prometheus}` 与接口文档路径不校验令牌，供探活、监控直抓与 knife4j 聚合使用；
+> 网关侧 `management.endpoints.web.exposure.include` 已收窄为 `health,info,prometheus`。
+> **上线必须同步**：三方支付回调地址（`notifyUrl`）要指向网关路由 `/ticketflow/pay/pay/notify`，否则回调不可达。
+
 ### 访问入口
 
 | 入口 | 地址 | 说明 |

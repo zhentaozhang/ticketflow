@@ -1,17 +1,16 @@
 package com.ticketflow.shardingsphere;
 
 import cn.hutool.core.collection.CollectionUtil;
-import com.ticketflow.enums.BaseCode;
-import com.ticketflow.exception.TicketFlowFrameException;
 import org.apache.shardingsphere.sharding.api.sharding.complex.ComplexKeysShardingAlgorithm;
 import org.apache.shardingsphere.sharding.api.sharding.complex.ComplexKeysShardingValue;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 
 /**
  * ShardingSphere 自定义复合分片：订单表分表算法（基因法）。
@@ -53,8 +52,6 @@ public class TableOrderComplexGeneArithmetic implements ComplexKeysShardingAlgor
      */
     @Override
     public Collection<String> doSharding(Collection<String> allActualSplitTableNames, ComplexKeysShardingValue<Long> complexKeysShardingValue) {
-        //返回的真实表名集合
-        List<String> actualTableNames = new ArrayList<>(allActualSplitTableNames.size());
         //逻辑表名
         String logicTableName = complexKeysShardingValue.getLogicTableName();
         //查询中的列名和值
@@ -78,52 +75,25 @@ public class TableOrderComplexGeneArithmetic implements ComplexKeysShardingAlgor
         //email条件的值（用户邮箱映射表分片键）
         Collection<?> emailValues = (Collection<?>) (Object) columnNameAndShardingValuesMap.get("email");
 
-        //分片键的值
-        Long value = null;
-        //如果是order_number查询
-        if (CollectionUtil.isNotEmpty(orderNumberValues)) {
-            value = orderNumberValues.stream().findFirst().orElseThrow(() -> new TicketFlowFrameException(BaseCode.ORDER_NUMBER_NOT_EXIST));
-            //如果是user_id查询
-        } else if (CollectionUtil.isNotEmpty(userIdValues)) {
-            value = userIdValues.stream().findFirst().orElseThrow(() -> new TicketFlowFrameException(BaseCode.USER_ID_NOT_EXIST));
-            //如果是id查询
-        } else if (CollectionUtil.isNotEmpty(idValues)) {
-            value = idValues.stream().findFirst().orElse(null);
-            //如果是program_id查询
-        } else if (CollectionUtil.isNotEmpty(programIdValues)) {
-            value = programIdValues.stream().findFirst().orElse(null);
-            //如果是out_order_no查询（订单号字符串，与 order_number 同基因）
-        } else if (CollectionUtil.isNotEmpty(outOrderNoValues)) {
-            value = Long.parseLong(String.valueOf(outOrderNoValues.stream().findFirst().orElse(null)));
-            //如果是mobile查询（手机号哈希取模，解决登录全库广播）
-        } else if (CollectionUtil.isNotEmpty(mobileValues)) {
-            String mobileStr = String.valueOf(mobileValues.iterator().next());
-            value = (long) (mobileStr.hashCode() & 0x7FFFFFFF);
-            //如果是email查询（邮箱哈希取模）
-        } else if (CollectionUtil.isNotEmpty(emailValues)) {
-            String emailStr = String.valueOf(emailValues.iterator().next());
-            value = (long) (emailStr.hashCode() & 0x7FFFFFFF);
-        }
-        //订单号与用户ID同时出现时（如订单列表双条件查询），两个分片键必须路由到同一分片表，
+        //订单号与用户ID同时出现时（如订单详情双条件查询），两个分片键必须路由到同一分片表，
         //否则说明基因位定义已不一致，fail-fast 防止静默错误路由
-        if (CollectionUtil.isNotEmpty(orderNumberValues) && CollectionUtil.isNotEmpty(userIdValues)) {
-            long orderNumberIndex = ShardingGeneUtils.tableIndex(shardingCount,
-                    orderNumberValues.stream().findFirst().get());
-            long userIdIndex = ShardingGeneUtils.tableIndex(shardingCount,
-                    userIdValues.stream().findFirst().get());
-            if (orderNumberIndex != userIdIndex) {
-                throw new IllegalArgumentException(
-                        String.format("order_number 与 user_id 基因位路由不一致，order_number 路由到表 %d，user_id 路由到表 %d",
-                                orderNumberIndex, userIdIndex));
-            }
-        }
-        //如果order_number或者user_id的值存在
-        if (Objects.nonNull(value)) {
+        ComplexGeneRoute.checkGeneConsistency(orderNumberValues, userIdValues,
+                value -> ShardingGeneUtils.tableIndex(shardingCount, value), "表");
+        //IN (...) 查询必须把每个分片键都路由到各自的物理表：只取 findFirst 会静默丢掉 N-1 张表的数据
+        Set<Long> tableIndexes = new LinkedHashSet<>();
+        for (Long shardingValue : ComplexGeneRoute.resolveValues(orderNumberValues, userIdValues, idValues,
+                programIdValues, outOrderNoValues, mobileValues, emailValues)) {
             //表索引 = 分片键的低N位（N = log2(表数量)）
-            actualTableNames.add(logicTableName + "_" + ShardingGeneUtils.tableIndex(shardingCount, value));
-            return actualTableNames;
+            tableIndexes.add(ShardingGeneUtils.tableIndex(shardingCount, shardingValue));
         }
         //如果没有分片键查询，则把所有真实表返回
-        return allActualSplitTableNames;
+        if (tableIndexes.isEmpty()) {
+            return allActualSplitTableNames;
+        }
+        List<String> actualTableNames = new ArrayList<>(tableIndexes.size());
+        for (Long tableIndex : tableIndexes) {
+            actualTableNames.add(logicTableName + "_" + tableIndex);
+        }
+        return actualTableNames;
     }
 }

@@ -26,6 +26,12 @@ public class Constant {
 
     public static final String USER_ID = "userId";
 
+    /**
+     * 内部服务间调用的令牌 Header 名。
+     * 只允许持有该令牌的服务端进程访问 {@link com.ticketflow.annotation.InternalApi} 标注的接口。
+     */
+    public static final String INTERNAL_TOKEN = "internalToken";
+
     public static final String GLIDE_LINE = "_";
 
     public static final String ALIPAY_NOTIFY_SUCCESS_RESULT = "success";

@@ -144,6 +144,8 @@ CREATE TABLE `d_message_producer_record` (
      `message_send_status` int DEFAULT '1' COMMENT '消息发送状态 1:未发送 -1:发送失败 2:发送成功',
      `reconciliation_status` int DEFAULT '1' COMMENT '消息对账状态 1:未对账 -1:对账完成有问题 2:对账完成没有问题 3:对账有问题处理完毕',
      `send_time` datetime DEFAULT NULL COMMENT '消息发送时间',
+     `retry_count` int NOT NULL DEFAULT '0' COMMENT '自动重投次数，达到上限后转对账有问题等待人工处理',
+     `next_retry_time` datetime DEFAULT NULL COMMENT '下次允许重投的时间（指数退避）',
      `status` int DEFAULT '1' COMMENT '状态 1:启用 0:禁用',
      `edit_time` datetime DEFAULT NULL COMMENT '编辑时间',
      `create_time` datetime DEFAULT NULL COMMENT '创建时间',
@@ -151,5 +153,6 @@ CREATE TABLE `d_message_producer_record` (
      KEY `d_message_producer_record_message_businesses_id_IDX` (`message_businesses_id`) USING BTREE,
      KEY `d_message_producer_record_message_trace_id_IDX` (`message_trace_id`) USING BTREE,
      KEY `d_message_producer_record_message_id_IDX` (`message_id`) USING BTREE,
-     KEY `d_message_producer_record_send_time_IDX` (`send_time`) USING BTREE
+     KEY `d_message_producer_record_send_time_IDX` (`send_time`) USING BTREE,
+     KEY `d_message_producer_record_retry_IDX` (`reconciliation_status`,`next_retry_time`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消息发送记录表';

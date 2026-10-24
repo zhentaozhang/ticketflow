@@ -15,6 +15,7 @@ import java.util.Objects;
 
 import static com.ticketflow.constant.Constant.CODE;
 import static com.ticketflow.constant.Constant.GRAY_PARAMETER;
+import static com.ticketflow.constant.Constant.INTERNAL_TOKEN;
 
 
 /**
@@ -24,6 +25,7 @@ import static com.ticketflow.constant.Constant.GRAY_PARAMETER;
  * 参数来源：
  * code — 从当前 ServletRequest header 读取
  * gray — 优先请求 header，fallback 到配置的 serverGray（本地灰度标识）
+ * internalToken — 服务端配置（ticketflow.internal.token），与请求线程无关，定时任务/异步线程同样携带
  * <p>
  * 结合 RequestValidationFilter（注入）+ BaseParameterFilter（提取）+ 此拦截器（传递）
  * 形成完整的业务上下文传递机制。
@@ -37,8 +39,14 @@ public class FeignRequestInterceptor implements RequestInterceptor {
 
     private final String serverGray;
 
+    /** 内部令牌：下游服务的 InternalTokenFilter 只放行带该头的调用，服务间 Feign 必须自带 */
+    private final String internalToken;
+
     @Override
     public void apply(RequestTemplate template) {
+        if (StringUtil.isNotEmpty(internalToken)) {
+            template.header(INTERNAL_TOKEN, internalToken);
+        }
         try {
             RequestAttributes ra = RequestContextHolder.getRequestAttributes();
             if (Objects.nonNull(ra)) {

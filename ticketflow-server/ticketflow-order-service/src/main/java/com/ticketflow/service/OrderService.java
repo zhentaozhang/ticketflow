@@ -17,6 +17,7 @@ import com.ticketflow.common.ApiResponse;
 import com.ticketflow.core.RedisKeyManage;
 import com.ticketflow.domain.OrderCreateDomain;
 import com.ticketflow.domain.OrderCreateMq;
+import com.ticketflow.domain.ProgramSyncPayload;
 import com.ticketflow.domain.SeatIdAndTicketUserIdDomain;
 import com.ticketflow.dto.AccountOrderCountDto;
 import com.ticketflow.dto.NotifyDto;
@@ -32,6 +33,7 @@ import com.ticketflow.dto.PayDto;
 import com.ticketflow.dto.ProgramOperateDataDto;
 import com.ticketflow.dto.ReduceRemainNumberDto;
 import com.ticketflow.dto.RefundDto;
+import com.ticketflow.dto.RefundStatusDto;
 import com.ticketflow.dto.TicketCategoryCountDto;
 import com.ticketflow.dto.TradeCheckDto;
 import com.ticketflow.dto.UserGetAndTicketUserListDto;
@@ -48,12 +50,16 @@ import com.ticketflow.enums.PaymentReconcileResult;
 import com.ticketflow.enums.ProgramOrderVersion;
 import com.ticketflow.enums.RecordType;
 import com.ticketflow.enums.ReconciliationStatus;
+import com.ticketflow.enums.RefundStatus;
 import com.ticketflow.enums.SellStatus;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.mapper.OrderMapper;
 import com.ticketflow.mapper.OrderProgramMapper;
+import com.ticketflow.mapper.OrderProgramSyncMapper;
 import com.ticketflow.mapper.OrderTicketUserMapper;
 import com.ticketflow.mapper.OrderTicketUserRecordMapper;
+import com.ticketflow.observability.BusinessMetrics;
+import com.ticketflow.observability.Metrics;
 import com.ticketflow.redis.RedisCache;
 import com.ticketflow.redis.RedisKeyBuild;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -73,6 +79,7 @@ import com.ticketflow.vo.OrderGetVo;
 import com.ticketflow.vo.OrderListVo;
 import com.ticketflow.vo.OrderPayCheckVo;
 import com.ticketflow.vo.OrderTicketInfoVo;
+import com.ticketflow.vo.RefundStatusVo;
 import com.ticketflow.vo.SeatVo;
 import com.ticketflow.vo.TicketUserInfoVo;
 import com.ticketflow.vo.TicketUserVo;
@@ -80,6 +87,7 @@ import com.ticketflow.vo.TradeCheckVo;
 import com.ticketflow.vo.UserAndTicketUserInfoVo;
 import com.ticketflow.vo.UserGetAndTicketUserListVo;
 import com.ticketflow.vo.UserInfoVo;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
@@ -156,6 +164,9 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     private OrderTicketUserMapper orderTicketUserMapper;
 
     @Autowired
+    private OrderRefundSettleService orderRefundSettleService;
+
+    @Autowired
     private OrderTicketUserService orderTicketUserService;
 
     @Autowired
@@ -191,6 +202,25 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
 
     @Autowired
     private OrderProgramMapper orderProgramMapper;
+
+    /**
+     * 节目数据同步 outbox 的写入端：与订单状态 CAS 在同一个本地事务里登记，
+     * 保证"状态改了必然留下待同步记录"，不会因为 Feign 失败/进程重启而漏掉。
+     */
+    @Autowired
+    private OrderProgramSyncMapper orderProgramSyncMapper;
+
+    /**
+     * 节目数据同步执行端：事务提交后推一次，失败由定时任务重试。
+     */
+    @Autowired
+    private OrderProgramSyncService orderProgramSyncService;
+
+    /**
+     * 退款/对账指标（registry 缺失时 {@link BusinessMetrics} 静默降级）
+     */
+    @Autowired(required = false)
+    private MeterRegistry meterRegistry;
 
     @Autowired
     private TransactionTemplate transactionTemplate;
@@ -373,16 +403,16 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 refundDto.setChannel(channel);
                 refundDto.setReason("延迟订单关闭");
                 // 稳定幂等键：同一订单的关闭退款重试复用同一 outRefundNo，避免二次退款
-                refundDto.setRefundRequestId("closed-refund:" + order.getOrderNumber() + ":" + order.getOrderPrice().toPlainString());
+                refundDto.setRefundRequestId(closedRefundNo(String.valueOf(order.getOrderNumber()), order.getOrderPrice()));
                 ApiResponse<String> response = payClient.refund(refundDto);
                 if (response.getCode().equals(BaseCode.SUCCESS.getCode())) {
-                    Order updateOrder = new Order();
-                    updateOrder.setEditTime(DateUtils.now());
-                    updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
-                    orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class).eq(Order::getOrderNumber, order.getOrderNumber()));
-                    // 退款成功视图才置退款状态，失败保持数据库的取消状态，下次轮询重试退款
-                    orderPayCheckVo.setOrderStatus(OrderStatus.REFUND.getCode());
-                    orderPayCheckVo.setCancelOrderTime(DateUtils.now());
+                    // 退款请求返回成功只代表渠道受理，不代表钱已到买家：必须再查退款单状态，
+                    // refundStatus=2（渠道确认已退款）才允许把订单置为已退单。
+                    if (confirmRefundAndSettle(order.getOrderNumber(), resolveOutRefundNo(response, refundDto))) {
+                        // 退款成功视图才置退款状态，失败保持数据库的取消状态，下次轮询重试退款
+                        orderPayCheckVo.setOrderStatus(OrderStatus.REFUND.getCode());
+                        orderPayCheckVo.setRefundOrderTime(DateUtils.now());
+                    }
                 } else {
                     log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
                 }
@@ -390,37 +420,102 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             return orderPayCheckVo;
         }
 
+        String channel = Optional.ofNullable(PayChannel.getRc(orderPayCheckDto.getPayChannelType()))
+                .map(PayChannel::getValue).orElseThrow(() -> new TicketFlowFrameException(BaseCode.PAY_CHANNEL_NOT_EXIST));
         TradeCheckDto tradeCheckDto = new TradeCheckDto();
         tradeCheckDto.setOutTradeNo(String.valueOf(orderPayCheckDto.getOrderNumber()));
-        tradeCheckDto.setChannel(Optional.ofNullable(PayChannel.getRc(orderPayCheckDto.getPayChannelType()))
-                .map(PayChannel::getValue).orElseThrow(() -> new TicketFlowFrameException(BaseCode.PAY_CHANNEL_NOT_EXIST)));
+        tradeCheckDto.setChannel(channel);
         ApiResponse<TradeCheckVo> tradeCheckVoApiResponse = payClient.tradeCheck(tradeCheckDto);
         if (!Objects.equals(tradeCheckVoApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
             throw new TicketFlowFrameException(tradeCheckVoApiResponse);
         }
         TradeCheckVo tradeCheckVo = Optional.ofNullable(tradeCheckVoApiResponse.getData())
                 .orElseThrow(() -> new TicketFlowFrameException(BaseCode.PAY_BILL_NOT_EXIST));
-        if (tradeCheckVo.isSuccess()) {
-            Integer payBillStatus = tradeCheckVo.getPayBillStatus();
-            Integer orderStatus = order.getOrderStatus();
-            if (!Objects.equals(orderStatus, payBillStatus)) {
-                orderPayCheckVo.setOrderStatus(payBillStatus);
-                try {
-                    if (Objects.equals(payBillStatus, PayBillStatus.PAY.getCode())) {
-                        orderPayCheckVo.setPayOrderTime(DateUtils.now());
-                        orderService.updateOrderRelatedData(order.getOrderNumber(), OrderStatus.PAY);
-                    } else if (Objects.equals(payBillStatus, PayBillStatus.CANCEL.getCode())) {
-                        orderPayCheckVo.setCancelOrderTime(DateUtils.now());
-                        orderService.updateOrderRelatedData(order.getOrderNumber(), OrderStatus.CANCEL);
-                    }
-                } catch (Exception e) {
-                    log.warn("updateOrderRelatedData warn message", e);
-                }
-            }
-        } else {
+        if (!tradeCheckVo.isSuccess()) {
             throw new TicketFlowFrameException(BaseCode.PAY_TRADE_CHECK_ERROR);
         }
+        Integer payBillStatus = tradeCheckVo.getPayBillStatus();
+        if (!Objects.equals(order.getOrderStatus(), payBillStatus)) {
+            if (Objects.equals(payBillStatus, PayBillStatus.PAY.getCode())) {
+                settleObservedOrderStatus(orderPayCheckVo, order.getOrderNumber(), OrderStatus.PAY, channel);
+            } else if (Objects.equals(payBillStatus, PayBillStatus.CANCEL.getCode())) {
+                settleObservedOrderStatus(orderPayCheckVo, order.getOrderNumber(), OrderStatus.CANCEL, channel);
+            }
+        }
         return orderPayCheckVo;
+    }
+
+    /**
+     * 把渠道已确认的状态落到本地订单，并且只在落库成功之后才更新返回视图。
+     * <p>
+     * 关键是<b>视图不能比数据库超前</b>，三档处理：
+     * <ul>
+     *   <li>落库成功：视图跟随目标状态；</li>
+     *   <li>状态已被另一条流程改掉（回调/另一实例/关单任务，{@link BaseCode#ORDER_STATUS_CHANGED} 一类）：
+     *       这是并发仲裁的正常结果。不能再按渠道状态回显，必须按数据库最新状态回显；
+     *       若最新状态是已取消，说明钱到了、票没给，这里直接复用支付回调的收尾逻辑发起退款，
+     *       不用等对账任务；</li>
+     *   <li>真正的执行失败（内层事务已回滚，订单根本没动）：<b>抛异常如实报错</b>。
+     *       钱已到账而订单停在未支付时若返回「已支付」，前端会显示购票成功，
+     *       订单随后被关单任务取消并退款—— 用户看到的是买到了又没了。
+     *       报错让调用方重试，订单最终由对账任务收敛。</li>
+     * </ul>
+     */
+    private void settleObservedOrderStatus(OrderPayCheckVo orderPayCheckVo, Long orderNumber,
+                                           OrderStatus targetStatus, String channel) {
+        try {
+            orderService.updateOrderRelatedData(orderNumber, targetStatus);
+        } catch (Exception e) {
+            if (isOrderStatusAlreadyChanged(e)) {
+                log.info("payCheck 订单状态已被另一条流程变更，按数据库最新状态回显 orderNumber : {} 渠道状态 : {}",
+                        orderNumber, targetStatus);
+                BusinessMetrics.increment(meterRegistry, Metrics.ORDER_PAY_CHECK_TOTAL,
+                        Metrics.RESULT, Metrics.RESULT_CONCURRENT);
+                // 渠道说钱到了、订单却被取消：钱收了票没给，必须先退款（内部自带日志与幂等键）
+                settleWhenOrderStatusChanged(orderNumber, channel);
+                refreshOrderPayCheckVo(orderPayCheckVo, orderNumber);
+                return;
+            }
+            log.error("payCheck 渠道已确认状态但订单状态落库失败 orderNumber : {} 目标状态 : {}",
+                    orderNumber, targetStatus, e);
+            BusinessMetrics.increment(meterRegistry, Metrics.ORDER_PAY_CHECK_TOTAL,
+                    Metrics.RESULT, Metrics.RESULT_FAIL);
+            if (e instanceof TicketFlowFrameException ticketFlowFrameException) {
+                throw ticketFlowFrameException;
+            }
+            throw new TicketFlowFrameException(BaseCode.ORDER_STATUS_UPDATE_ERROR.getCode(),
+                    BaseCode.ORDER_STATUS_UPDATE_ERROR.getMsg(), e);
+        }
+        orderPayCheckVo.setOrderStatus(targetStatus.getCode());
+        if (Objects.equals(targetStatus, OrderStatus.PAY)) {
+            orderPayCheckVo.setPayOrderTime(DateUtils.now());
+        } else {
+            orderPayCheckVo.setCancelOrderTime(DateUtils.now());
+        }
+        BusinessMetrics.increment(meterRegistry, Metrics.ORDER_PAY_CHECK_TOTAL,
+                Metrics.RESULT, Metrics.RESULT_SUCCESS);
+    }
+
+    /**
+     * 按数据库最新状态重写返回视图（并发仲裁后使用）。
+     * 读失败时保留原视图并记日志：调用方拿到的是渠道确认前的状态，不会谎报成功。
+     */
+    private void refreshOrderPayCheckVo(OrderPayCheckVo orderPayCheckVo, Long orderNumber) {
+        Order latest;
+        try {
+            latest = orderMapper.selectOne(Wrappers.lambdaQuery(Order.class).eq(Order::getOrderNumber, orderNumber));
+        } catch (Exception e) {
+            log.error("payCheck 状态被并发变更后重新读取订单失败 orderNumber : {}", orderNumber, e);
+            return;
+        }
+        if (Objects.isNull(latest)) {
+            log.error("payCheck 状态被并发变更但订单已不存在 orderNumber : {}", orderNumber);
+            return;
+        }
+        orderPayCheckVo.setOrderStatus(latest.getOrderStatus());
+        orderPayCheckVo.setPayOrderTime(latest.getPayOrderTime());
+        orderPayCheckVo.setCancelOrderTime(latest.getCancelOrderTime());
+        orderPayCheckVo.setRefundOrderTime(latest.getRefundOrderTime());
     }
 
 
@@ -604,6 +699,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
     private static final int ORDER_LIST_MAX_PAGE_SIZE = 50;
 
     /**
+     * 订单侧重建座位/余票派生 hash 时的最短有效期（秒）。
+     * <p>
+     * 这里拿不到演出时间（不能为了算 TTL 再读一次节目缓存），所以退化为固定安全值：
+     * 必须明显长于未支付订单的自动取消窗口——锁定座位 hash 若在取消前过期，
+     * 取消链路的 HINCRBY 会在空 key 上从 0 起算，等于把余票改成一个错误数字。
+     */
+    private static final long PROGRAM_HASH_EXPIRE_SECONDS = 1800L;
+
+    /**
+     * 节目操作流水 hash 的保留时长（秒）：在派生数据有效期之上再保留 7 天，供对账回看。
+     */
+    private static final long PROGRAM_RECORD_EXPIRE_SECONDS = 604800L;
+
+    /**
      * 支付对账（定时兜底用）：向渠道确认这一笔的真实结果，并只在“渠道确实收了钱”时收尾。
      * <p>
      * 要解决的问题：回调丢失时会出现“用户付了钱、订单却被超时取消”，
@@ -779,19 +888,105 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         refundDto.setChannel(channel);
         refundDto.setReason("延迟订单关闭");
         // 稳定幂等键：同一订单 + 金额的关闭退款重试复用同一 outRefundNo，避免二次退款
-        refundDto.setRefundRequestId("closed-refund:" + outTradeNo + ":" + amount.toPlainString());
+        refundDto.setRefundRequestId(closedRefundNo(outTradeNo, amount));
         ApiResponse<String> response = payClient.refund(refundDto);
         if (!Objects.equals(response.getCode(), BaseCode.SUCCESS.getCode())) {
             log.error("pay服务退款失败 dto : {} response : {}", JSON.toJSONString(refundDto), JSON.toJSONString(response));
             return false;
         }
-        Order updateOrder = new Order();
-        updateOrder.setEditTime(DateUtils.now());
-        updateOrder.setOrderStatus(OrderStatus.REFUND.getCode());
-        orderMapper.update(updateOrder, Wrappers.lambdaUpdate(Order.class)
-                .eq(Order::getOrderNumber, Long.parseLong(outTradeNo)));
-        log.info("订单已关闭，退款完成并置为已退单 outTradeNo : {}", outTradeNo);
+        // 退款请求成功 ≠ 钱已到账：只有退款单状态 =2 才做本地收尾（主表 CAS 置已退单 + 退款时间 +
+        // 对账标记 + 购票人子表）。未确认时必须返回 false：应答成功会让这笔退款永久丢掉重试入口。
+        if (!confirmRefundAndSettle(Long.parseLong(outTradeNo), resolveOutRefundNo(response, refundDto))) {
+            return false;
+        }
+        log.info("订单已关闭，退款确认到账并置为已退单 outTradeNo : {}", outTradeNo);
         return true;
+    }
+
+    /**
+     * 退款「到账确认 + 本地收尾」。
+     * <p>
+     * 只认退款单状态 {@code refundStatus=2}（渠道确认已退款）：支付宝「受理即成功」、微信「受理中」
+     * 都可能还没把钱退给用户，只凭退款请求返回成功就置已退单，等于把受理当到账。
+     * <p>
+     * 未确认时把订单标记成「对账有问题」（{@code pay_reconciliation_status=-1}），
+     * 让支付对账任务继续把这单拎出来重试——否则它会随着取消时间的推移被 30 分钟窗口筛掉，
+     * 变成一笔「系统显示已取消、钱却没退」的静默差异。
+     *
+     * @return true = 已确认到账且本地收尾完成
+     */
+    private boolean confirmRefundAndSettle(Long orderNumber, String outRefundNo) {
+        Integer refundStatus = queryRefundStatus(String.valueOf(orderNumber), outRefundNo);
+        if (!Objects.equals(refundStatus, RefundStatus.REFUND_SUCCESS.getCode())) {
+            log.error("退款已受理但渠道尚未确认到账，订单保持已取消等待对账重试 orderNumber : {} outRefundNo : {} refundStatus : {}",
+                    orderNumber, outRefundNo, refundStatus);
+            BusinessMetrics.increment(meterRegistry, Metrics.ORDER_REFUND_SETTLE_TOTAL,
+                    Metrics.RESULT, Metrics.RESULT_UNCONFIRMED);
+            markPaymentReconciled(orderNumber, ReconciliationStatus.RECONCILIATION_FAIL);
+            return false;
+        }
+        boolean settled;
+        try {
+            settled = orderRefundSettleService.settleRefund(orderNumber);
+        } catch (Exception e) {
+            log.error("退款确认到账但本地收尾异常，待渠道/对账重试 orderNumber : {}", orderNumber, e);
+            return false;
+        }
+        if (!settled) {
+            log.error("退款确认到账但本地收尾未完成，待渠道/对账重试 orderNumber : {}", orderNumber);
+        }
+        return settled;
+    }
+
+    /**
+     * 「关闭退款」的幂等键：订单号 + 原支付金额固定推导，重试天然复用同一退款单号。
+     * 对账任务正是靠它重新定位退款单，不需要额外存储。
+     */
+    private static String closedRefundNo(String outTradeNo, BigDecimal amount) {
+        return "closed-refund:" + outTradeNo + ":" + amount.toPlainString();
+    }
+
+    /**
+     * 重新确认「关闭退款」是否已到账，并做本地收尾。对账任务用它重试「已受理但未确认」的退款：
+     * 退款单号由 {@link #closedRefundNo} 推导，不依赖任何本地存储。
+     *
+     * @return true = 已确认到账且本地已置为已退单
+     */
+    public boolean reconfirmRefund(Order order) {
+        return confirmRefundAndSettle(order.getOrderNumber(),
+                closedRefundNo(String.valueOf(order.getOrderNumber()), order.getOrderPrice()));
+    }
+
+    /**
+     * 查询退款单状态。查不到/查失败一律返回 null（调用方按「未确认」处理）：
+     * 宁可让对账继续重试，也不能凭猜测定资金终态。
+     */
+    private Integer queryRefundStatus(String outOrderNo, String outRefundNo) {
+        RefundStatusDto refundStatusDto = new RefundStatusDto();
+        refundStatusDto.setOutOrderNo(outOrderNo);
+        refundStatusDto.setOutRefundNo(outRefundNo);
+        try {
+            ApiResponse<RefundStatusVo> response = payClient.refundStatus(refundStatusDto);
+            if (Objects.equals(response.getCode(), BaseCode.SUCCESS.getCode()) && Objects.nonNull(response.getData())) {
+                return response.getData().getRefundStatus();
+            }
+            log.error("退款单状态查询失败 outRefundNo : {} response : {}",
+                    outRefundNo, JSON.toJSONString(response));
+        } catch (Exception e) {
+            log.error("退款单状态查询异常 outRefundNo : {}", outRefundNo, e);
+        }
+        return null;
+    }
+
+    /**
+     * 取本次退款单号：优先用支付服务返回的 outRefundNo，
+     * 缺失时退回自己传的幂等键（两者在 pay-service 里是同一个值，渠道按它幂等）。
+     */
+    private String resolveOutRefundNo(ApiResponse<String> response, RefundDto refundDto) {
+        if (Objects.nonNull(response.getData()) && !response.getData().isBlank()) {
+            return response.getData();
+        }
+        return refundDto.getRefundRequestId();
     }
 
     // 支付/取消核心编排：
@@ -916,8 +1111,31 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                             .collect(Collectors.toList()));
         });
 
-        // 8. 事务提交后执行 Redis / Lua / Feign 等操作。
-        // 订单状态已经提交，后续操作失败不再回滚订单事务，由对账任务最终修复。
+        // 8. 登记节目数据同步（V4）：DB 是 Redis 的派生态，状态改了就必须保证有人把 DB 推到目标状态。
+        // 登记与状态 CAS 在同一个本地事务里，所以"状态改成功"与"留下待同步记录"要么同时成立，要么都不成立；
+        // 真正的 Feign 调用放在事务提交后（见步骤 9），避免把外部调用塞进事务、拖住行锁。
+        // payload 只由本事务已经写下的数据构造，不读 Redis：Redis 故障不得回滚已提交的订单状态。
+        final ProgramSyncPayload programSyncPayload;
+        boolean syncProgramData = Objects.equals(order.getOrderVersion(), ProgramOrderVersion.V4_VERSION.getValue())
+                && (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())
+                || Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode()));
+        if (syncProgramData) {
+            programSyncPayload = ProgramSyncPayload.of(
+                    programId,
+                    order.getOrderNumber(),
+                    order.getIdentifierId(),
+                    Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())
+                            ? SellStatus.SOLD.getCode() : SellStatus.NO_SOLD.getCode(),
+                    order.getOrderVersion(),
+                    seatMap);
+            orderProgramSyncMapper.enqueue(
+                    order.getOrderNumber(), DateUtils.now(), JSON.toJSONString(programSyncPayload));
+        } else {
+            programSyncPayload = null;
+        }
+
+        // 9. 事务提交后执行 Redis / Lua / Feign 等操作。
+        // 订单状态已经提交，后续操作失败不再回滚订单事务，由对账任务与节目数据同步重试任务最终修复。
         Runnable afterCommitWork = () -> {
             try {
 
@@ -927,8 +1145,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                 }
 
                 // 根据版本执行对应的座位、库存及节目数据更新。
-                // V1-V3：Lua + 延迟任务收敛 DB；
-                // V4：Lua + Feign 直接推动 DB 收敛。
+                // V1-V3：Lua + 延迟消息收敛 DB（延迟链路没有闭环校验，属已知边界）；
+                // V4：Lua 收敛 Redis，随后由 outbox 推动 DB 收敛。
                 updateProgramRelatedDataResolution(
                         programId,
                         seatMap,
@@ -938,14 +1156,20 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
                         seatIdAndTicketUserIdDomainList,
                         order.getOrderVersion());
 
+                // 事务已提交、Redis 已收敛，现在推进派生数据；
+                // 失败只会留下一行待重试记录，不会影响已完成的支付/取消。
+                if (Objects.nonNull(programSyncPayload)) {
+                    orderProgramSyncService.flushAfterCommit(programSyncPayload);
+                }
+
             } catch (Exception e) {
-                // afterCommit 失败不能再回滚已提交事务，交由后续对账任务兜底。
+                // afterCommit 失败不能再回滚已提交事务，交由后续对账任务与重试任务兜底。
                 log.error("支付/取消后数据同步失败 订单号 : {} 状态 : {}",
                         orderNumber, orderStatus, e);
             }
         };
 
-        // 9. 正常事务场景下注册 afterCommit，确保只有 DB 事务提交成功后才执行后续同步。
+        // 10. 正常事务场景下注册 afterCommit，确保只有 DB 事务提交成功后才执行后续同步。
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
@@ -995,7 +1219,8 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
      * data[1] = addSeatDatajsonArray     —— 写入 NO_SOLD / SOLD hash 的座位
      * data[2] = jsonArray                —— 调整余票数量（cancel 加回 / pay 扣减）
      * data[3] = seatIdAndTicketUserIdDomainList —— 购票人关联记录
-     * V4 路径额外走 Feign 调用 operateProgramData 更新 DB（DB 状态统一切换）。
+     * V4 路径只负责 Lua 收敛 Redis；节目服务 DB 的收敛由订单事务里登记的 outbox 推动
+     * （{@link OrderProgramSyncService}），推不动就退避重试，不再"推一次失败只看日志"。
      *
      * @param orderVersion 见 ProgramOrderVersion：V1=1, V2=2, V3=3, V4=4
      */
@@ -1067,11 +1292,14 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         String recordTye = Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode()) ? RecordType.INCREASE.getValue() : RecordType.CHANGE_STATUS.getValue();
         keys.add(recordTye + GLIDE_LINE + identifierId + GLIDE_LINE + userId);
         keys.add(recordTye);
-        Object[] data = new String[4];
+        Object[] data = new String[6];
         data[0] = JSON.toJSONString(unLockSeatIdjsonArray);
         data[1] = JSON.toJSONString(addSeatDatajsonArray);
         data[2] = JSON.toJSONString(jsonArray);
         data[3] = JSON.toJSONString(seatIdAndTicketUserIdDomainList);
+        // 派生 hash 有效期：Lua 只在新建 key 时补设期，已有 TTL 不会被延长。
+        data[4] = String.valueOf(PROGRAM_HASH_EXPIRE_SECONDS);
+        data[5] = String.valueOf(PROGRAM_RECORD_EXPIRE_SECONDS);
 
         ProgramOperateDataDto programOperateDataDto = new ProgramOperateDataDto();
         programOperateDataDto.setProgramId(programId);
@@ -1084,28 +1312,19 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             orderProgramCacheResolutionOperate.programCacheReverseOperate(keys, data);
             if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())) {
                 programOperateDataDto.setSellStatus(SellStatus.SOLD.getCode());
-                delayOperateProgramDataSend.sendMessage(JSON.toJSONString(programOperateDataDto));
-            }
-        } else {
-            //V4：先 Lua 收敛 Redis 权威数据（座位三区/余票），再 Feign 收敛 DB 派生数据。
-            //Redis 为权威，先更新；DB 为派生，后收敛——Feign 失败仅记日志（DB 滞后由对账任务观测兜底）
-            orderProgramCacheResolutionOperate.programCacheReverseOperate(keys, data);
-            if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ||
-                    Objects.equals(orderStatus.getCode(), OrderStatus.CANCEL.getCode())) {
-                programOperateDataDto.setSellStatus(Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode()) ? SellStatus.SOLD.getCode() : SellStatus.NO_SOLD.getCode());
-                // 事务外尽力而为：Feign 失败仅记日志不阻断（Redis 已收敛），
-                // DB 侧由对账任务观测兜底
-                try {
-                    ApiResponse<Boolean> programApiResponse = programClient.operateProgramData(programOperateDataDto);
-                    if (!Objects.equals(programApiResponse.getCode(), BaseCode.SUCCESS.getCode())) {
-                        log.error("program服务 operateProgramData 失败（事务外尽力而为） dto : {} response : {}",
-                                JSON.toJSONString(programOperateDataDto), JSON.toJSONString(programApiResponse));
-                    }
-                } catch (Exception e) {
-                    log.error("program服务 operateProgramData 异常（事务外尽力而为，DB 侧由对账任务观测兜底） dto : {}",
-                            JSON.toJSONString(programOperateDataDto), e);
+                if (!delayOperateProgramDataSend.sendMessage(JSON.toJSONString(programOperateDataDto))) {
+                    // V1~V3 没有 DB 侧 outbox 兜底：消息没进队列，节目服务 DB 就永久停在
+                    // 「座位未售、余票没减」，订单侧却已经支付，只能人工按订单号补数据。
+                    log.error("支付后节目数据延迟消息投递失败，节目服务 DB 可能未收敛，需人工核对 orderNumber : {} programId : {}",
+                            identifierId, programId);
                 }
             }
+        } else {
+            //V4：只 Lua 收敛 Redis 权威数据（座位三区/余票）。
+            //DB 派生数据的收敛不在这里做：订单事务里已经登记了 program_sync_payload，
+            //推送与重试由 OrderProgramSyncService 承担（Redis 未收敛不推 DB、失败指数退避、耗尽转死信），
+            //"推一次、失败只看一行日志"的裂缝由此被 outbox 兜住。
+            orderProgramCacheResolutionOperate.programCacheReverseOperate(keys, data);
         }
     }
 
@@ -1440,11 +1659,14 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
         String recordType = RecordType.INCREASE.getValue();
         keys.add(recordType + GLIDE_LINE + orderCreateMq.getIdentifierId() + GLIDE_LINE + orderCreateMq.getUserId());
         keys.add(recordType);
-        Object[] data = new String[4];
+        Object[] data = new String[6];
         data[0] = JSON.toJSONString(unLockSeatIdjsonArray);
         data[1] = JSON.toJSONString(addSeatDatajsonArray);
         data[2] = JSON.toJSONString(jsonArray);
         data[3] = JSON.toJSONString(seatIdAndTicketUserIdDomainList);
+        // 派生 hash 有效期：Lua 只在新建 key 时补设期，已有 TTL 不会被延长。
+        data[4] = String.valueOf(PROGRAM_HASH_EXPIRE_SECONDS);
+        data[5] = String.valueOf(PROGRAM_RECORD_EXPIRE_SECONDS);
         orderProgramCacheResolutionOperate.programCacheReverseOperate(keys, data);
         log.info("丢弃订单回滚Redis座位完成 订单号 : {}", orderCreateMq.getOrderNumber());
     }

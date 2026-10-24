@@ -139,8 +139,10 @@ public class ChannelDataService {
         getChannelDataByCodeDto.setCode(code);
 
         // 在线程池执行Feign调用，避免阻塞Gateway线程
+        // 渠道配置含 dataSecretKey/signSecretKey 等私钥，公开接口已不再下发，
+        // 这里必须走内部接口（@InternalApi + 内部令牌，见 InternalTokenFeignInterceptor）。
         Future<ApiResponse<GetChannelDataVo>> future =
-                threadPoolExecutor.submit(() -> baseDataClient.getByCode(getChannelDataByCodeDto));
+                threadPoolExecutor.submit(() -> baseDataClient.getSecretByCode(getChannelDataByCodeDto));
 
         try {
             // 最大等待10秒，防止下游服务异常导致Gateway长期阻塞
@@ -152,15 +154,15 @@ public class ChannelDataService {
             }
         } catch (InterruptedException e) {
             // 当前线程被中断
-            log.error("baseDataClient getByCode Interrupted", e);
+            log.error("baseDataClient getSecretByCode Interrupted", e);
             throw new TicketFlowFrameException(BaseCode.THREAD_INTERRUPTED);
         } catch (ExecutionException e) {
             // Feign执行异常，例如网络错误、序列化失败
-            log.error("baseDataClient getByCode execution exception", e);
+            log.error("baseDataClient getSecretByCode execution exception", e);
             throw new TicketFlowFrameException(BaseCode.SYSTEM_ERROR);
         } catch (TimeoutException e) {
             // 超时未返回，避免慢服务拖垮Gateway
-            log.error("baseDataClient getByCode timeout exception", e);
+            log.error("baseDataClient getSecretByCode timeout exception", e);
             throw new TicketFlowFrameException(BaseCode.EXECUTE_TIME_OUT);
         }
 

@@ -49,8 +49,9 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
     public void execute(String content) {
         log.info("延迟订单取消消息进行消费 content : {}", content);
         if (StringUtil.isEmpty(content)) {
-            log.error("延迟队列消息不存在");
-            return;
+            // 旧实现直接 return：框架把「正常返回」当消费成功，这条消息就此消失。
+            // 抛异常才会走框架的重试→死信，至少留下可查的痕迹。
+            throw new TicketFlowFrameException("延迟队列消息内容为空，无法解析订单号");
         }
         DelayOrderCancelMessageModule delayOrderCancelMessageModule = JSON.parseObject(content, DelayOrderCancelMessageModule.class);
 
@@ -114,6 +115,13 @@ public class DelayOrderCancelConsumer implements ConsumerTask {
 
         // 存证记录尽力而为更新，不阻断核心主流程
         recordConsumerResult(existMessageConsumerRecordVo, messageId, messageTraceId, programId, content, consumerStatus, consumerException);
+
+        // 交给框架重试：DelayConsumerQueue 只有「抛出异常」才会按退避重投，超过 maxRetry 才进死信。
+        // 旧实现把失败吞在这里，框架永远认为消费成功 → maxRetry 与死信对取消链路完全不生效，
+        // 一次瞬时故障（DB 抖动、api-data 不可用）就让订单再也不会被自动取消。
+        if (Objects.equals(consumerStatus, MessageConsumerStatus.CONSUMER_FAIL.getCode())) {
+            throw new TicketFlowFrameException(StringUtil.isEmpty(consumerException) ? "延迟订单取消失败" : consumerException);
+        }
     }
 
     private void recordConsumerResult(MessageConsumerRecordVo existMessageConsumerRecordVo,

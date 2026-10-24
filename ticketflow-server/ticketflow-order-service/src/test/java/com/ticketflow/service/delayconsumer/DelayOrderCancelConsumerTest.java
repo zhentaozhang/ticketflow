@@ -26,6 +26,8 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -125,11 +127,26 @@ class DelayOrderCancelConsumerTest {
         when(orderService.cancel(any(OrderCancelDto.class)))
                 .thenThrow(new TicketFlowFrameException(BaseCode.ORDER_NOT_EXIST));
 
-        delayOrderCancelConsumer.execute(buildContent());
+        // 关键行为：失败不能吞掉。必须抛出去，框架才会按退避重投，超过 maxRetry 才进死信。
+        // 旧实现把异常吞在消费者里，框架永远认为消费成功 → maxRetry 与死信形同虚设。
+        TicketFlowFrameException thrown = assertThrows(TicketFlowFrameException.class,
+                () -> delayOrderCancelConsumer.execute(buildContent()));
+        // 回归：TicketFlowFrameException 的 @Data message 字段曾覆盖 Throwable.getMessage()，
+        // 且该构造器未赋值 → 抛出的是 null 消息，前端/日志都看不到原因。
+        assertNotNull(thrown.getMessage());
+        assertEquals(BaseCode.ORDER_NOT_EXIST.getMsg(), thrown.getMessage());
 
         ArgumentCaptor<UpdateMessageConsumerRecordDto> captor = ArgumentCaptor.forClass(UpdateMessageConsumerRecordDto.class);
         verify(apiDataClient).updateMessageConsumerRecord(captor.capture());
         assertEquals(MessageConsumerStatus.CONSUMER_FAIL.getCode(), captor.getValue().getMessageConsumerStatus());
+    }
+
+    @Test
+    void 消息内容为空时抛异常交给框架重试() {
+        // 旧实现直接 return：框架按「消费成功」处理，这条消息彻底消失，连死信里都没有。
+        assertThrows(TicketFlowFrameException.class, () -> delayOrderCancelConsumer.execute(""));
+
+        verify(orderService, never()).cancel(any(OrderCancelDto.class));
     }
 
     @Test

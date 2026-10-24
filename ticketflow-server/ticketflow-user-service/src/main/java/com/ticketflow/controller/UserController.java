@@ -14,6 +14,7 @@ import com.ticketflow.dto.UserUpdateEmailDto;
 import com.ticketflow.dto.UserUpdateMobileDto;
 import com.ticketflow.dto.UserUpdatePasswordDto;
 import com.ticketflow.service.UserService;
+import com.ticketflow.threadlocal.RequestIdentity;
 import com.ticketflow.vo.UserGetAndTicketUserListVo;
 import com.ticketflow.vo.UserLoginVo;
 import com.ticketflow.vo.UserVo;
@@ -77,6 +78,8 @@ public class UserController {
     @Operation(summary = "修改个人信息")
     @PostMapping(value = "/update")
     public ApiResponse<Void> update(@Valid @RequestBody UserUpdateDto userUpdateDto) {
+        // 身份来自网关验签后注入的请求头，请求体里的 id 一律忽略，避免越权改他人资料
+        userUpdateDto.setId(RequestIdentity.requireUserId());
         userService.update(userUpdateDto);
         return ApiResponse.ok();
     }
@@ -84,6 +87,7 @@ public class UserController {
     @Operation(summary = "修改密码")
     @PostMapping(value = "/update/password")
     public ApiResponse<Void> updatePassword(@Valid @RequestBody UserUpdatePasswordDto userUpdatePasswordDto) {
+        userUpdatePasswordDto.setId(RequestIdentity.requireUserId());
         userService.updatePassword(userUpdatePasswordDto);
         return ApiResponse.ok();
     }
@@ -91,6 +95,8 @@ public class UserController {
     @Operation(summary = "修改邮箱")
     @PostMapping(value = "/update/email")
     public ApiResponse<Void> updateEmail(@Valid @RequestBody UserUpdateEmailDto userUpdateEmailDto) {
+        // 分片键不可直接 UPDATE，改绑邮箱同样只能作用于当前登录用户
+        userUpdateEmailDto.setId(RequestIdentity.requireUserId());
         userService.updateEmail(userUpdateEmailDto);
         return ApiResponse.ok();
     }
@@ -98,6 +104,7 @@ public class UserController {
     @Operation(summary = "修改手机号")
     @PostMapping(value = "/update/mobile")
     public ApiResponse<Void> updateMobile(@Valid @RequestBody UserUpdateMobileDto userUpdateMobileDto) {
+        userUpdateMobileDto.setId(RequestIdentity.requireUserId());
         userService.updateMobile(userUpdateMobileDto);
         return ApiResponse.ok();
     }

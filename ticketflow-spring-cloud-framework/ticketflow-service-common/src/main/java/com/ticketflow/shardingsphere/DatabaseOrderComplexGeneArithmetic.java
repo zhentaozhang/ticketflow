@@ -1,17 +1,16 @@
 package com.ticketflow.shardingsphere;
 
 import cn.hutool.core.collection.CollectionUtil;
-import com.ticketflow.enums.BaseCode;
-import com.ticketflow.exception.TicketFlowFrameException;
 import org.apache.shardingsphere.sharding.api.sharding.complex.ComplexKeysShardingAlgorithm;
 import org.apache.shardingsphere.sharding.api.sharding.complex.ComplexKeysShardingValue;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 
 /**
  * ShardingSphere 自定义复合分片：订单表分库算法（基因法）。
@@ -56,8 +55,6 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
     @Override
     public Collection<String> doSharding(Collection<String> allActualSplitDatabaseNames,
                                          ComplexKeysShardingValue<Long> complexKeysShardingValue) {
-        //返回的真实库名集合
-        List<String> actualDatabaseNames = new ArrayList<>(allActualSplitDatabaseNames.size());
         //查询中的列名和值
         Map<String, Collection<Long>> columnNameAndShardingValuesMap =
                 complexKeysShardingValue.getColumnNameAndShardingValuesMap();
@@ -80,65 +77,41 @@ public class DatabaseOrderComplexGeneArithmetic implements ComplexKeysShardingAl
         //email条件的值（用户邮箱映射表分片键）
         Collection<?> emailValues = (Collection<?>) (Object) columnNameAndShardingValuesMap.get("email");
 
-        Long value = null;
-        //如果是order_number查询
-        if (CollectionUtil.isNotEmpty(orderNumberValues)) {
-            value = orderNumberValues.stream().findFirst()
-                    .orElseThrow(() -> new TicketFlowFrameException(BaseCode.ORDER_NUMBER_NOT_EXIST));
-            //如果是user_id查询
-        } else if (CollectionUtil.isNotEmpty(userIdValues)) {
-            value = userIdValues.stream().findFirst()
-                    .orElseThrow(() -> new TicketFlowFrameException(BaseCode.USER_ID_NOT_EXIST));
-            //如果是id查询
-        } else if (CollectionUtil.isNotEmpty(idValues)) {
-            value = idValues.stream().findFirst().orElse(null);
-            //如果是program_id查询
-        } else if (CollectionUtil.isNotEmpty(programIdValues)) {
-            value = programIdValues.stream().findFirst().orElse(null);
-            //如果是out_order_no查询（订单号字符串，与 order_number 同基因）
-        } else if (CollectionUtil.isNotEmpty(outOrderNoValues)) {
-            value = Long.parseLong(String.valueOf(outOrderNoValues.stream().findFirst().orElse(null)));
-            //如果是mobile查询（手机号哈希取模，解决登录全库广播）
-        } else if (CollectionUtil.isNotEmpty(mobileValues)) {
-            String mobileStr = String.valueOf(mobileValues.iterator().next());
-            value = (long) (mobileStr.hashCode() & 0x7FFFFFFF);
-            //如果是email查询（邮箱哈希取模）
-        } else if (CollectionUtil.isNotEmpty(emailValues)) {
-            String emailStr = String.valueOf(emailValues.iterator().next());
-            value = (long) (emailStr.hashCode() & 0x7FFFFFFF);
-        }
-        //订单号与用户ID同时出现时（如订单列表双条件查询），两个分片键必须路由到同一分片，
+        //订单号与用户ID同时出现时（如订单详情双条件查询），两个分片键必须路由到同一分片，
         //否则说明基因位定义已不一致，fail-fast 防止静默错误路由
-        if (CollectionUtil.isNotEmpty(orderNumberValues) && CollectionUtil.isNotEmpty(userIdValues)) {
-            long orderNumberIndex = ShardingGeneUtils.databaseIndex(shardingCount,
-                    orderNumberValues.stream().findFirst().get(), tableShardingCount);
-            long userIdIndex = ShardingGeneUtils.databaseIndex(shardingCount,
-                    userIdValues.stream().findFirst().get(), tableShardingCount);
-            if (orderNumberIndex != userIdIndex) {
-                throw new IllegalArgumentException(
-                        String.format("order_number 与 user_id 基因位路由不一致，order_number 路由到库 %d，user_id 路由到库 %d",
-                                orderNumberIndex, userIdIndex));
-            }
+        ComplexGeneRoute.checkGeneConsistency(orderNumberValues, userIdValues,
+                value -> ShardingGeneUtils.databaseIndex(shardingCount, value, tableShardingCount), "库");
+        //IN (...) 查询必须把每个分片键都路由到各自的库：只取 findFirst 会静默丢掉其余库的数据
+        Set<Long> databaseIndexes = new LinkedHashSet<>();
+        for (Long shardingValue : ComplexGeneRoute.resolveValues(orderNumberValues, userIdValues, idValues,
+                programIdValues, outOrderNoValues, mobileValues, emailValues)) {
+            databaseIndexes.add(ShardingGeneUtils.databaseIndex(shardingCount, shardingValue, tableShardingCount));
         }
-        //如果order_number或者user_id的值存在
-        if (Objects.nonNull(value)) {
-            //获得值后再获得实际的分库的索引
-            long databaseIndex = calculateDatabaseIndex(shardingCount, value, tableShardingCount);
+        //如果没有分片键查询，则把所有真实库返回
+        if (databaseIndexes.isEmpty()) {
+            return allActualSplitDatabaseNames;
+        }
+        List<String> actualDatabaseNames = new ArrayList<>(databaseIndexes.size());
+        for (Long databaseIndex : databaseIndexes) {
             String databaseIndexStr = String.valueOf(databaseIndex);
+            boolean matched = false;
             for (String actualSplitDatabaseName : allActualSplitDatabaseNames) {
                 //将所有的分库名和得到的分库索引进行精确匹配（contains 在库名为 ds_1/ds_10 时存在前缀误匹配）
                 if (actualSplitDatabaseName.equals("ds_" + databaseIndexStr)) {
-                    actualDatabaseNames.add(actualSplitDatabaseName);
-                    //记录命中分布，供 ShardingMetrics 快照观察分片热点
-                    ShardingMetrics.recordDatabaseHit(databaseIndex);
+                    matched = true;
                     break;
                 }
             }
-            return actualDatabaseNames;
-        } else {
-            //如果没有分片键查询，则把所有真实库返回
-            return allActualSplitDatabaseNames;
+            if (!matched) {
+                throw new IllegalStateException(String.format(
+                        "分库索引 %d 在配置的库 %s 中不存在，分库数与 sharding-count=%d 不一致",
+                        databaseIndex, allActualSplitDatabaseNames, shardingCount));
+            }
+            actualDatabaseNames.add("ds_" + databaseIndexStr);
+            //记录命中分布，供 ShardingMetrics 快照观察分片热点
+            ShardingMetrics.recordDatabaseHit(databaseIndex);
         }
+        return actualDatabaseNames;
     }
 
     /**

@@ -5,10 +5,12 @@ import com.ticketflow.dto.NotifyDto;
 import com.ticketflow.dto.PayBillDto;
 import com.ticketflow.dto.PayDto;
 import com.ticketflow.dto.RefundDto;
+import com.ticketflow.dto.RefundStatusDto;
 import com.ticketflow.dto.TradeCheckDto;
 import com.ticketflow.service.PayService;
 import com.ticketflow.vo.NotifyVo;
 import com.ticketflow.vo.PayBillVo;
+import com.ticketflow.vo.RefundStatusVo;
 import com.ticketflow.vo.TradeCheckVo;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -52,6 +54,12 @@ public class PayController {
     @PostMapping(value = "/refund")
     public ApiResponse<String> refund(@Valid @RequestBody RefundDto refundDto) {
         return ApiResponse.ok(payService.refund(refundDto));
+    }
+
+    @Operation(summary = "退款单状态查询（refundStatus=2 才是钱已退给用户）")
+    @PostMapping(value = "/refund/status")
+    public ApiResponse<RefundStatusVo> refundStatus(@Valid @RequestBody RefundStatusDto refundStatusDto) {
+        return ApiResponse.ok(payService.refundStatus(refundStatusDto));
     }
 
     @Operation(summary = "账单详情查询")

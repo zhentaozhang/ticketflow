@@ -3,7 +3,7 @@ package com.ticketflow.service;
 import com.ticketflow.core.SpringUtil;
 import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.jwt.TokenUtil;
-import com.ticketflow.redis.RedisCache;
+import com.ticketflow.redis.session.UserSessionStore;
 import com.ticketflow.vo.UserVo;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -18,7 +18,6 @@ import org.springframework.core.env.ConfigurableEnvironment;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -28,7 +27,7 @@ class TokenServiceTest {
     private static final String SECRET = "test-token-secret";
 
     @Mock
-    private RedisCache redisCache;
+    private UserSessionStore userSessionStore;
 
     @InjectMocks
     private TokenService tokenService;
@@ -65,22 +64,23 @@ class TokenServiceTest {
     }
 
     @Test
-    void getUserShouldReturnUserWhenPresentInRedis() {
-        String token = TokenUtil.createToken("user-1", "{\"userId\":\"user-1\"}", 60000L, SECRET);
+    void getUserShouldReturnUserWhenSessionSignatureValid() {
+        String token = TokenUtil.createToken("10086", "{\"userId\":\"10086\"}", 60000L, SECRET);
         UserVo expected = new UserVo();
-        expected.setId("user-1");
-        when(redisCache.get(any(), any())).thenReturn(expected);
+        expected.setId("10086");
+        // 会话经 UserSessionStore 验签通过后才会返回负载
+        when(userSessionStore.loadPayload("2", 10086L, UserVo.class)).thenReturn(expected);
 
         UserVo result = tokenService.getUser(token, "2", SECRET);
 
-        assertEquals("user-1", result.getId());
+        assertEquals("10086", result.getId());
     }
 
     @Test
-    void getUserShouldThrowWhenMissingInRedis() {
-        String token = TokenUtil.createToken("user-1", "{\"userId\":\"user-1\"}", 60000L, SECRET);
-        when(redisCache.get(any(), any())).thenReturn(null);
+    void getUserShouldThrowWhenSessionMissingOrForged() {
+        String token = TokenUtil.createToken("10086", "{\"userId\":\"10086\"}", 60000L, SECRET);
 
+        // 默认 mock 返回 null：等价于 Redis 无该会话，或会话签名校验失败
         assertThrows(TicketFlowFrameException.class, () -> tokenService.getUser(token, "2", SECRET));
     }
 }

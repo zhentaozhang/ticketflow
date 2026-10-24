@@ -3,8 +3,11 @@ package com.ticketflow.config;
 
 import com.ticketflow.context.DelayQueueBasePart;
 import com.ticketflow.context.DelayQueueContext;
+import com.ticketflow.core.DeadLetterListener;
+import com.ticketflow.event.DeadLetterListenerBinder;
 import com.ticketflow.event.DelayQueueInitHandler;
 import org.redisson.api.RedissonClient;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 
@@ -30,5 +33,15 @@ public class DelayQueueAutoConfig {
     @Bean
     public DelayQueueContext delayQueueContext(DelayQueueBasePart delayQueueBasePart){
         return new DelayQueueContext(delayQueueBasePart);
+    }
+
+    /**
+     * 绑定业务服务注册的死信监听器。
+     * 框架模块不依赖 micrometer，指标/告警由业务服务实现 DeadLetterListener 注入。
+     */
+    @Bean
+    public DeadLetterListenerBinder deadLetterListenerBinder(DelayQueueBasePart delayQueueBasePart,
+                                                             ObjectProvider<DeadLetterListener> deadLetterListeners){
+        return new DeadLetterListenerBinder(delayQueueBasePart, deadLetterListeners);
     }
 }

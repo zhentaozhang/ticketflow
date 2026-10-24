@@ -8,6 +8,7 @@ import com.ticketflow.mapper.OrderMapper;
 import com.ticketflow.observability.Metrics;
 import com.ticketflow.service.OrderService;
 import com.ticketflow.servicelock.LockType;
+import com.ticketflow.util.DateUtils;
 import com.ticketflow.util.ServiceLockTool;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -89,7 +90,9 @@ class PaymentReconciliationTaskTest {
 
     @Test
     void 渠道未支付的订单标记对账完成且不再重复核对() {
-        when(orderMapper.selectList(any())).thenReturn(List.of(buildCancelledOrder()));
+        // 三轮扫描：新鲜窗 → 窗口外存量 → 退款未确认；这里只有新鲜窗有单
+        when(orderMapper.selectList(any()))
+                .thenReturn(List.of(buildCancelledOrder()), List.of(), List.of());
         when(orderService.reconcilePayment(any(Order.class))).thenReturn(PaymentReconcileResult.NOT_PAID);
 
         paymentReconciliationTask.paymentReconciliation();
@@ -102,7 +105,8 @@ class PaymentReconciliationTaskTest {
 
     @Test
     void 渠道已支付并退款成功时标记对账完成并上报资损信号() {
-        when(orderMapper.selectList(any())).thenReturn(List.of(buildCancelledOrder()));
+        // 第一段扫「未对账」的取消单，第二段扫「退款未确认」的单：这里第二轮为空
+        when(orderMapper.selectList(any())).thenReturn(List.of(buildCancelledOrder()), List.of());
         when(orderService.reconcilePayment(any(Order.class))).thenReturn(PaymentReconcileResult.REFUNDED);
 
         paymentReconciliationTask.paymentReconciliation();
@@ -131,7 +135,7 @@ class PaymentReconciliationTaskTest {
         Order first = buildCancelledOrder();
         Order second = buildCancelledOrder();
         second.setOrderNumber(2002L);
-        when(orderMapper.selectList(any())).thenReturn(List.of(first, second));
+        when(orderMapper.selectList(any())).thenReturn(List.of(first, second), List.of(), List.of());
         when(orderService.reconcilePayment(first)).thenThrow(new RuntimeException("渠道超时"));
         when(orderService.reconcilePayment(second)).thenReturn(PaymentReconcileResult.NOT_PAID);
 
@@ -140,6 +144,95 @@ class PaymentReconciliationTaskTest {
         verify(orderService, timeout(3000)).markPaymentReconciled(2002L,
                 ReconciliationStatus.RECONCILIATION_SUCCESS);
         verify(orderService, never()).markPaymentReconciled(eq(ORDER_NUMBER), any());
+    }
+
+    // ==================== 第二段：退款已受理但未确认到账的重试 ====================
+
+    @Test
+    void 退款仍未确认到账时重新驱动渠道退款且不标记对账完成() {
+        when(orderMapper.selectList(any()))
+                .thenReturn(List.of())      // 第一段 A：新鲜窗，没有新取消的单
+                .thenReturn(List.of())      // 第一段 B：窗口外存量也排空了
+                .thenReturn(List.of(buildCancelledOrder()));  // 第二段：退款未确认的单
+        when(orderService.reconfirmRefund(any(Order.class))).thenReturn(false);
+        when(orderService.reconcilePayment(any(Order.class))).thenReturn(PaymentReconcileResult.REFUND_FAILED);
+
+        paymentReconciliationTask.paymentReconciliation();
+
+        verify(orderService, timeout(3000)).reconfirmRefund(any(Order.class));
+        verify(orderService, timeout(3000)).reconcilePayment(any(Order.class));
+        verify(meterRegistry, timeout(3000)).counter(eq(Metrics.PAYMENT_RECONCILE_TOTAL),
+                eq(Metrics.RESULT), eq("refund_refund_failed"));
+        // 没确认到账就不能标记完成，否则这单再也不会被扫出来
+        verify(orderService, never()).markPaymentReconciled(any(), any());
+    }
+
+    @Test
+    void 退款单已确认到账时先收尾并标记对账完成不再驱动退款() {
+        when(orderMapper.selectList(any()))
+                .thenReturn(List.of())
+                .thenReturn(List.of())
+                .thenReturn(List.of(buildCancelledOrder()));
+        when(orderService.reconfirmRefund(any(Order.class))).thenReturn(true);
+
+        paymentReconciliationTask.paymentReconciliation();
+
+        verify(orderService, timeout(3000)).markPaymentReconciled(ORDER_NUMBER,
+                ReconciliationStatus.RECONCILIATION_SUCCESS);
+        // 已确认到账就不要再碰渠道的退款写接口
+        verify(orderService, never()).reconcilePayment(any());
+    }
+
+    @Test
+    void 退款超窗仍未确认时告警等人核对() {
+        when(orderMapper.selectList(any())).thenReturn(List.of());
+        when(orderMapper.selectCount(any())).thenReturn(3L);
+
+        paymentReconciliationTask.paymentReconciliation();
+
+        verify(meterRegistry, timeout(3000)).counter(eq(Metrics.PAYMENT_RECONCILE_TOTAL),
+                eq(Metrics.RESULT), eq(Metrics.RESULT_UNCONFIRMED));
+        verify(orderService, never()).reconcilePayment(any());
+    }
+
+    // ==================== 第一段 B：窗口外存量补扫（不再是「过了窗口就永久放弃」） ====================
+
+    @Test
+    void 窗口外未对账的取消单也会被补扫并标记完成() {
+        Order oldOrder = buildCancelledOrder();
+        oldOrder.setOrderNumber(3003L);
+        oldOrder.setCancelOrderTime(DateUtils.addHour(DateUtils.now(), -6));
+        when(orderMapper.selectList(any()))
+                .thenReturn(List.of())               // 新鲜窗空
+                .thenReturn(List.of(oldOrder),      // 存量：6 小时前取消、一直没对账
+                        List.of());                  // 退款未确认段
+        when(orderService.reconcilePayment(any(Order.class))).thenReturn(PaymentReconcileResult.NOT_PAID);
+
+        paymentReconciliationTask.paymentReconciliation();
+
+        // 关键：窗口外的单照样被核对、照样标记完成（否则它就是静默差异）
+        verify(orderService, timeout(3000)).markPaymentReconciled(3003L,
+                ReconciliationStatus.RECONCILIATION_SUCCESS);
+        verify(meterRegistry, timeout(3000)).counter(eq(Metrics.PAYMENT_RECONCILE_TOTAL),
+                eq(Metrics.RESULT), eq("backlog_not_paid"));
+    }
+
+    @Test
+    void 新鲜窗没排空时不推进存量() {
+        // 新鲜窗整整一批（>= BATCH_SIZE=50）没扫完，说明系统正跟不上，此时不能再去啃存量
+        List<Order> fresh = new java.util.ArrayList<>();
+        for (int index = 0; index < 50; index++) {
+            Order order = buildCancelledOrder();
+            order.setOrderNumber((long) index + 1);
+            fresh.add(order);
+        }
+        when(orderMapper.selectList(any())).thenReturn(fresh, List.of());
+        when(orderService.reconcilePayment(any(Order.class))).thenReturn(PaymentReconcileResult.NOT_PAID);
+
+        paymentReconciliationTask.paymentReconciliation();
+
+        // 只处理了新鲜窗那 50 笔，存量段没有启动（否则总笔数会超过 50）
+        verify(orderService, timeout(3000).times(50)).reconcilePayment(any());
     }
 
     @Test

@@ -21,7 +21,8 @@ CREATE TABLE `d_pay_bill_0` (
   `edit_time` datetime NOT NULL COMMENT '修改时间',
   `status` tinyint(1) NOT NULL DEFAULT '1' COMMENT '状态 1：未删除 0：删除',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `d_pay_bill_out_order_no_IDX` (`out_order_no`) USING BTREE
+  UNIQUE KEY `d_pay_bill_out_order_no_IDX` (`out_order_no`) USING BTREE,
+  KEY `d_pay_bill_status_time_IDX` (`pay_bill_status`, `pay_time`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='支付表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -57,7 +58,8 @@ CREATE TABLE `d_pay_bill_1` (
   `edit_time` datetime NOT NULL COMMENT '修改时间',
   `status` tinyint(1) NOT NULL DEFAULT '1' COMMENT '状态 1：未删除 0：删除',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `d_pay_bill_out_order_no_IDX` (`out_order_no`) USING BTREE
+  UNIQUE KEY `d_pay_bill_out_order_no_IDX` (`out_order_no`) USING BTREE,
+  KEY `d_pay_bill_status_time_IDX` (`pay_bill_status`, `pay_time`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='支付表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 

@@ -151,3 +151,15 @@ knife4j:
     language: zh_cn
     enable-version: true
     enable-swagger-models: true
+# 登录会话签名配置
+# 会话值（Redis user_login_{code}_{userId}）外层带 HMAC 签名，
+# 网关校验通过才认为该请求已登录：仅有 Redis 写权限无法伪造会话。
+# 密钥必须与网关一致；生产用环境变量 SESSION_SIGN_SECRET 注入强随机值。
+ticketflow:
+  session:
+    sign-secret: ${SESSION_SIGN_SECRET:ticketflow-dev-session-secret}
+  # 内部接口令牌：保护 /channel/data/getSecretByCode、/channel/data/add、/channel/data/approve
+  # 这类「会下发或改写渠道私钥」的接口；只有携带该头的服务端调用才放行。
+  # 未配置时 base-data 会拒绝所有内部接口（fail closed），不影响普通业务接口。
+  internal:
+    token: ${INTERNAL_TOKEN:ticketflow-dev-internal-token}

@@ -4,8 +4,10 @@ import com.ticketflow.common.ApiResponse;
 import com.ticketflow.dto.NotifyDto;
 import com.ticketflow.dto.PayDto;
 import com.ticketflow.dto.RefundDto;
+import com.ticketflow.dto.RefundStatusDto;
 import com.ticketflow.dto.TradeCheckDto;
 import com.ticketflow.vo.NotifyVo;
+import com.ticketflow.vo.RefundStatusVo;
 import com.ticketflow.vo.TradeCheckVo;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.stereotype.Component;
@@ -47,4 +49,11 @@ public interface PayClient {
      */
     @PostMapping(value = "/pay/refund")
     ApiResponse<String> refund(RefundDto dto);
+
+    /**
+     * 查询退款单状态。调用方用它区分「渠道已把钱退给用户（refundStatus=2）」
+     * 与「只是受理了/结果未知」，只有前者才能把订单置为已退单。
+     */
+    @PostMapping(value = "/pay/refund/status")
+    ApiResponse<RefundStatusVo> refundStatus(RefundStatusDto dto);
 }

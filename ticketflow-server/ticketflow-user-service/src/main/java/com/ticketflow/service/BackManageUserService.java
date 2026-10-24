@@ -8,6 +8,8 @@ import com.ticketflow.exception.TicketFlowFrameException;
 import com.ticketflow.properties.BackManageProperties;
 import com.ticketflow.vo.BackManageLoginVo;
 import com.ticketflow.vo.BackManageUserDetailVo;
+import java.util.Locale;
+import java.util.Set;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,7 +26,13 @@ public class BackManageUserService {
 
     private static final String DEFAULT_USERNAME = "admin";
 
-    private static final String DEFAULT_PASSWORD = "admin";
+    /**
+     * 视为默认/弱口令的密码集合。
+     * 仓库默认配置、示例配置与公开资料里出现过的管理口令都算在内：只要命中其中任意一个，后台登录一律拒绝，
+     * 避免「默认 admin/admin 会被拦，但默认 admin/admin123 反而放行」这种只认一个字符串的假防护。
+     */
+    private static final Set<String> DEFAULT_PASSWORDS =
+            Set.of("admin", "admin123", "123456", "admin@123", "password", "12345678");
 
     @Autowired
     private BackManageProperties backManageProperties;
@@ -32,14 +40,24 @@ public class BackManageUserService {
     @PostConstruct
     public void init() {
         if (isDefaultCredential()) {
-            log.error("安全告警：manage.username/password 仍为默认值 admin/admin，后台管理登录已禁用。"
-                    + "请在配置中显式设置管理凭证（生产环境建议使用强口令并通过环境变量/jasypt 注入）");
+            log.error("安全告警：manage.username/password 仍是默认或弱口令（当前 username={}），后台管理登录已禁用。"
+                    + "请通过环境变量 MANAGE_USERNAME/MANAGE_PASSWORD 或 jasypt 加密配置设置强口令，默认口令清单见 DEFAULT_PASSWORDS",
+                    backManageProperties.getUsername());
         }
     }
 
-    private boolean isDefaultCredential() {
-        return DEFAULT_USERNAME.equals(backManageProperties.getUsername())
-                && DEFAULT_PASSWORD.equals(backManageProperties.getPassword());
+    /**
+     * 判断当前配置是否落在「默认/弱口令」范围内。
+     * 空密码、空白密码同样视为弱口令——不设置密码不应等价于「无密码即可登录」。
+     */
+    boolean isDefaultCredential() {
+        String username = backManageProperties.getUsername();
+        String password = backManageProperties.getPassword();
+        if (username == null || password == null || password.isBlank()) {
+            return true;
+        }
+        return DEFAULT_USERNAME.equalsIgnoreCase(username.trim())
+                && DEFAULT_PASSWORDS.contains(password.trim().toLowerCase(Locale.ROOT));
     }
 
     public BackManageLoginVo login(BackManageLoginDto backManageLoginDto){
