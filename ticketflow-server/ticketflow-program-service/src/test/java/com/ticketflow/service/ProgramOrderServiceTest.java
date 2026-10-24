@@ -279,6 +279,66 @@ class ProgramOrderServiceTest {
             assertEquals(2, result.getPurchaseSeatList().size());
         }
 
+        /**
+         * 缓存整段缺失（40039）不是业务失败：重建一次缓存后重试一次，正常拿到座位。
+         * 这一段对应 P1-38：以前 Lua 把「余票 hash 整段不在」当票档不存在(40010)、
+         * 把「座位三区整段不在」当座位不存在(40001)，缓存冷启动期间下单 100% 失败。
+         */
+        @Test
+        void withSeatSelection_WhenCacheSegmentMissing_RebuildsAndRetries() {
+            ProgramOrderCreateDto dto = createDtoWithSeats(2);
+
+            when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
+                    .thenReturn(createShowTime());
+            when(ticketCategoryService.selectTicketCategoryListByProgramIdMultipleCache(eq(PROGRAM_ID), any()))
+                    .thenReturn(List.of(createTicketCategory(TICKET_CATEGORY_ID)));
+            when(uidGenerator.getUid()).thenReturn(888L);
+
+            ProgramCacheCreateOrderData notReadyResult = new ProgramCacheCreateOrderData();
+            notReadyResult.setCode(BaseCode.CACHE_NOT_READY.getCode());
+            ProgramCacheCreateOrderData successResult = new ProgramCacheCreateOrderData();
+            successResult.setCode(BaseCode.SUCCESS.getCode());
+            successResult.setPurchaseSeatList(Arrays.asList(
+                    createPurchaseSeat(50L, 2000L, TICKET_CATEGORY_ID),
+                    createPurchaseSeat(51L, 2001L, TICKET_CATEGORY_ID)));
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(notReadyResult)
+                    .thenReturn(successResult);
+
+            CreateOrderTemporaryData result =
+                    programOrderService.createOrderOperateProgramCacheResolution(dto);
+
+            assertEquals(2, result.getPurchaseSeatList().size());
+            verify(programCacheCreateOrderResolutionOperate, times(2)).programCacheOperate(anyList(), any());
+            // 重建走 ensureTicketCategoryCache：入口兜底一次 + 重建一次，每个票档都要重新探测/加载
+            verify(seatService, atLeast(2)).selectSeatResolution(anyLong(), anyLong(), anyLong(), any());
+            verify(ticketCategoryService, atLeast(2)).getRedisRemainNumberResolution(PROGRAM_ID, TICKET_CATEGORY_ID);
+        }
+
+        /**
+         * 重建后仍然 40039：只重试一次，按真实错误码把 CACHE_NOT_READY 抛给调用方，不做无限重试。
+         */
+        @Test
+        void withSeatSelection_WhenCacheStillMissingAfterRebuild_ThrowsCacheNotReady() {
+            ProgramOrderCreateDto dto = createDtoWithSeats(2);
+
+            when(programShowTimeService.selectProgramShowTimeByProgramIdMultipleCache(PROGRAM_ID))
+                    .thenReturn(createShowTime());
+            when(ticketCategoryService.selectTicketCategoryListByProgramIdMultipleCache(eq(PROGRAM_ID), any()))
+                    .thenReturn(List.of(createTicketCategory(TICKET_CATEGORY_ID)));
+            when(uidGenerator.getUid()).thenReturn(888L);
+
+            ProgramCacheCreateOrderData notReadyResult = new ProgramCacheCreateOrderData();
+            notReadyResult.setCode(BaseCode.CACHE_NOT_READY.getCode());
+            when(programCacheCreateOrderResolutionOperate.programCacheOperate(anyList(), any()))
+                    .thenReturn(notReadyResult);
+
+            TicketFlowFrameException exception = assertThrows(TicketFlowFrameException.class,
+                    () -> programOrderService.createOrderOperateProgramCacheResolution(dto));
+            assertEquals(BaseCode.CACHE_NOT_READY.getCode(), exception.getCode());
+            verify(programCacheCreateOrderResolutionOperate, times(2)).programCacheOperate(anyList(), any());
+        }
+
         @Test
         void withoutSeatSelection_Success() {
             ProgramOrderCreateDto dto = new ProgramOrderCreateDto();

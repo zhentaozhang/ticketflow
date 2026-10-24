@@ -418,6 +418,9 @@ public class ProgramOrderService {
      * <p>
      * 缓存就绪由调用方负责（{@link #ensureProgramCacheReady}）——正常路径下这里拿到缓存直接扣减；
      * 这里仍保留一次兜底检查，但它是防御性的，不应该成为常规路径。
+     * <p>
+     * 真的撞上缓存整段缺失（40039）时，会重建一次缓存并重试一次，
+     * 见 {@link #operateProgramCacheWithRebuild}。
      *
      * @param programOrderCreateDto 订单创建参数
      * @return 包含操作标识与已锁定座位列表的临时数据
@@ -533,7 +536,8 @@ public class ProgramOrderService {
         if (CollectionUtil.isNotEmpty(seatDtoList)) {
             // 选座：候选座位由用户指定，Lua 单次原子校验+锁定
             data[1] = JSON.toJSONString(addSeatDatajsonArray);
-            programCacheCreateOrderData = programCacheCreateOrderResolutionOperate.programCacheOperate(keys, data);
+            programCacheCreateOrderData = operateProgramCacheWithRebuild(keys, data, programId,
+                    getTicketCategoryList, programShowTime.getShowTime());
         } else {
             // 不选座：利用轻量排级索引在内存中极速滑动匹配（彻底消灭全量 20,000 座位传输）
             Long ticketCategoryId = programOrderCreateDto.getTicketCategoryId();
@@ -578,7 +582,8 @@ public class ProgramOrderService {
                 seatDatajsonObject.put("seatDataList", JSON.toJSONString(matchedSeatDtoList));
                 autoMatchSeatDatajsonArray.add(seatDatajsonObject);
                 data[1] = JSON.toJSONString(autoMatchSeatDatajsonArray);
-                programCacheCreateOrderData = programCacheCreateOrderResolutionOperate.programCacheOperate(keys, data);
+                programCacheCreateOrderData = operateProgramCacheWithRebuild(keys, data, programId,
+                        getTicketCategoryList, programShowTime.getShowTime());
                 // 仅对"候选座位被并发抢占"重试；其他错误（余票不足/价格不一致/限购等）直接失败
                 if (isSeatRaceError(programCacheCreateOrderData.getCode())) {
                     // 本地排级剔除被抢占座位，继续下一轮快速匹配
@@ -598,6 +603,31 @@ public class ProgramOrderService {
             throw new TicketFlowFrameException(Objects.requireNonNull(BaseCode.getRc(programCacheCreateOrderData.getCode())));
         }
         return new CreateOrderTemporaryData(identifierId, programCacheCreateOrderData.getPurchaseSeatList());
+    }
+
+    /**
+     * 执行下单 Lua；遇到「座位/余票缓存整段缺失」(40039) 时重建一次缓存并重试一次。
+     * <p>
+     * 40039 是缓存重建窗口，不是业务失败：缓存过期、被 reset、Redis 重启后，该票档的
+     * 座位三区 hash 与余票 hash 会整段消失，而数据库里座位仍是「未售」，Lua 会把每个座位
+     * 都判成 SEAT_NOT_EXIST(40001)、把每张票都判成「票档不存在」(40010)，下单直接失败。
+     * <p>
+     * 重建复用 {@link #ensureTicketCategoryCache}：它只在座位三区 hash 全不存在时才回写数据库，
+     * 所以不会把「已锁定但还没支付」的座位复活（那是超卖）。重试只做一次——第二次仍是 40039
+     * 说明问题不在缓存，按真实错误码交给调用方。
+     */
+    private ProgramCacheCreateOrderData operateProgramCacheWithRebuild(List<String> keys, String[] data,
+            Long programId, List<TicketCategoryVo> ticketCategoryList, Date showTime) {
+        ProgramCacheCreateOrderData programCacheCreateOrderData =
+                programCacheCreateOrderResolutionOperate.programCacheOperate(keys, data);
+        if (!Objects.equals(programCacheCreateOrderData.getCode(), BaseCode.CACHE_NOT_READY.getCode())) {
+            return programCacheCreateOrderData;
+        }
+        log.warn("下单时座位/余票缓存整段缺失，重建缓存后重试一次 节目id : {}", programId);
+        for (TicketCategoryVo ticketCategory : ticketCategoryList) {
+            ensureTicketCategoryCache(programId, ticketCategory.getId(), showTime);
+        }
+        return programCacheCreateOrderResolutionOperate.programCacheOperate(keys, data);
     }
 
     /**

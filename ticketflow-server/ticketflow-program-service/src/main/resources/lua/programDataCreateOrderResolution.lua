@@ -24,6 +24,7 @@
 --- 40008 — 价格不一致
 --- 40010 — 票档不存在
 --- 40011 — 余票不足
+--- 40039 — 座位/余票缓存整段缺失（重建窗口，调用方应重建缓存后重试）
 --- 0     — 成功
 ---
 --- 执行流程：
@@ -106,8 +107,17 @@ if (type == 1) then
 				ticket_remain_number_hash_key,
 				tostring(ticket_category_id))
 
-		-- 票档不存在，直接失败。
+		-- 余票 hash 整个 key 都不在：缓存过期、被 reset、Redis 重启后的重建窗口。
+		-- 但只有在同票档「锁定集合」也为空时才认作缓存未就绪——否则重建会用 DB 里的未售
+		-- 数据把「已锁定但还没支付」的座位复活（DB 尚未扣减），这是超卖。
 		if not remain_number_str then
+			local lock_hash_key_for_remain =
+				string.format(placeholder_seat_lock_hash_key, program_id, tostring(ticket_category_id))
+			if (redis.call('exists', ticket_remain_number_hash_key) == 0
+				and redis.call('exists', lock_hash_key_for_remain) == 0) then
+				return string.format('{"%s": %d}', 'code', 40039)
+			end
+			-- 票档不存在（field 级缺失但 hash 还在），直接失败。
 			return string.format('{"%s": %d}', 'code', 40010)
 		end
 
@@ -163,6 +173,13 @@ if (type == 1) then
 				end
 				if redis.call('hexists', seat_sold_hash_key, tostring(id)) == 1 then
 					return string.format('{"%s": %d}', 'code', 40003)
+				end
+				-- 三区 hash 全都不存在：缓存整段缺失（重建窗口），不是「座位不存在」。
+				-- 交给调用方重建缓存后重试；只要还有任一区存在，就按真实原因失败。
+				if (redis.call('exists', seat_no_sold_hash_key) == 0
+					and redis.call('exists', seat_lock_hash_key) == 0
+					and redis.call('exists', seat_sold_hash_key) == 0) then
+					return string.format('{"%s": %d}', 'code', 40039)
 				end
 				return string.format('{"%s": %d}', 'code', 40001)
 			end
