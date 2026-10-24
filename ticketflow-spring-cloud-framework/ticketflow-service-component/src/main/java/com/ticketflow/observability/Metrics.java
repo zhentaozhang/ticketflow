@@ -215,4 +215,42 @@ public final class Metrics {
     public static final String RESULT_AMOUNT_MISMATCH = "amount_mismatch";
     /** 条件更新 0 行，已被回调/其它实例抢先 */
     public static final String RESULT_CONCURRENT = "concurrent";
+
+    /* ==================== 延迟队列死信（order-service / program-service） ==================== */
+
+    /**
+     * 延迟队列消息转入死信的条数，tags：{@link #TAG_TOPIC}（含分区后缀的 topic）。
+     * <p>
+     * 旧实现只在写死信时打一行日志：没有指标、没有读取接口、也没有 TTL，
+     * 死信既不会被监控发现，也没有人能重放。这个指标出现非零值就意味着
+     * 「有消息重试到上限仍未被消费」，必须人工核对或重放。
+     */
+    public static final String DELAY_QUEUE_DEAD_LETTER_TOTAL = "ticketflow_delay_queue_dead_letter_total";
+    /** 指标标签名：延迟队列主题（含分区后缀） */
+    public static final String TAG_TOPIC = "topic";
+
+    /* ==================== 支付后节目数据延迟消息（order-service） ==================== */
+
+    /**
+     * V1~V3 订单支付成功后投递「节目服务 DB 收敛」延迟消息的结果总数，tags：{@link #RESULT}。
+     * <p>
+     * 旧实现投递失败只打一行日志、且不在消息对账范围内：消息没进队列，节目服务 DB
+     * 就永远停在「座位未售、余票没减」，而订单侧已经是已支付——两侧永久分叉且没有补偿入口。
+     * {@link #RESULT_FAIL} 非零就是这类裂缝，必须人工核对节目数据。
+     */
+    public static final String ORDER_PROGRAM_DATA_SEND_TOTAL = "ticketflow_order_program_data_send_total";
+
+    /* ==================== 消息对账重投（customize-service，每分钟） ==================== */
+
+    /**
+     * 可靠消息对账「重投同一条消息」的结果总数，tags：{@link #RESULT}。
+     * <p>
+     * 旧实现每次重投都把对账状态重置回「未对账」，既不记次数也不写终态，
+     * 于是同一条失败消息每分钟被无限重投，永远没有人工出口。现在每次重投
+     * 记录次数与下次时间（指数退避），超过上限转 {@code RECONCILIATION_FAIL}
+     * 并打分档为 {@link #RESULT_DEAD} 的指标——这个数字非零就是要人工介入。
+     * 取值：{@link #RESULT_SUCCESS}（重投成功）/ {@link #RESULT_RETRY}（本次失败已排下次）/
+     * {@link #RESULT_DEAD}（重投次数用尽，转人工）。
+     */
+    public static final String MESSAGE_RECONCILE_TOTAL = "ticketflow_message_reconcile_total";
 }

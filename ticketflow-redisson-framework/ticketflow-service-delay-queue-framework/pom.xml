@@ -45,6 +45,24 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
             <optional>true</optional>
+            <exclusions>
+                <!--
+                  与 ticketflow-common 带进来的 log4j-slf4j2-impl 冲突：
+                  log4j-to-slf4j 与 log4j-slf4j2-impl 同时存在会让第一个 Logger 初始化直接抛
+                  LoggingException（log4j-slf4j2-impl cannot be present with log4j-to-slf4j）。
+                  该依赖是 optional，只在本模块自身的测试 classpath 生效，不影响使用方。
+                -->
+                <exclusion>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-logging</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

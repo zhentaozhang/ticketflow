@@ -1,5 +1,7 @@
 package com.ticketflow.kafka;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -16,7 +18,10 @@ public class ProducerConfig {
     }
 
     @Bean
-    public ApiDataMessageSend apiDataMessageSend(KafkaTemplate<String, String> kafkaTemplate, KafkaTopic kafkaTopic) {
-        return new ApiDataMessageSend(kafkaTemplate, kafkaTopic.getTopic());
+    public ApiDataMessageSend apiDataMessageSend(KafkaTemplate<String, String> kafkaTemplate,
+                                                 KafkaTopic kafkaTopic,
+                                                 ObjectProvider<MeterRegistry> meterRegistryProvider) {
+        // 指标注册表可能没有（未引入 actuator/micrometer 时会 empty），生产者自己容错
+        return new ApiDataMessageSend(kafkaTemplate, kafkaTopic.getTopic(), meterRegistryProvider.getIfAvailable());
     }
 }

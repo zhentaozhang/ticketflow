@@ -70,4 +70,14 @@ public class MessageProducerRecord extends BaseTableData {
      * 消息发送时间
      */
     private Date sendTime;
+    
+    /**
+     * 对账重投次数（每次重投 +1，用于给重投设上限）
+     */
+    private Integer retryCount;
+    
+    /**
+     * 下次允许重投的时间（指数退避，未到时间不会被扫到）
+     */
+    private Date nextRetryTime;
 }

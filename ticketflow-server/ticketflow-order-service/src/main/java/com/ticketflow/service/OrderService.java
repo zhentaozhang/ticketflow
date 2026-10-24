@@ -1312,7 +1312,12 @@ public class OrderService extends ServiceImpl<OrderMapper, Order> {
             orderProgramCacheResolutionOperate.programCacheReverseOperate(keys, data);
             if (Objects.equals(orderStatus.getCode(), OrderStatus.PAY.getCode())) {
                 programOperateDataDto.setSellStatus(SellStatus.SOLD.getCode());
-                delayOperateProgramDataSend.sendMessage(JSON.toJSONString(programOperateDataDto));
+                if (!delayOperateProgramDataSend.sendMessage(JSON.toJSONString(programOperateDataDto))) {
+                    // V1~V3 没有 DB 侧 outbox 兜底：消息没进队列，节目服务 DB 就永久停在
+                    // 「座位未售、余票没减」，订单侧却已经支付，只能人工按订单号补数据。
+                    log.error("支付后节目数据延迟消息投递失败，节目服务 DB 可能未收敛，需人工核对 orderNumber : {} programId : {}",
+                            identifierId, programId);
+                }
             }
         } else {
             //V4：只 Lua 收敛 Redis 权威数据（座位三区/余票）。

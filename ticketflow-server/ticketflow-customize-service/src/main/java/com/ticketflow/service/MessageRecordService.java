@@ -120,6 +120,15 @@ public class MessageRecordService {
         if (Objects.isNull(messageType)) {
             throw new TicketFlowFrameException(BaseCode.MESSAGE_TYPE_NOT_EXIST);
         }
+        // 人工重投：把自动重投次数与退避时间清零，给这条消息重新 5 次机会。
+        // 不清零的话，已转「对账有问题」的消息一进 handle 就直接再判一次上限、永远投不出去。
+        MessageProducerRecord resetMessageProducerRecord = new MessageProducerRecord();
+        resetMessageProducerRecord.setId(existMessageProducerRecord.getId());
+        resetMessageProducerRecord.setRetryCount(0);
+        resetMessageProducerRecord.setNextRetryTime(null);
+        messageProducerRecordMapper.updateById(resetMessageProducerRecord);
+        existMessageProducerRecord.setRetryCount(0);
+        existMessageProducerRecord.setNextRetryTime(null);
         return exceptionMessageHandlerContext.getExceptionMessageHandler(messageType)
                 .handle(existMessageProducerRecord);
     }
@@ -150,11 +159,12 @@ public class MessageRecordService {
                         };
                         reconciliationTaskQueue.putTask(reconciliationTask);
                     }else {
-                        // 发送成功 + 消费成功 → 标记对账成功
-                        Integer messageSendStatus = messageProducerRecord.getMessageSendStatus();
+                        // 消费成功 → 标记对账成功。
+                        // 旧实现要求「发送状态也是成功」才算，于是「发送失败 + 消费成功」这种
+                        // 消息（首次发送超时/异常，但消费者其实收到并处理了）既不会重投也不会被标成功，
+                        // 永远卡在未对账。消费成功本身就是消息已送达并被处理的证据。
                         Integer messageConsumerStatus = messageConsumerRecord.getMessageConsumerStatus();
-                        if (messageSendStatus.equals(MessageSendStatus.SEND_SUCCESS.getCode()) &&
-                                messageConsumerStatus.equals(MessageConsumerStatus.CONSUMER_SUCCESS.getCode())) {
+                        if (messageConsumerStatus.equals(MessageConsumerStatus.CONSUMER_SUCCESS.getCode())) {
                             messageProducerRecordService.updateToReconciliationSuccess(messageProducerRecord,messageConsumerRecord);
                         }
                     }

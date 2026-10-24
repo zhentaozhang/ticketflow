@@ -11,6 +11,7 @@ import com.ticketflow.dto.OrderPayCheckDto;
 import com.ticketflow.dto.OrderPayDto;
 import com.ticketflow.dto.OrderSimpleListDto;
 import com.ticketflow.dto.ProgramGetDto;
+import com.ticketflow.event.DelayQueueInitHandler;
 import com.ticketflow.properties.ApiVerify;
 import com.ticketflow.scheduletask.ReconciliationTask;
 import com.ticketflow.service.OrderService;
@@ -30,6 +31,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 订单 API——订单列表/详情/创建/取消/对账
@@ -50,6 +52,12 @@ public class OrderController {
     
     @Autowired
     private ApiVerify apiVerify;
+
+    @Autowired
+    private DelayQueueInitHandler delayQueueInitHandler;
+
+    /** 死信读取上限：只用于运维巡检与人工重放，避免一次拉空整个死信队列。 */
+    private static final int DEAD_LETTER_READ_LIMIT = 20;
     
     
     @Operation(summary  = "订单创建(不提供给前端调用，只允许内部program服务调用)")
@@ -127,6 +135,14 @@ public class OrderController {
         return ApiResponse.ok();
     }
     
+    @Operation(summary  = "查看延迟队列死信消息(不提供给前端调用，只用于运维巡检与人工重放)")
+    @PostMapping(value = "/delay/dead-letter")
+    public ApiResponse<Map<String, List<String>>> delayDeadLetter() {
+        apiVerify.verifyApi();
+        // 死信状态按分区切成 isolationRegionCount 份，这里合并返回，避免运维挨个 redis-cli 找 key
+        return ApiResponse.ok(delayQueueInitHandler.getDeadLetters(DEAD_LETTER_READ_LIMIT));
+    }
+
     @Operation(summary  = "通过订单编号或者用户id查询订单列表")
     @PostMapping(value = "/simple/list")
     public ApiResponse<List<OrderListVo>> simpleList(@Valid @RequestBody OrderSimpleListDto orderSimpleListDto) {

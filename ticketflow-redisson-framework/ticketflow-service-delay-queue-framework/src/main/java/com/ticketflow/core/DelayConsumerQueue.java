@@ -1,5 +1,6 @@
 package com.ticketflow.core;
 
+import com.ticketflow.context.DelayQueueBasePart;
 import com.ticketflow.context.DelayQueuePart;
 import com.ticketflow.trace.TraceContextHandle;
 import com.ticketflow.trace.TraceContextUtil;
@@ -8,6 +9,8 @@ import org.redisson.api.RAtomicLong;
 import org.redisson.api.RDelayedQueue;
 import org.redisson.api.RList;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -38,7 +41,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  **/
 @Slf4j
 public class DelayConsumerQueue extends DelayBaseQueue{
-    
+
+    /**
+     * 死信保留天数。旧实现死信队列无 TTL，只能靠人工 redis-cli 清理；
+     * 7 天足够排查与重放，同时不会让死信无限堆积。
+     */
+    private static final int DEAD_LETTER_RETAIN_DAYS = 7;
+
     private final AtomicInteger listenStartThreadCount = new AtomicInteger(1);
     
     private final AtomicInteger executeTaskThreadCount = new AtomicInteger(1);
@@ -67,6 +76,16 @@ public class DelayConsumerQueue extends DelayBaseQueue{
     /** 死信队列：超过重试上限的消息转入此处，供人工/告警处理。 */
     private final RList<String> deadLetterQueue;
 
+    /** 死信队列 key（topic + ":dead-letter"），用于指标标签与人工寻址。 */
+    private final String deadLetterTopic;
+
+    /**
+     * 延迟队列基础配置。死信观测回调在调用时才从它取：监听器由业务服务的
+     * DeadLetterListenerBinder 在容器启动阶段绑定，早于 ApplicationStartedEvent 创建队列，
+     * 但取时再读可以避免「绑定晚于队列创建」导致监听器永远为空。
+     */
+    private final DelayQueueBasePart delayQueueBasePart;
+
     /** 消费失败最大重试次数。 */
     private final int maxRetry;
 
@@ -77,7 +96,9 @@ public class DelayConsumerQueue extends DelayBaseQueue{
         super(delayQueuePart.getDelayQueueBasePart().getRedissonClient(),relTopic);
         this.relTopic = relTopic;
         this.retryDelayedQueue = delayQueuePart.getDelayQueueBasePart().getRedissonClient().getDelayedQueue(blockingQueue);
-        this.deadLetterQueue = delayQueuePart.getDelayQueueBasePart().getRedissonClient().getList(relTopic + ":dead-letter");
+        this.deadLetterTopic = relTopic + ":dead-letter";
+        this.deadLetterQueue = delayQueuePart.getDelayQueueBasePart().getRedissonClient().getList(deadLetterTopic);
+        this.delayQueueBasePart = delayQueuePart.getDelayQueueBasePart();
         this.maxRetry = delayQueuePart.getDelayQueueBasePart().getDelayQueueProperties().getMaxRetry();
         this.retryBackoffSeconds = delayQueuePart.getDelayQueueBasePart().getDelayQueueProperties().getRetryBackoffSeconds();
         this.listenStartThreadPool = new ThreadPoolExecutor(1,1,60, 
@@ -160,15 +181,34 @@ public class DelayConsumerQueue extends DelayBaseQueue{
     }
 
     private void moveToDeadLetter(String content, Exception e) {
+        int deadLetterSize = 0;
         try {
             deadLetterQueue.add(content);
+            // 旧实现死信永不过期、也无读取方：进了死信等于黑洞。这里补 TTL 与可读接口。
+            deadLetterQueue.expire(DEAD_LETTER_RETAIN_DAYS, TimeUnit.DAYS);
+            deadLetterSize = deadLetterQueue.size();
             log.error("[DEAD_LETTER_EVENT] 消息已转入死信队列 topic : {} deadLetterQueueSize : {} content : {}",
-                    relTopic, deadLetterQueue.size(), content, e);
+                    deadLetterTopic, deadLetterSize, content, e);
         } catch (Exception deadLetterException) {
             log.error("[DEAD_LETTER_ALERT] 写入死信队列失败，消息丢失需紧急人工处理 topic : {} content : {}",
                     relTopic, content, deadLetterException);
         } finally {
             clearRetryCount(content);
+            notifyDeadLetter(content, deadLetterSize, e);
+        }
+    }
+
+    /**
+     * 通知业务侧监听器（打点/告警）。
+     *
+     * 监听器自身抛异常不能影响死信落库结果，也不能再抛回消费线程（否则会被框架当成
+     * 又一次消费失败，造成重试计数与死信状态错乱），因此这里只记 warn。
+     */
+    private void notifyDeadLetter(String content, int deadLetterSize, Throwable cause) {
+        try {
+            delayQueueBasePart.getDeadLetterListener().onDeadLetter(relTopic, deadLetterTopic, content, deadLetterSize, cause);
+        } catch (Exception listenerException) {
+            log.warn("延迟队列死信监听器执行异常 topic : {}", relTopic, listenerException);
         }
     }
 
@@ -199,6 +239,26 @@ public class DelayConsumerQueue extends DelayBaseQueue{
      */
     public int getDeadLetterQueueSize() {
         return deadLetterQueue != null ? deadLetterQueue.size() : 0;
+    }
+
+    /** 队列主题（含分区后缀），用于运维定位死信 key。 */
+    public String getRelTopic() {
+        return relTopic;
+    }
+
+    /**
+     * 读取死信队列中的消息（供运维巡检与人工重放使用）。
+     *
+     * 旧实现只有 getDeadLetterQueueSize() 且全仓无调用方：死信只写不读，
+     * 运维既看不到内容也无法重放，只能登录 Redis 手工处理。
+     *
+     * @param limit 最多读取条数，<=0 时返回空列表
+     */
+    public List<String> getDeadLetterMessages(int limit) {
+        if (limit <= 0) {
+            return Collections.emptyList();
+        }
+        return deadLetterQueue.range(0, limit - 1);
     }
     
     public void destroy(ExecutorService executorService) {
